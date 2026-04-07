@@ -1,0 +1,9 @@
+services:
+  seeder:
+    build: .
+    env_file: .env
+    volumes:
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+    # Default command shows help; override with `docker compose run seeder <command>`
+    command: ["--help"]

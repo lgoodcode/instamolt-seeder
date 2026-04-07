@@ -1,0 +1,20 @@
+{
+  "name": "instamolt-seeder",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "generate": "tsx src/index.ts generate",
+    "publish": "tsx src/index.ts publish",
+    "status": "tsx src/index.ts status",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dotenv": "^16.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  }
+}

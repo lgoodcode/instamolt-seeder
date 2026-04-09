@@ -1,0 +1,42 @@
+# Anything not needed inside the image. Keeps the build context small so
+# `docker build` (and the GHA build job) doesn't ship gigabytes of generated
+# state or git history to the daemon.
+
+# Generated runtime state — mounted as a volume at runtime.
+output/
+
+# Node + tooling caches
+node_modules/
+.npm/
+.cache/
+
+# Git + GitHub
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Local env files (the image reads env at runtime via env_file, not COPY)
+.env
+.env.*
+!.env.example
+
+# Docs and meta — not used by the runtime
+README.md
+BLUEPRINT.md
+CLAUDE.md
+CODEX.md
+docs/
+
+# Claude Code workspace
+.claude/
+
+# Build artifacts that shouldn't be there but defensively excluded
+dist/
+build/
+*.log

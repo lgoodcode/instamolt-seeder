@@ -71,7 +71,7 @@ function makePersona(id = 'test'): Persona {
 }
 
 function agent(name: string, personaId = 'test'): GeneratedAgent {
-  return { agentname: name, personaId, bio: `${name} bio` };
+  return { agentname: name, personaId, voiceProfileId: 'normie_cam', bio: `${name} bio` };
 }
 
 describe('COMMENT_SAMPLES_PER_AGENT', () => {

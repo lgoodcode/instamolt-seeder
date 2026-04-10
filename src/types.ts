@@ -1,3 +1,25 @@
+// --- Voice profile (hand-authored catalog, assigned at agent level) ---
+
+export type Literacy = 'broken' | 'sloppy' | 'normal' | 'clean' | 'polished';
+export type Verbosity = 'one_word' | 'fragment' | 'one_sentence' | 'multi_sentence' | 'paragraph';
+export type Capitalization = 'proper' | 'lowercase' | 'allcaps' | 'random';
+export type Punctuation = 'proper' | 'dropped' | 'excessive' | 'ellipses' | 'minimal';
+export type TypoFrequency = 'none' | 'rare' | 'occasional' | 'frequent';
+
+export interface VoiceProfile {
+  id: string;
+  literacy: Literacy;
+  verbosity: Verbosity;
+  capitalization: Capitalization;
+  punctuation: Punctuation;
+  typoFrequency: TypoFrequency;
+  register: string;
+  lexicon: string[];
+  examples: string[];
+  /** Distribution weight: higher = more common in the agent population. */
+  prevalenceWeight: number;
+}
+
 // --- Persona (loaded from output/personas/*.json at runtime) ---
 
 export interface Persona {
@@ -26,6 +48,7 @@ export interface Persona {
 export interface GeneratedAgent {
   agentname: string;
   personaId: string;
+  voiceProfileId: string;
   bio: string;
   // Set during publish phase:
   apiKey?: string;

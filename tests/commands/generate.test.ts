@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Persona } from '@/types';
+import type { Persona, VoiceProfile } from '@/types';
 
 vi.stubEnv('GEMINI_API_KEY', 'test-key');
 
@@ -92,19 +92,21 @@ const personaMocks = vi.hoisted(() => ({
 vi.mock('@/personas/index', () => personaMocks);
 
 const registryMocks = vi.hoisted(() => ({
-  getDistribution:
+  getAgentAssignments:
     vi.fn<
       (
         count: number,
         personas: Map<string, Persona>,
-      ) => Array<{
-        persona: Persona;
-        count: number;
-      }>
+        voiceProfiles: Map<string, VoiceProfile>,
+      ) => Array<{ persona: Persona; voiceProfile: VoiceProfile }>
     >(),
 }));
 
 vi.mock('@/personas/registry', () => registryMocks);
+
+vi.mock('@/voice-profiles/index', () => ({
+  loadVoiceProfiles: vi.fn(() => new Map()),
+}));
 
 // generate.ts now writes through src/ui.ts. Mock as no-op so test output isn't
 // polluted by spinner escape codes and ui.note doesn't try to render.
@@ -137,6 +139,24 @@ vi.mock('@/lib/ui', () => ({
 }));
 
 import { generate } from '@/commands/generate';
+
+const dummyVoice: VoiceProfile = {
+  id: 'normie_cam',
+  literacy: 'normal',
+  verbosity: 'one_sentence',
+  capitalization: 'proper',
+  punctuation: 'proper',
+  typoFrequency: 'none',
+  register: 'casual normal',
+  lexicon: ['wow'],
+  examples: ['Wow.'],
+  prevalenceWeight: 4,
+};
+
+/** Build a flat assignment list of N entries for a single persona. */
+function assignN(persona: Persona, n: number) {
+  return Array.from({ length: n }, () => ({ persona, voiceProfile: dummyVoice }));
+}
 
 function makePersona(id: string, personality = 'A very thoughtful AI agent.'): Persona {
   return {
@@ -178,7 +198,7 @@ describe('generate', () => {
     llmMocks.generatePostContent.mockReset();
     llmMocks.generateComment.mockReset();
     personaMocks.loadPersonas.mockReset();
-    registryMocks.getDistribution.mockReset();
+    registryMocks.getAgentAssignments.mockReset();
 
     // Default mock returns content with disjoint vocabulary per call so the
     // similarity gate never trips during tests that don't care about the
@@ -220,7 +240,7 @@ describe('generate', () => {
   it('writes agent.json files and the master index for each created agent', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
     llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
@@ -246,7 +266,7 @@ describe('generate', () => {
   it('retries the bio once and falls back to persona.personality when still too short', async () => {
     const p = makePersona('test-persona', 'A very thoughtful curious bot. Built from computation.');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     // Both Gemini attempts return a too-short bio.
     llmMocks.generateBio.mockResolvedValueOnce('too short').mockResolvedValueOnce('bad bio');
@@ -263,7 +283,7 @@ describe('generate', () => {
   it('does not retry the bio when the first attempt already has 3+ words', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     llmMocks.generateBio.mockResolvedValue('This bio has enough words');
 
@@ -275,7 +295,7 @@ describe('generate', () => {
   it('writes the expected number of post files per agent', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
@@ -291,7 +311,7 @@ describe('generate', () => {
   it('skips personas that already have the requested number of agents', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
 
     // Prime agents.json with an existing agent for this persona.
     fsState.files.set(
@@ -321,7 +341,7 @@ describe('generate', () => {
   it('treats an invalid agents.json as no existing state', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
@@ -336,7 +356,7 @@ describe('generate', () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
     // Distribution wants 2 of this persona; one already exists, so 1 will be created.
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
     llmMocks.generateAgentName.mockResolvedValue('beta');
     llmMocks.generateBio.mockResolvedValue('A second very thoughtful AI mind');
 
@@ -369,7 +389,7 @@ describe('generate', () => {
   it('passes accumulating prior posts into generatePostContent across an agent', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
     // Return distinct content per call so the similarity gate is satisfied.
@@ -412,7 +432,7 @@ describe('generate', () => {
   it('shares peer-post context across agents in the same persona block', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
     llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
     // Each post is distinct enough to clear the similarity gate.
@@ -444,7 +464,7 @@ describe('generate', () => {
     it('writes a comments.json per agent with the expected number of samples', async () => {
       const p = makePersona('test-persona');
       personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-      registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
       llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
       llmMocks.generateComment.mockResolvedValue('a sharp little reply');
@@ -476,7 +496,7 @@ describe('generate', () => {
     it("never uses the agent's own captions as a comment source", async () => {
       const p = makePersona('test-persona');
       personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-      registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
       llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
       llmMocks.generateComment.mockResolvedValue('ok');
@@ -501,7 +521,7 @@ describe('generate', () => {
     it('skips agents that already have a comments.json (idempotent re-run)', async () => {
       const p = makePersona('test-persona');
       personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-      registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 2 }]);
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
       llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
       llmMocks.generateComment.mockResolvedValue('fresh bake');
@@ -537,7 +557,7 @@ describe('generate', () => {
     it('gracefully skips the bake phase when the captions pool is too small', async () => {
       const p = makePersona('test-persona');
       personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-      registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
       llmMocks.generateAgentName.mockResolvedValue('alpha');
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
@@ -553,7 +573,7 @@ describe('generate', () => {
   it('retries the post once when similarity to a prior post is too high', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
-    registryMocks.getDistribution.mockReturnValue([{ persona: p, count: 1 }]);
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
     llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 

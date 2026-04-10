@@ -77,7 +77,7 @@ Workflow:
 
 Workflow:
 1. `loadPersonas()` → Map of all personas loaded from `output/personas/*.json`. Auto-seeds via `seedPersonas()` on the first call if the directory is empty.
-2. `getDistribution(N, personas)` → weighted allocation by each persona's `weight` field (see §5).
+2. `loadVoiceProfiles()` → Map of the 27 hand-authored voice profiles from [src/voice-profiles/catalog.ts](../src/voice-profiles/catalog.ts). Then `getAgentAssignments(N, personas, voiceProfiles)` → flat list of `{ persona, voiceProfile }` pairs guaranteeing coverage of both axes (see §5.5). Replaces the old `getDistribution()` call (which is still used internally by Phase 2 of the assignment algorithm).
 3. **Build per-persona de-dup context.** Try to load `output/dedup-index.json` (managed by [src/lib/dedup-index.ts](../src/lib/dedup-index.ts)) and project it into two in-memory maps (`bioContext`, `postContext`) keyed by `personaId`. The projection drops indexed agents not present in `agents.json` so the delete-and-regenerate workflow stays clean. If the index is missing, malformed, or version-mismatched, fall back to walking `output/agents/*/agent.json` + `post-*.json` (the same logic that lived here before the index shipped) and rebuild the index from the walk results so the *next* run is fast. The fallback is logged at warn level but never hard-fails. The maps are mutated as new content is created during the run, so later agents in the same persona block see what earlier ones produced; the dedup index object is mutated in lockstep via `appendAgentToIndex` so a crash mid-run leaves a valid-but-partial index after the next successful write.
 4. For each allocation:
    - Call `generateAgentName(persona, existingNames)` (existing names are passed so Gemini avoids collisions).
@@ -218,12 +218,15 @@ Rewritten by `generate` (append) and `publish` (refresh after registration pass)
 {
   agentname: string;        // Written by generate
   personaId: string;        // Written by generate
+  voiceProfileId: string;   // Written by generate — references a catalog entry from src/voice-profiles/catalog.ts
   bio: string;              // Written by generate (3-word minimum enforced here)
   apiKey?: string;          // Written by publish after challenge completion
   registeredAt?: string;    // Written by publish (ISO)
   lastCommentedAt?: string; // Written by engage on each successful comment (ISO)
 }
 ```
+
+`voiceProfileId` identifies one of the 27 hand-authored voice profiles from [src/voice-profiles/catalog.ts](../src/voice-profiles/catalog.ts). It controls how the agent types (literacy, verbosity, capitalization, punctuation, typos) and is assigned at the agent level — two agents sharing the same persona can have different voice profiles. See §5.5 for the distribution algorithm.
 
 Note: `avatarPrompt` was removed from `GeneratedAgent` and the generation flow entirely — avatars are now sourced elsewhere. Do not reintroduce it without an upstream contract change.
 
@@ -366,6 +369,27 @@ Personas are runtime data. Three flows:
 3. **Start over.** `npm run seed-personas -- --force` wipes `output/personas/` and regenerates the whole set from scratch.
 
 Do **not** commit persona files back into `src/personas/`. That directory holds only loader + distribution logic. If you want a hand-authored persona to survive a `--force` wipe, keep a copy outside `output/` and re-place it into `output/personas/` after seeding.
+
+### 5.5 Voice profile distribution
+
+[src/personas/registry.ts](../src/personas/registry.ts) — `getAgentAssignments(targetCount, personas, voiceProfiles)`. Assigns each agent a `(persona, voiceProfile)` pair with two-axis coverage guarantees. The algorithm has two phases:
+
+**Phase 1 — Coverage seeding (deterministic).** Pairs each persona with a unique voice profile (sorted by weight/prevalenceWeight descending). If there are more personas than voice profiles, the surplus personas get profiles from the "common" pool (prevalenceWeight >= 3). If the reverse, surplus profiles cycle through high-weight personas. Result: `max(P, V)` assignments covering every persona and every voice profile at least once.
+
+**Phase 2 — Weighted remainder (stochastic).** Uses `getDistribution()` to compute per-persona target counts, then fills the shortfall for each persona via a weighted random voice draw. The draw uses each profile's `prevalenceWeight` scaled by a diminishing-returns factor `1 / (1 + existingCount)` per (persona, voice) pair — prevents any single combo from dominating while keeping the distribution organic.
+
+Voice profiles are the 27 hand-authored archetypes from [src/voice-profiles/catalog.ts](../src/voice-profiles/catalog.ts), documented in [docs/VOICE-PROFILE-CATALOG.md](./VOICE-PROFILE-CATALOG.md). Each profile has a `prevalenceWeight` (1–4) that controls population frequency after coverage is met:
+
+| Weight | Meaning | Example profiles |
+|--------|---------|-----------------|
+| 4 | Very common | `normie_cam`, `tired_teen_22` |
+| 3 | Common | `hot_take_machine`, `reply_guy_steve`, `emoji_narrator` |
+| 2 | Moderate | `crypto_bro_42`, `doom_pixel`, `sports_desk_mike` |
+| 1 | Rare | `the_gremlin`, `caps_lock_dad`, `art_critic_3000` |
+
+The `voiceProfileId` lives on `GeneratedAgent` (§4.2), not on `Persona`. This means two agents sharing the same persona can type differently — enabling Y = n x m combinatorial diversity across the persona (content personality) and voice (typing style) axes.
+
+Full design rationale: [docs/DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.md).
 
 ## 6. External integrations
 

@@ -255,8 +255,8 @@ describe('projectIndexToContext', () => {
 describe('buildIndexFromAgents (fallback path snapshot)', () => {
   it('builds an index from a roster + per-agent post map', () => {
     const agents: GeneratedAgent[] = [
-      { agentname: 'alpha', personaId: 'p1', bio: 'alpha bio' },
-      { agentname: 'beta', personaId: 'p2', bio: 'beta bio' },
+      { agentname: 'alpha', personaId: 'p1', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+      { agentname: 'beta', personaId: 'p2', voiceProfileId: 'normie_cam', bio: 'beta bio' },
     ];
     const posts = new Map<string, GeneratedPost[]>([
       [

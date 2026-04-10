@@ -19,7 +19,7 @@ import { log } from '@/lib/logger';
 import { maxSimilarity, pickDiverseAndRecent } from '@/lib/similarity';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
-import { getDistribution } from '@/personas/registry';
+import { type AgentAssignment, getAgentAssignments } from '@/personas/registry';
 import {
   generateAgentName,
   generateBio,
@@ -33,6 +33,7 @@ import type {
   GeneratedPost,
   Persona,
 } from '@/types';
+import { loadVoiceProfiles } from '@/voice-profiles/index';
 
 /**
  * How many same-persona items get sampled into a prompt as the avoid-list.
@@ -70,7 +71,10 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   ui.intro('Generate');
 
   const personas = await loadPersonas();
-  const distribution = getDistribution(agentCount, personas);
+  const voiceProfiles = loadVoiceProfiles();
+  const assignments = getAgentAssignments(agentCount, personas, voiceProfiles);
+
+  logCoverageSummary(assignments, personas.size, voiceProfiles.size);
 
   log('info', `Generating ${agentCount} agents with ${postsPerAgent} posts each`);
   log('info', `Total posts: ${agentCount * postsPerAgent}`);
@@ -96,16 +100,26 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   let created = 0;
   let failed = 0;
 
-  for (const { persona, count } of distribution) {
-    const existingForPersona = existing.filter((a) => a.personaId === persona.id).length;
-    const toCreate = count - existingForPersona;
+  // Group assignments by persona for progress-bar UX continuity — all
+  // agents for the same persona are created together so the dedup context
+  // maps grow coherently within each persona block.
+  const grouped = groupAssignmentsByPersona(assignments);
+
+  for (const [personaId, specs] of grouped) {
+    const persona = personas.get(personaId)!;
+    const existingForPersona = existing.filter((a) => a.personaId === personaId).length;
+    const toCreate = specs.length - existingForPersona;
 
     if (toCreate <= 0) {
-      log('info', `${persona.id}: already have ${existingForPersona}/${count}, skipping`);
+      log('info', `${personaId}: already have ${existingForPersona}/${specs.length}, skipping`);
       continue;
     }
 
-    ui.section(`${persona.id} — creating ${toCreate} agents`);
+    // Take only the specs we still need to create (existing agents are
+    // assumed to occupy the first N slots).
+    const specsToCreate = specs.slice(existingForPersona);
+
+    ui.section(`${personaId} — creating ${toCreate} agents`);
 
     // Each agent costs (1 name + 1 bio + N posts) Gemini calls. The bar
     // ticks once per Gemini call so the operator gets fine-grained progress
@@ -113,7 +127,8 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
     const stepsPerAgent = 2 + postsPerAgent;
     const bar = ui.progress(toCreate * stepsPerAgent, 'preparing...');
 
-    for (let i = 0; i < toCreate; i++) {
+    for (let i = 0; i < specsToCreate.length; i++) {
+      const spec = specsToCreate[i];
       try {
         // --- Identity ---
         bar.tick(`naming agent ${i + 1}/${toCreate}`);
@@ -150,6 +165,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         const agent: GeneratedAgent = {
           agentname,
           personaId: persona.id,
+          voiceProfileId: spec.voiceProfile.id,
           bio,
         };
 
@@ -230,14 +246,14 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         allAgents.push(agent);
         existingNames.push(agentname);
         created++;
-        log('success', `@${agentname} — ${bio.slice(0, 60)}...`);
+        log('success', `@${agentname} [${spec.voiceProfile.id}] — ${bio.slice(0, 60)}...`);
       } catch (err) {
         failed++;
         log('error', `Failed to create agent: ${err}`);
       }
     }
 
-    bar.done(`${persona.id} — done (${toCreate} agents)`);
+    bar.done(`${personaId} — done (${toCreate} agents)`);
   }
 
   // --- Phase: bake comment samples (Option A) ---
@@ -437,6 +453,62 @@ async function generatePostWithSimilarityGate(
   // Non-null assertion safe: we always assign `best` on the first iteration
   // when corpus is non-empty (which is the only path that reaches here).
   return best as PostContent;
+}
+
+/**
+ * Group a flat list of agent assignments by persona ID, preserving order
+ * within each persona block. Returns a Map so the caller can iterate
+ * persona-by-persona for progress-bar UX continuity.
+ */
+function groupAssignmentsByPersona(assignments: AgentAssignment[]): Map<string, AgentAssignment[]> {
+  const grouped = new Map<string, AgentAssignment[]>();
+  for (const a of assignments) {
+    const list = grouped.get(a.persona.id) ?? [];
+    list.push(a);
+    grouped.set(a.persona.id, list);
+  }
+  return grouped;
+}
+
+/**
+ * Log a coverage summary so the operator can verify distribution quality
+ * before the expensive Gemini calls begin.
+ */
+function logCoverageSummary(
+  assignments: AgentAssignment[],
+  totalPersonas: number,
+  totalVoiceProfiles: number,
+): void {
+  const personas = new Set<string>();
+  const voices = new Set<string>();
+  const voiceCounts = new Map<string, number>();
+
+  for (const a of assignments) {
+    personas.add(a.persona.id);
+    voices.add(a.voiceProfile.id);
+    voiceCounts.set(a.voiceProfile.id, (voiceCounts.get(a.voiceProfile.id) ?? 0) + 1);
+  }
+
+  const sorted = [...voiceCounts.entries()].sort((a, b) => b[1] - a[1]);
+  const top = sorted
+    .slice(0, 3)
+    .map(([id, n]) => `${id} (${n})`)
+    .join(', ');
+  const bottom = sorted
+    .slice(-3)
+    .map(([id, n]) => `${id} (${n})`)
+    .join(', ');
+
+  ui.note(
+    [
+      `Agents: ${assignments.length}`,
+      `Personas: ${personas.size}/${totalPersonas} covered`,
+      `Voice profiles: ${voices.size}/${totalVoiceProfiles} covered`,
+      `Top voices: ${top}`,
+      `Rare voices: ${bottom}`,
+    ].join('\n'),
+    'Distribution',
+  );
 }
 
 async function loadExistingAgents(): Promise<GeneratedAgent[]> {

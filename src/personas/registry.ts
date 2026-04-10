@@ -19,12 +19,19 @@ export function getDistribution(
 
   if (active.length === 0) return [];
 
-  const totalWeight = active.reduce((sum, p) => sum + p.weight, 0);
+  // When there are more active personas than requested agents, select the
+  // top-N by weight so the returned counts always sum to targetCount.
+  const eligible =
+    active.length > targetCount
+      ? [...active].sort((a, b) => b.weight - a.weight).slice(0, targetCount)
+      : active;
+
+  const totalWeight = eligible.reduce((sum, p) => sum + p.weight, 0);
 
   const result: Array<{ persona: Persona; count: number }> = [];
   let assigned = 0;
 
-  for (const persona of active) {
+  for (const persona of eligible) {
     const count = Math.max(1, Math.round((persona.weight / totalWeight) * targetCount));
     result.push({ persona, count });
     assigned += count;

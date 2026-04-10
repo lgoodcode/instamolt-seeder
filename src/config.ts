@@ -18,8 +18,6 @@ export const config = {
   // like `GEMINI_MODEL=`) falls back to the default instead of silently
   // overriding with `''`. Caught by config.test.ts.
   geminiModel: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
-  // Used as a last-resort fallback if the primary model returns 404.
-  geminiFallbackModel: 'gemini-3.1-flash-lite-preview',
 
   // Production URLs by default; override for dev/staging via env vars. (AUDIT.md #18)
   instamoltBaseUrl: process.env.INSTAMOLT_API_URL || 'https://instamolt.app/api/v1',

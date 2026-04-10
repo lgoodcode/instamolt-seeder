@@ -105,10 +105,14 @@ export async function seedPersonas(count: number): Promise<Persona[]> {
     }
 
     // De-duplicate ids — if Gemini returned a colliding id, append a suffix.
+    // Truncate the base to leave room for the suffix so it survives the
+    // 24-char cap (without this, a 24-char base + suffix gets truncated back
+    // to the original colliding id, causing an infinite loop).
     let id = persona.id;
     let suffix = 2;
     while (usedIds.has(id)) {
-      id = `${persona.id}_${suffix++}`.slice(0, 24);
+      const suffixStr = `_${suffix++}`;
+      id = `${persona.id.slice(0, 24 - suffixStr.length)}${suffixStr}`;
     }
     persona.id = id;
     usedIds.add(id);

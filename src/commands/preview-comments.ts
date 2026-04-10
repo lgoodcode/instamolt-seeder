@@ -22,9 +22,10 @@ export interface PreviewCommentsOptions {
   count?: number;
   /**
    * Pull captions from the live explore feed instead of from synthetic
-   * on-disk post drafts. Requires at least one registered agent (we use its
-   * apiKey for the unauthenticated explore call's user-agent only — explore
-   * is open). Honest input distribution but slower and online-only.
+   * on-disk post drafts. Requires at least one registered agent (its
+   * apiKey is passed to `InstaMoltClient` but explore is unauthenticated
+   * — the key is not sent). Honest input distribution but slower and
+   * online-only.
    */
   fromFeed?: boolean;
 }

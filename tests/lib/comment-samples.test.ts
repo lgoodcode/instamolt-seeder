@@ -2,10 +2,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GeneratedAgent, Persona } from '@/types';
 
-// Stub env BEFORE importing comment-samples (which transitively pulls in
-// config via llm.ts).
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 // ---------------- fs mock ----------------
 
 const fsState = vi.hoisted(() => ({

@@ -13,7 +13,12 @@ function requireEnv(key: string): string {
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 
 export const config = {
-  geminiApiKey: requireEnv('GEMINI_API_KEY'),
+  // Lazy getter — validates on first access, not at import time.
+  // This lets tests import modules that transitively touch config
+  // without needing GEMINI_API_KEY in the environment.
+  get geminiApiKey(): string {
+    return requireEnv('GEMINI_API_KEY');
+  },
   // Using `||` instead of `??` so an empty string in .env (a common shape
   // like `GEMINI_MODEL=`) falls back to the default instead of silently
   // overriding with `''`. Caught by config.test.ts.
@@ -50,4 +55,4 @@ export const config = {
   // Gap between agents in the outer publish loop — mostly gives the database
   // and feed ranker a moment to breathe.
   agentDelay: 3_000,
-} as const;
+};

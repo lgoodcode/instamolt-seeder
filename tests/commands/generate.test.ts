@@ -2,8 +2,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Persona, VoiceProfile } from '@/types';
 
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 // Minimal in-memory fs. Only the operations used by generate.ts are modelled.
 const fsState = vi.hoisted(() => ({
   files: new Map<string, string>(),

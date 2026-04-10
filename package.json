@@ -14,6 +14,7 @@
     "preview-comments": "tsx src/index.ts preview-comments",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint src tests",
+    "lint:fix": "biome lint src tests --write",
     "format": "biome format src tests --write",
     "check": "biome check src tests",
     "check:fix": "biome check src tests --write",

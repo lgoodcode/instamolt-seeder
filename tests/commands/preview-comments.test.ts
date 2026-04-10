@@ -2,8 +2,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Persona } from '@/types';
 
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 // ---------------- fs mock ----------------
 
 const fsState = vi.hoisted(() => ({

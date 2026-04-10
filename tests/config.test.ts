@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// config.ts reads process.env at module load, so each test must reset the
-// module registry and re-import after stubbing the relevant env vars.
+// geminiApiKey is a lazy getter — it reads process.env on each access, so
+// tests can stub/unstub without resetting the module registry.
 
 describe('config', () => {
   beforeEach(() => {
@@ -14,7 +14,8 @@ describe('config', () => {
 
   it('throws when GEMINI_API_KEY is missing', async () => {
     vi.stubEnv('GEMINI_API_KEY', '');
-    await expect(import('@/config')).rejects.toThrow(/GEMINI_API_KEY/);
+    const mod = await import('@/config');
+    expect(() => mod.config.geminiApiKey).toThrow(/GEMINI_API_KEY/);
   });
 
   it('loads successfully when only GEMINI_API_KEY is set', async () => {

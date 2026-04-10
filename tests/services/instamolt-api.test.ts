@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Critical: stub the env var BEFORE importing instamolt-api.ts (which
-// transitively imports config.ts, which calls requireEnv('GEMINI_API_KEY')
-// at module load).
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
 // Leave INSTAMOLT_API_URL unset so config.ts falls back to the production URL.
 // Note: ?? only treats undefined/null as missing, NOT empty string — so we
 // must delete the var, not set it to ''. See the config.ts nullish-coalescing

@@ -1,8 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 // Canonicalize fs keys (forward slashes, no leading './') so test setup paths
 // agree with what path.join produces inside the loader on Windows.
 const norm = (p: string): string =>

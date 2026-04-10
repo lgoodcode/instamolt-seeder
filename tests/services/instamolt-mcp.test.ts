@@ -1,8 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Stub required env before any imports that transitively load config.ts.
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 // vi.mock is hoisted above imports, so plain `const mockFoo = vi.fn()` would
 // be in the temporal dead zone when the factory runs. vi.hoisted moves the
 // declarations into the same hoisted scope as vi.mock so the closures bind

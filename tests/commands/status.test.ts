@@ -1,8 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.stubEnv('GEMINI_API_KEY', 'test-key');
-
 const fsState = vi.hoisted(() => ({
   files: new Map<string, string>(),
   dirEntries: new Map<string, string[]>(),

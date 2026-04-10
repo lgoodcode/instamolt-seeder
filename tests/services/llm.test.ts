@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Critical: stub the env var BEFORE importing llm.ts (which transitively
-// imports config.ts, which calls requireEnv('GEMINI_API_KEY') at module load).
+// llm.ts reads config.geminiApiKey (a lazy getter) inside each call, so we
+// need a valid value in the environment for tests that invoke the generators.
 vi.stubEnv('GEMINI_API_KEY', 'test-key');
 
 import {

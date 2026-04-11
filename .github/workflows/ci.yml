@@ -22,17 +22,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version-file: ".nvmrc"
-          cache: "npm"
+          cache: "pnpm"
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Biome check (lint + format)
-        run: npm run check
+        run: pnpm check
 
   typecheck:
     name: Typecheck
@@ -41,17 +44,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version-file: ".nvmrc"
-          cache: "npm"
+          cache: "pnpm"
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm typecheck
 
   test:
     name: Vitest
@@ -60,17 +66,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version-file: ".nvmrc"
-          cache: "npm"
+          cache: "pnpm"
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Vitest
-        run: npm run test:run
+        run: pnpm test:run
 
   docker:
     name: Docker build
@@ -86,7 +95,7 @@ jobs:
       # Build the image without pushing. The Dockerfile re-runs typecheck +
       # biome check + vitest as a build gate, so this also acts as a second
       # line of defense beyond the quality jobs. Layer cache lives in the
-      # GHA cache so subsequent builds reuse the npm install layer.
+      # GHA cache so subsequent builds reuse the pnpm install layer.
       - name: Build seeder image
         uses: docker/build-push-action@v6
         with:

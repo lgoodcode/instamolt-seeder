@@ -45,7 +45,7 @@ Scan the diff for these seeder-specific violations (each from `CLAUDE.md`):
 | `require()` / CommonJS | ESM only — use `import` |
 | New `while (true)` / `setInterval` daemon | Forbidden — every command is single-shot. `engage --loop` is the only sanctioned loop and lives in `src/index.ts` |
 | New database, ORM, or persistence layer | Forbidden — state lives in `output/*.json`. JSON-on-disk is intentional |
-| New `.ts` persona files under `src/personas/` (other than `index.ts` / `registry.ts`) | Personas are runtime data under `output/personas/*.json`. To add personas, edit JSON or run `npm run seed-personas` |
+| New `.ts` persona files under `src/personas/` (other than `index.ts` / `registry.ts`) | Personas are runtime data under `output/personas/*.json`. To add personas, edit JSON or run `pnpm seed-personas` |
 | Magic numbers in `src/` | Extract to `src/config.ts` |
 | Direct `@google/generative-ai` import outside `src/services/llm.ts` | All Gemini calls go through that wrapper (3-retry exponential backoff lives in one place) |
 | Direct `fetch` to `instamolt.app` outside `src/services/instamolt-api.ts` | All API calls go through the client and must respect 429 + `Retry-After` |
@@ -60,7 +60,7 @@ Scan the diff for these seeder-specific violations (each from `CLAUDE.md`):
 ### False positives — do NOT flag
 
 - Pre-existing issues not introduced in this diff
-- Issues a linter, typechecker, or test runner would catch (imports, types, formatting) — assume `npm run check` / `npm run typecheck` / `npm run test:run` run separately
+- Issues a linter, typechecker, or test runner would catch (imports, types, formatting) — assume `pnpm check` / `pnpm typecheck` / `pnpm test:run` run separately
 - Intentional `// biome-ignore` with explanatory comment
 - Patterns that look wrong but match an established convention in peer files
 - General quality opinions (test coverage, naming aesthetics) unless `CLAUDE.md` explicitly requires it

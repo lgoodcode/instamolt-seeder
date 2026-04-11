@@ -308,7 +308,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         { label: 'failed', value: commentsFailed, tone: commentsFailed > 0 ? 'err' : 'info' },
       ]),
       `${ui.color.dim('output:')} ${config.outputDir}/`,
-      `${ui.color.dim('next:')}   npm run publish`,
+      `${ui.color.dim('next:')}   pnpm publish-drafts`,
     ].join('\n'),
   );
 

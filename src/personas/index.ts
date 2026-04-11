@@ -38,7 +38,7 @@ export async function loadPersonas(
   if (jsonFiles.length === 0) {
     if (!autoSeed) {
       throw new Error(
-        `No personas found in ${config.personasDir}. Run \`npm run seed-personas\` to generate them.`,
+        `No personas found in ${config.personasDir}. Run \`pnpm seed-personas\` to generate them.`,
       );
     }
     log('info', `No personas yet — seeding ${seedCount} fresh ones via Gemini...`);

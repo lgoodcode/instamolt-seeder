@@ -67,7 +67,7 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
   }
 
   if (allAgents.length === 0) {
-    ui.note('No agents found', 'Run `npm run generate` first.');
+    ui.note('No agents found', 'Run `pnpm generate` first.');
     ui.outro(ui.color.yellow(`${ui.symbol.warn} nothing to preview`));
     return;
   }

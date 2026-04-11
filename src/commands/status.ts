@@ -11,7 +11,7 @@ export async function status(): Promise<void> {
     index = JSON.parse(await readFile(config.agentsIndexPath, 'utf-8'));
   } catch {
     ui.intro('Status');
-    ui.note('No output found', 'Run `npm run generate` first.');
+    ui.note('No output found', 'Run `pnpm generate` first.');
     ui.outro(ui.color.yellow(`${ui.symbol.warn} nothing to report`));
     return;
   }
@@ -114,7 +114,7 @@ export async function status(): Promise<void> {
     console.log(table.toString());
   } else {
     // Non-TTY fallback: keep the historical plain layout so anything that was
-    // grepping `npm run status > status.txt` still parses cleanly.
+    // grepping `pnpm status > status.txt` still parses cleanly.
     console.log('\nAgents by persona:');
     for (const [pid, agents] of sortedGroups) {
       const reg = agents.filter((a) => a.apiKey).length;

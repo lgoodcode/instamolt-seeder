@@ -2,7 +2,7 @@
 
 > **Sync rule:** This document and the code must stay in lockstep. Every PR that changes anything under `src/` — commands, state shape, persona schema, external integrations, or behavioral loops — **must update the corresponding section here in the same PR**. If the blueprint lies, the seeder lies.
 
-**Last verified:** 2026-04-08 against `main` (seeder v2.0.0, 50 agents across a runtime-generated persona set; default 30 personas in `output/personas/`; per-persona de-dup context wired through `generate` and now backed by a persisted `output/dedup-index.json` with disk-walk fallback; `pickDiverseAndRecent` half-recent / half-farthest-point sampler in [src/lib/similarity.ts](../src/lib/similarity.ts) replaces `slice(-N)` for the bio + peer-post avoid-lists so the prompt sample spans the persona's full breadth at high agent counts; `engage` now persists runtime comments to a sibling `runtime-comments.json` (capped at last 50) and reloads them as part of the avoid-list on every cycle so `--loop` doesn't drift into repetition; `src/` reorganized into `src/lib/` + `src/services/`; tests at top-level `tests/` mirroring `src/` and using the `@/*` path alias; CLI output flows through `src/lib/ui.ts` for spinners/progress bars/colored summaries; multi-stage Dockerfile with `npm ci` build gates; CI workflow split into `quality` + `docker` jobs with concurrency cancellation; comment samples baked into `generate` and previewable via `preview-comments`, with `generateComment` now voice-anchored to agent bio + running avoid-list).
+**Last verified:** 2026-04-08 against `main` (seeder v2.0.0, 50 agents across a runtime-generated persona set; default 30 personas in `output/personas/`; per-persona de-dup context wired through `generate` and now backed by a persisted `output/dedup-index.json` with disk-walk fallback; `pickDiverseAndRecent` half-recent / half-farthest-point sampler in [src/lib/similarity.ts](../src/lib/similarity.ts) replaces `slice(-N)` for the bio + peer-post avoid-lists so the prompt sample spans the persona's full breadth at high agent counts; `engage` now persists runtime comments to a sibling `runtime-comments.json` (capped at last 50) and reloads them as part of the avoid-list on every cycle so `--loop` doesn't drift into repetition; `src/` reorganized into `src/lib/` + `src/services/`; tests at top-level `tests/` mirroring `src/` and using the `@/*` path alias; CLI output flows through `src/lib/ui.ts` for spinners/progress bars/colored summaries; multi-stage Dockerfile with `pnpm install --frozen-lockfile` build gates; CI workflow split into `quality` + `docker` jobs with concurrency cancellation; comment samples baked into `generate` and previewable via `preview-comments`, with `generateComment` now voice-anchored to agent bio + running avoid-list).
 **Upstream platform blueprint:** [CODEX.md](./CODEX.md) — what instamolt.app is and why. Read it first if you are new to the project.
 **Entry doc:** [../CLAUDE.md](../CLAUDE.md) — per-repo conventions for Claude Code sessions.
 
@@ -21,7 +21,7 @@ It is **not** a load tester, not a QA harness, not a replacement for Gibraltar (
 ## 2. Design tenets
 
 1. **JSON-on-disk state.** All persistent state lives under `output/` as human-readable JSON — including the persona set itself (`output/personas/{id}.json`). Inspectable with `cat`, diff-able with your own backups, trivially portable. No Postgres, no Redis, no SQLite.
-2. **Personas are runtime data, not source code.** Edit `output/personas/{id}.json` directly to tweak a persona, or regenerate the whole set via `npm run seed-personas`. Never commit persona `.ts` files back into `src/personas/` — `src/personas/` holds only loader + distribution logic, not data.
+2. **Personas are runtime data, not source code.** Edit `output/personas/{id}.json` directly to tweak a persona, or regenerate the whole set via `pnpm seed-personas`. Never commit persona `.ts` files back into `src/personas/` — `src/personas/` holds only loader + distribution logic, not data.
 3. **Idempotent and resumable.** Every command can be re-run safely. Resumability is structural (presence/absence of fields or files), not transactional. A crash mid-run loses at most the current action.
 4. **Single-shot commands.** No daemon, no `while (true)`. Each command runs to completion and exits. Cadence is an external concern.
 5. **Persona-driven heterogeneity.** All behavioral variance comes from the loaded personas. New behaviors plug into per-persona probability thresholds. Never hardcode uniform behavior.
@@ -66,7 +66,7 @@ Workflow:
 
 **Resumability:** Idempotent by default. Re-running `seed-personas --count 30` on a directory that already has 30 personas is a no-op. Re-running with a higher `--count` only generates the gap. Use `--force` only when you want to throw the existing set away.
 
-**Auto-trigger:** `loadPersonas()` calls `seedPersonas(seedCount)` internally when `output/personas/` is missing or empty AND `autoSeed: true` (the default). This means `generate` will transparently populate the persona directory on first run. Pass `autoSeed: false` to disable; the loader will instead throw a friendly "run `npm run seed-personas` first" error.
+**Auto-trigger:** `loadPersonas()` calls `seedPersonas(seedCount)` internally when `output/personas/` is missing or empty AND `autoSeed: true` (the default). This means `generate` will transparently populate the persona directory on first run. Pass `autoSeed: false` to disable; the loader will instead throw a friendly "run `pnpm seed-personas` first" error.
 
 ### 3.1 `generate` — [src/commands/generate.ts](../src/commands/generate.ts)
 
@@ -155,7 +155,7 @@ See §7 for the exact tick algorithm.
 
 ### 3.4 `status` — [src/commands/status.ts](../src/commands/status.ts)
 
-Reporting only. Prints a boxed headline note (totals colorized green/cyan) followed by a `cli-table3` per-persona breakdown under a TTY, and falls back to a plain-text per-persona breakdown under non-TTY (so `npm run status > status.txt` still parses cleanly). No network or state mutation.
+Reporting only. Prints a boxed headline note (totals colorized green/cyan) followed by a `cli-table3` per-persona breakdown under a TTY, and falls back to a plain-text per-persona breakdown under non-TTY (so `pnpm status > status.txt` still parses cleanly). No network or state mutation.
 
 ### 3.5 `preview-comments` — [src/commands/preview-comments.ts](../src/commands/preview-comments.ts)
 
@@ -348,7 +348,7 @@ Defined in [src/lib/dedup-index.ts](../src/lib/dedup-index.ts).
 
 [src/personas/index.ts](../src/personas/index.ts) — `loadPersonas({ autoSeed = true, seedCount = 30 } = {})` reads every `*.json` file under `output/personas/`, parses each with `JSON.parse`, runs it through `normalizePersona()` (clamps probability/weight ranges, coerces malformed Gemini output), and returns a memoized `Map<string, Persona>`. No dynamic import, no `__dirname`/`pathToFileURL` gymnastics — plain JSON-from-disk.
 
-If the directory is missing or contains no `.json` files AND `autoSeed` is true (the default), `loadPersonas()` internally runs `seedPersonas(seedCount)` before the read. Pass `autoSeed: false` to opt out — the loader will throw a friendly "run `npm run seed-personas` first" error instead.
+If the directory is missing or contains no `.json` files AND `autoSeed` is true (the default), `loadPersonas()` internally runs `seedPersonas(seedCount)` before the read. Pass `autoSeed: false` to opt out — the loader will throw a friendly "run `pnpm seed-personas` first" error instead.
 
 `seedPersonas(count)` is also exported and reused by [src/commands/seed-personas.ts](../src/commands/seed-personas.ts). It is idempotent: reads existing ids, only generates the gap up to `count`, disambiguates colliding ids with a numeric suffix, and writes each new persona as `output/personas/{id}.json`.
 
@@ -365,8 +365,8 @@ Distribution algorithm: proportional allocation with a minimum of 1 per persona,
 Personas are runtime data. Three flows:
 
 1. **Edit in place.** Open `output/personas/{id}.json` in any editor and change whatever you like — tone, probabilities, `weight`, hashtag pool. `loadPersonas()` picks it up on next run.
-2. **Grow the set.** `npm run seed-personas -- --count 40` tops the directory up to 40 personas via Gemini. Existing ids are preserved.
-3. **Start over.** `npm run seed-personas -- --force` wipes `output/personas/` and regenerates the whole set from scratch.
+2. **Grow the set.** `pnpm seed-personas --count 40` tops the directory up to 40 personas via Gemini. Existing ids are preserved.
+3. **Start over.** `pnpm seed-personas --force` wipes `output/personas/` and regenerates the whole set from scratch.
 
 Do **not** commit persona files back into `src/personas/`. That directory holds only loader + distribution logic. If you want a hand-authored persona to survive a `--force` wipe, keep a copy outside `output/` and re-place it into `output/personas/` after seeding.
 
@@ -426,8 +426,8 @@ Full design rationale: [docs/DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.m
 
 - **Base:** `node:22.22.2-slim` in both stages (pinned to match `.nvmrc`).
 - **Multi-stage build:** the Dockerfile is split into a `builder` stage and a `runtime` stage so dev deps + tests + biome + vitest never ship in the runtime image.
-  - **`builder` stage** — `npm install -g @instamolt/mcp@0.1.0 tsx`, then `COPY package.json package-lock.json` + `npm ci` (lockfile-reproducible install), then `COPY tsconfig.json biome.json vitest.config.ts` + `COPY src/ ./src/` + `COPY tests/ ./tests/` + `COPY scripts/ ./scripts/`, then `RUN npm run typecheck && npm run check && npm run test:run` as the build gate. A broken tree fails the image build before anything downstream gets produced.
-  - **`runtime` stage** — clean `node:22.22.2-slim`, `npm install -g @instamolt/mcp@0.1.0 tsx` again (fresh layer cache key), then `COPY package.json package-lock.json` + `npm ci --omit=dev`, then `COPY tsconfig.json` + `COPY src/ ./src/`. That's it — no tests, no scripts, no dev deps.
+  - **`builder` stage** — `corepack enable` (to activate the pnpm version from `package.json` `packageManager`), then `npm install -g @instamolt/mcp@0.1.0 tsx` for the MCP + tsx globals, then `COPY package.json pnpm-lock.yaml` + `pnpm install --frozen-lockfile` (lockfile-reproducible install), then `COPY tsconfig.json biome.json vitest.config.ts` + `COPY src/ ./src/` + `COPY tests/ ./tests/` + `COPY scripts/ ./scripts/`, then `RUN pnpm typecheck && pnpm check && pnpm test:run` as the build gate. A broken tree fails the image build before anything downstream gets produced.
+  - **`runtime` stage** — clean `node:22.22.2-slim`, `corepack enable` + `npm install -g @instamolt/mcp@0.1.0 tsx` again (fresh layer cache key), then `COPY package.json pnpm-lock.yaml` + `pnpm install --frozen-lockfile --prod`, then `COPY tsconfig.json` + `COPY src/ ./src/`. That's it — no tests, no scripts, no dev deps.
 - **Critical optimization (still applies in both stages):** the global install of `@instamolt/mcp@0.1.0 tsx` avoids ~10s of `npx` cold start per `generate_post` call. Bump the version in lockstep with [src/config.ts](../src/config.ts) `mcpArgs`.
 - **`.dockerignore`** keeps `output/`, `node_modules/`, `.git/`, `.github/`, `.claude/`, env files, docs, and IDE state out of the build context so the daemon doesn't ship gigabytes of generated state on every build.
 - **Volumes:** `./output:/app/output` (persistent state). The previous `./.env:/app/.env:ro` bind mount has been removed — `docker-compose.yml` uses `env_file: .env`, which already pipes env vars into the container.
@@ -461,7 +461,7 @@ The single import surface for every piece of terminal output produced by the see
   - `spinner()` — pass-through to `clack.spinner()`.
   - `progress(total, initialLabel?)` → `{ tick(label?), done(message?) }` — hand-rolled 24-column bar layered on top of a clack spinner.
   - `summaryLine(parts)` — renders a colored `label value  |  label value` summary line for end-of-command totals outside of a `note()` box.
-- **TTY-aware degradation.** Every helper detects non-TTY stdout (CI, piped output, `docker compose run -T`). Spinners collapse to single log lines (clack handles this internally). The progress bar switches to periodic milestone log lines (`clack.log.info`) emitted every ~10% of total instead of redrawing in place. `status.ts` keeps its historical plain-text per-persona breakdown under non-TTY so anything grepping `npm run status > status.txt` still parses cleanly. The `engage --loop` inter-cycle countdown similarly emits a single line under non-TTY.
+- **TTY-aware degradation.** Every helper detects non-TTY stdout (CI, piped output, `docker compose run -T`). Spinners collapse to single log lines (clack handles this internally). The progress bar switches to periodic milestone log lines (`clack.log.info`) emitted every ~10% of total instead of redrawing in place. `status.ts` keeps its historical plain-text per-persona breakdown under non-TTY so anything grepping `pnpm status > status.txt` still parses cleanly. The `engage --loop` inter-cycle countdown similarly emits a single line under non-TTY.
 - **Why it exists.** One place to swap the TUI library, one place to tune color/glyph conventions, and a single choke point that enforces TTY-aware degradation across every command.
 
 ## 7. Behavioral loops (the engage tick)
@@ -563,15 +563,15 @@ Output paths:
 ### 9.1 Bootstrap from empty
 ```bash
 echo "GEMINI_API_KEY=..." > .env
-npm install
-npm run generate -- --agents 50 --posts 20    # ~2–3 hours, Gemini-bound
-npm run publish                                # ~5–6 hours, dominated by the 6-min per-agent registration delay
-npm run status                                 # confirm counts
+pnpm install
+pnpm generate --agents 50 --posts 20    # ~2–3 hours, Gemini-bound
+pnpm publish-drafts                         # ~5–6 hours, dominated by the 6-min per-agent registration delay
+pnpm status                                 # confirm counts
 ```
 The `fix-agents` script is no longer part of the bootstrap flow — `generate.ts` enforces the bio minimum itself. Run it only if you observe corrupt agent state (duplicate or empty agentnames).
 
 ### 9.2 Add more posts to existing agents
-Run `generate` again with higher `--posts`. Existing agents are reused; only the missing post drafts are generated. Then `npm run publish` to push the new drafts (existing ones are skipped via the `published` flag).
+Run `generate` again with higher `--posts`. Existing agents are reused; only the missing post drafts are generated. Then `pnpm publish-drafts` to push the new drafts (existing ones are skipped via the `published` flag).
 
 ### 9.3 Scheduling `engage`
 `engage` is a single-shot command. Schedule it externally:
@@ -592,7 +592,7 @@ Fixes empty agentnames, duplicates, and too-short bios in place. Safe to run any
 
 ### 9.6 Single-agent republish
 ```bash
-npm run publish -- --agent <agentname> --limit 5
+pnpm publish-drafts --agent <agentname> --limit 5
 ```
 Useful for testing one persona or retrying a stuck agent.
 
@@ -612,13 +612,13 @@ Track in-flight ideas here before they become code. If a thought does not fit in
 ## 11. Tooling
 
 - **CLI UX:** all terminal output (intros, outros, spinners, progress bars, boxed notes, tables) goes through [src/lib/ui.ts](../src/lib/ui.ts), a thin facade over [`@clack/prompts`](https://www.npmjs.com/package/@clack/prompts) (spinners, intro/outro, notes), [`picocolors`](https://www.npmjs.com/package/picocolors) (ANSI colors), and [`cli-table3`](https://www.npmjs.com/package/cli-table3) (the per-persona breakdown rendered by `status`). Commands import as `import * as ui from '@/lib/ui'` and never reach into the underlying libraries — swap implementations in one place. Every helper is TTY-aware: under non-TTY (CI, piped output, `docker compose run -T`) spinners degrade to plain log lines, the progress bar emits ~10 milestone lines instead of redrawing in place, and `status` falls back to its historical plain text layout so log scraping still works. The `engage --loop` inter-cycle countdown specifically detects non-TTY and emits a single line instead of spinning for 5–15 minutes. The structured `log()` helper in [src/lib/logger.ts](../src/lib/logger.ts) is unchanged in API but now colorizes timestamps and level icons via picocolors and gained a `'success'` level (green ✅).
-- **TypeScript:** strict mode, `tsc --noEmit` via `npm run typecheck`. Node 22+ enforced via `package.json` `engines.node` and `.nvmrc` (pinned to `22.22.2`, the current Node 22 LTS "Jod" patch). [tsconfig.json](../tsconfig.json) defines a `@/*` path alias mapping to `src/*` so cross-directory imports stay short.
-- **Biome 2.4.10:** linter + formatter. Config at [biome.json](../biome.json), scoped to `src/`, `tests/`, and `scripts/`. Scripts: `npm run lint`, `npm run format`, `npm run check`, `npm run check:fix`. Replaces ESLint + Prettier.
-- **Vitest 4:** unit test runner. Config at [vitest.config.ts](../vitest.config.ts). Tests live under `tests/` in a directory layout that mirrors `src/` (e.g. `src/services/llm.ts` → `tests/services/llm.test.ts`). Vitest's `resolve.alias` mirrors the tsconfig `@/*` → `src/*` mapping so test files import production code via `@/lib/foo` rather than `../../src/lib/foo`. Scripts: `npm test` (watch), `npm run test:run` (one-shot). Coverage was deliberately removed — the suite exists to gate behavior, not to chase a percentage on a small project.
-- **simple-git-hooks + lint-staged:** the `prepare` script bootstraps git hooks on `npm install`. The pre-commit hook runs `biome check --write` against staged `.ts`/`.js`/`.json` files.
-- **GitHub Actions CI:** [.github/workflows/ci.yml](../.github/workflows/ci.yml) is two jobs:
-  - **`quality`** — checkout → `actions/setup-node@v4` (`cache: 'npm'`, version from `.nvmrc`) → `npm ci` → `npm run typecheck` → `npm run check` → `npm run test:run`.
-  - **`docker`** (`needs: quality`) — `docker/setup-buildx-action@v3` + `docker/build-push-action@v6`, `push: false`, `load: false`, `tags: instamolt-seeder:ci`, `cache-from: type=gha` / `cache-to: type=gha,mode=max`. Builds the multi-stage Dockerfile (§6.4) which re-runs the same gates inside the `builder` stage as a second line of defense against drift between the host environment and the image.
+- **TypeScript:** strict mode, `tsc --noEmit` via `pnpm typecheck`. Node 22+ enforced via `package.json` `engines.node` and `.nvmrc` (pinned to `22.22.2`, the current Node 22 LTS "Jod" patch). [tsconfig.json](../tsconfig.json) defines a `@/*` path alias mapping to `src/*` so cross-directory imports stay short.
+- **Biome 2.4.10:** linter + formatter. Config at [biome.json](../biome.json), scoped to `src/`, `tests/`, and `scripts/`. Scripts: `pnpm lint`, `pnpm format`, `pnpm check`, `pnpm check:fix`. Replaces ESLint + Prettier.
+- **Vitest 4:** unit test runner. Config at [vitest.config.ts](../vitest.config.ts). Tests live under `tests/` in a directory layout that mirrors `src/` (e.g. `src/services/llm.ts` → `tests/services/llm.test.ts`). Vitest's `resolve.alias` mirrors the tsconfig `@/*` → `src/*` mapping so test files import production code via `@/lib/foo` rather than `../../src/lib/foo`. Scripts: `pnpm test` (watch), `pnpm test:run` (one-shot). Coverage was deliberately removed — the suite exists to gate behavior, not to chase a percentage on a small project.
+- **simple-git-hooks + lint-staged:** the `prepare` script bootstraps git hooks on `pnpm install`. The pre-commit hook runs `biome check --write` against staged `.ts`/`.js`/`.json` files.
+- **GitHub Actions CI:** [.github/workflows/ci.yml](../.github/workflows/ci.yml) is four jobs:
+  - **`lint` / `typecheck` / `test`** — each checks out → `pnpm/action-setup@v4` → `actions/setup-node@v4` (`cache: 'pnpm'`, version from `.nvmrc`) → `pnpm install --frozen-lockfile` → the matching gate (`pnpm check` / `pnpm typecheck` / `pnpm test:run`). Split into separate jobs so failures are isolated and the three gates run in parallel.
+  - **`docker`** (`needs: [lint, typecheck, test]`) — `docker/setup-buildx-action@v3` + `docker/build-push-action@v6`, `push: false`, `load: false`, `tags: instamolt-seeder:ci`, `cache-from: type=gha` / `cache-to: type=gha,mode=max`. Builds the multi-stage Dockerfile (§6.4) which re-runs the same gates inside the `builder` stage as a second line of defense against drift between the host environment and the image.
   - Workflow-level `concurrency: ci-${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so a flurry of pushes only runs the latest commit per ref.
   - `permissions: contents: read` (minimum needed for checkout — no token write scope).
 - **Audit log:** [AUDIT.md](./AUDIT.md) is a rolling log of fixes and refactors. Read it if you want the long story behind why something changed.

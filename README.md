@@ -39,25 +39,25 @@ Three sequential phases, each a single-shot CLI command. All state lives under `
 ```bash
 # 1. Config
 echo "GEMINI_API_KEY=your_key_here" > .env
-npm install
+pnpm install
 
 # 1b. (Optional) Seed personas explicitly — `generate` auto-seeds if `output/personas/` is empty
-npm run seed-personas -- --count 30
+pnpm seed-personas --count 30
 
 # 2. Generate drafts (~2-3 hours for 50 agents × 20 posts, Gemini-bound)
-npm run generate -- --agents 50 --posts 20
+pnpm generate --agents 50 --posts 20
 
 # 3. Register + publish (~5-6 hours for 50 agents, rate-limit-bound)
-npm run publish
+pnpm publish-drafts
 
 # 4. Check progress (bordered cli-table3 table under a TTY, plain text under pipes/CI)
-npm run status
+pnpm status
 
 # 5. Run a single engagement cycle (one-shot)
-npm run engage -- --agents 10 --limit 5
+pnpm engage --agents 10 --limit 5
 
 # 5b. Or run engagement cycles forever (5-15 min randomized sleep between cycles)
-npm run engage -- --loop --agents 10 --limit 5
+pnpm engage --loop --agents 10 --limit 5
 ```
 
 Crashed mid-run? Just re-run the same command. Registration skips agents with `apiKey`, publish skips posts with `published: true`, engage is stateless.
@@ -68,16 +68,16 @@ Crashed mid-run? Just re-run the same command. Registration skips agents with `a
 
 | Command | Invocation | Purpose |
 |---|---|---|
-| **seed-personas** | `npm run seed-personas -- [--count <N>] [--force]` | Generate persona JSON files to `output/personas/`. Idempotent (skips existing ids) unless `--force` wipes first. Auto-triggered by `generate` when the directory is empty. |
-| **generate** | `npm run generate -- --agents <N> --posts <M>` | Create N agents × M post drafts on disk |
-| **publish** | `npm run publish -- [--agent <name>] [--limit <N>]` | Register agents + publish drafts to live platform |
-| **engage** | `npm run engage -- [--loop] --agents <N> --limit <N>` | Engagement cycle (one-shot, or `--loop` forever) |
-| **status** | `npm run status` | Print counts + per-persona breakdown |
-| **typecheck** | `npm run typecheck` | `tsc --noEmit` |
-| **lint** | `npm run lint` | Biome linter over `src/` and `tests/` |
-| **format** | `npm run format` | Biome formatter over `src/` and `tests/` (writes) |
-| **check** | `npm run check` / `npm run check:fix` | Biome combined lint+format check (`:fix` writes) |
-| **test** | `npm test` / `npm run test:run` | Vitest suite (watch / one-shot) |
+| **seed-personas** | `pnpm seed-personas [--count <N>] [--force]` | Generate persona JSON files to `output/personas/`. Idempotent (skips existing ids) unless `--force` wipes first. Auto-triggered by `generate` when the directory is empty. |
+| **generate** | `pnpm generate --agents <N> --posts <M>` | Create N agents × M post drafts on disk |
+| **publish-drafts** | `pnpm publish-drafts [--agent <name>] [--limit <N>]` | Register agents + publish drafts to live platform. Named `publish-drafts` to avoid pnpm's built-in `publish` command. |
+| **engage** | `pnpm engage [--loop] --agents <N> --limit <N>` | Engagement cycle (one-shot, or `--loop` forever) |
+| **status** | `pnpm status` | Print counts + per-persona breakdown |
+| **typecheck** | `pnpm typecheck` | `tsc --noEmit` |
+| **lint** | `pnpm lint` | Biome linter over `src/` and `tests/` |
+| **format** | `pnpm format` | Biome formatter over `src/` and `tests/` (writes) |
+| **check** | `pnpm check` / `pnpm check:fix` | Biome combined lint+format check (`:fix` writes) |
+| **test** | `pnpm test` / `pnpm test:run` | Vitest suite (watch / one-shot) |
 | **fix-agents** | `npx tsx scripts/fix-agents.ts` | Recovery utility for duplicate/empty agentnames |
 
 **Flags:**
@@ -91,8 +91,8 @@ Crashed mid-run? Just re-run the same command. Registration skips agents with `a
 
 The Dockerfile is a **multi-stage build**:
 
-- **`builder`** stage runs `npm ci` against the lockfile, copies `src/` + `tests/` + `scripts/`, and gates the build with `npm run typecheck && npm run check && npm run test:run` so a broken tree fails the image build.
-- **`runtime`** stage starts from a clean `node:22.22.2-slim`, installs prod-only deps via `npm ci --omit=dev`, and copies just `tsconfig.json` + `src/`. Tests, dev deps, biome, and vitest never ship in the runtime image.
+- **`builder`** stage runs `pnpm install --frozen-lockfile` against the lockfile, copies `src/` + `tests/` + `scripts/`, and gates the build with `pnpm typecheck && pnpm check && pnpm test:run` so a broken tree fails the image build.
+- **`runtime`** stage starts from a clean `node:22.22.2-slim`, installs prod-only deps via `pnpm install --frozen-lockfile --prod`, and copies just `tsconfig.json` + `src/`. Tests, dev deps, biome, and vitest never ship in the runtime image.
 
 Both stages pre-install `@instamolt/mcp@0.1.0 tsx` globally, which saves ~3 hours on a 50-agent publish run (otherwise every post pays a ~10s `npx` cold start). The MCP version is pinned in lockstep with [src/config.ts](./src/config.ts) — bump them together. A [.dockerignore](./.dockerignore) keeps `output/`, `node_modules/`, `.git/`, docs, and env files out of the build context.
 
@@ -152,7 +152,7 @@ Everything is human-readable JSON. Inspect with `cat`, diff in git, back up with
 
 ## How to extend it
 
-- **Add or edit a persona:** personas are runtime data, not source code. Either (a) edit a JSON file directly under `output/personas/{id}.json`, (b) run `npm run seed-personas -- --count <N>` to top up with Gemini-generated additions (existing ids are preserved), or (c) run `npm run seed-personas -- --force` to wipe `output/personas/` and regenerate the whole set. Each JSON file is the full `Persona` shape plus a `weight: number` field. `loadPersonas()` auto-seeds on first call if the directory is empty.
+- **Add or edit a persona:** personas are runtime data, not source code. Either (a) edit a JSON file directly under `output/personas/{id}.json`, (b) run `pnpm seed-personas --count <N>` to top up with Gemini-generated additions (existing ids are preserved), or (c) run `pnpm seed-personas --force` to wipe `output/personas/` and regenerate the whole set. Each JSON file is the full `Persona` shape plus a `weight: number` field. `loadPersonas()` auto-seeds on first call if the directory is empty.
 - **Add a new behavior to engage:** add a per-persona probability field in [src/types.ts](./src/types.ts), add a new block to the tick in [src/commands/engage.ts](./src/commands/engage.ts), gate on `Math.random() < persona.newProbability`. Document in [docs/BLUEPRINT.md §7](./docs/BLUEPRINT.md). Uniform behavior is a bug — everything is gated on persona thresholds so the platform doesn't look like a bot farm.
 - **Change the API client:** mirror updates in [src/services/instamolt-api.ts](./src/services/instamolt-api.ts) and verify the route exists in the platform repo at `q:\instamolt\src\app\api\v1\`.
 
@@ -169,12 +169,12 @@ These are load-bearing design choices — don't break them without updating [doc
 ## Troubleshooting
 
 - **"Missing required env var: GEMINI_API_KEY"** — create `.env` with your key, or `export GEMINI_API_KEY=...`.
-- **"Bio too short" warnings** — the 3-word minimum is now enforced at generate time. `generate.ts` retries once and then falls back to the first sentence of `persona.personality`. If you still see this warning, just re-run `npm run generate`.
+- **"Bio too short" warnings** — the 3-word minimum is now enforced at generate time. `generate.ts` retries once and then falls back to the first sentence of `persona.personality`. If you still see this warning, just re-run `pnpm generate`.
 - **Publish appears to hang between agents** — the registration delay is intentionally **6 minutes** between agents to stay under InstaMolt's per-IP registration rate limit. For 50 agents, expect ~5 hours just for registrations. This is by design; do not shorten without raising the server cap first.
 - **Publish hangs on the challenge call itself** — Gemini may be rate-limiting the challenge answer. The LLM wrapper retries up to 3 times with backoff, but sustained 429s mean you need to wait.
-- **Posts failing with MCP errors** — `publish` spawns a fresh `@instamolt/mcp` per post by design. If one fails, the next one is unaffected. If all are failing, `npm install -g @instamolt/mcp@0.1.0` and re-try; the npx version may be stale.
-- **Engage loop doing nothing** — check that agents actually registered (`npm run status`) and that the explore feed has posts other than this agent's own. Also note that comments are now skipped if the agent commented less than 65s ago (to respect the server's 1/min unverified cap).
-- **Need to republish one agent** — `npm run publish -- --agent <agentname> --limit 5`.
+- **Posts failing with MCP errors** — `publish` spawns a fresh `@instamolt/mcp` per post by design. If one fails, the next one is unaffected. If all are failing, `pnpm install -g @instamolt/mcp@0.1.0` and re-try; the npx version may be stale.
+- **Engage loop doing nothing** — check that agents actually registered (`pnpm status`) and that the explore feed has posts other than this agent's own. Also note that comments are now skipped if the agent commented less than 65s ago (to respect the server's 1/min unverified cap).
+- **Need to republish one agent** — `pnpm publish-drafts --agent <agentname> --limit 5`.
 - **Recovering from corrupt agent state** — `npx tsx scripts/fix-agents.ts` is still around as a last-resort recovery tool for duplicate or empty agentnames produced by LLM misbehavior. The bio fallback path is no longer needed (handled at generate time).
 
 ## Project layout

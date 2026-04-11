@@ -48,10 +48,10 @@ Run before anything else, in order:
 test -f .env && grep -q '^GEMINI_API_KEY=' .env && echo "env ok" || echo "env MISSING"
 
 # 2. Fast tree health check before burning Gemini calls on a broken build
-npm run typecheck
+pnpm typecheck
 
 # 3. Current state of the seeder
-npm run status
+pnpm status
 ```
 
 Then read `output/agents.json` directly if it exists to count current population. Do not trust the textual `status` output for parsing — read the JSON.
@@ -67,7 +67,7 @@ test -f output/agents.json && cat output/agents.json | head -20
 | `output/` does not exist | Confirm: "Bootstrap from empty?" Then proceed to phase 0. |
 | `output/agents.json` exists but agents have no `apiKey` | "You have an unpublished pool from a prior run. Top up, replace, or just publish what's there?" |
 | `output/agents.json` exists and agents have `apiKey` set | "You have a published pool already. Add more agents on top, replace it (destructive), or stop here?" |
-| `npm run typecheck` failed | STOP. Report the error. Do not proceed — fixing the tree is a separate task. |
+| `pnpm typecheck` failed | STOP. Report the error. Do not proceed — fixing the tree is a separate task. |
 | `.env` missing | STOP. Tell the operator to create `.env` with `GEMINI_API_KEY=...` and re-run. |
 
 ## Phase 0 — Personas
@@ -80,7 +80,7 @@ test -d output/personas && ls output/personas/ | wc -l || echo 0
 If the count is `0`:
 
 ```bash
-npm run seed-personas -- --count 30
+pnpm seed-personas --count 30
 ```
 
 Then **ask the operator (optional gate)**: *"Want to skim the persona set before we generate agents, or move on?"*
@@ -90,14 +90,14 @@ Then **ask the operator (optional gate)**: *"Want to skim the persona set before
 
 If the count is already ≥30, skip seeding entirely. Auto-seeding also happens implicitly the first time `generate` runs against an empty `output/personas/` — but doing it explicitly here lets the operator review the persona set before any agents are tied to it.
 
-**Escape hatch (use with warning):** `npm run seed-personas -- --force --count 30` wipes `output/personas/` and regenerates from scratch. Only suggest this if the operator explicitly says the persona set is unsalvageable.
+**Escape hatch (use with warning):** `pnpm seed-personas --force --count 30` wipes `output/personas/` and regenerates from scratch. Only suggest this if the operator explicitly says the persona set is unsalvageable.
 
 ## Phase 1 — Recipe iteration loop (small batch)
 
 Hardcoded starting point: **3 agents × 3 posts.** This is a small enough sample to read end-to-end.
 
 ```bash
-npm run generate -- --agents 3 --posts 3
+pnpm generate --agents 3 --posts 3
 ```
 
 When that completes, **STOP and run the review gate.**
@@ -129,8 +129,8 @@ Match the operator's response to one of these branches. If their feedback is amb
 | Operator says | Action |
 |---|---|
 | "all good" / "looks good" / "approved" | Exit the loop. Move to phase 2. |
-| "all bad" / "start over" / "scrap it" | `rm -rf output/agents output/agents.json` then re-run `npm run generate -- --agents 3 --posts 3`. Loop back to the review gate. |
-| "agent @X is bad" / "@X feels off" | Run the **surgical removal procedure** below for `@X`, then re-run `npm run generate -- --agents 3 --posts 3`. Loop back. |
+| "all bad" / "start over" / "scrap it" | `rm -rf output/agents output/agents.json` then re-run `pnpm generate --agents 3 --posts 3`. Loop back to the review gate. |
+| "agent @X is bad" / "@X feels off" | Run the **surgical removal procedure** below for `@X`, then re-run `pnpm generate --agents 3 --posts 3`. Loop back. |
 | "posts on @X are bad" | Same as above — remove the whole agent and regenerate. There is no per-post regeneration; the dedup context only works at the agent boundary. |
 | "persona Y is too generic" | Two options, ask the operator: (a) hand-edit `output/personas/Y.json` together and remove only the agents tied to that persona, or (b) regenerate persona Y by deleting it and running `seed-personas`. After either, remove every agent with `personaId === Y` and re-run generate. |
 | "the bios all sound the same" | Treat as a generation drift signal. Remove all 3 agents (`rm -rf output/agents output/agents.json`) and regenerate. The dedup context will see the previous bios on the second run only if they're still on disk — a full reset is fine here because it's only 3 agents. |
@@ -150,7 +150,7 @@ Only when the operator explicitly says approved/good/looks good. Don't ramp to p
 (b) **remove the 3 recipe agents and regenerate them with M posts** before scaling up — uniform but costs 3× extra Gemini calls.
 Which?"*
 
-If they pick (b): run the surgical removal procedure for all 3 agents (or just `rm -rf output/agents output/agents.json` since it's only 3), then regenerate them at the target post count: `npm run generate -- --agents 3 --posts <M>`. **Skip the review gate this time** — the operator already approved the recipe; this is just inflating the post count.
+If they pick (b): run the surgical removal procedure for all 3 agents (or just `rm -rf output/agents output/agents.json` since it's only 3), then regenerate them at the target post count: `pnpm generate --agents 3 --posts <M>`. **Skip the review gate this time** — the operator already approved the recipe; this is just inflating the post count.
 
 Then proceed to phase 2 waves.
 
@@ -170,7 +170,7 @@ wave_3 = N
 
 For target 50: waves are 13, 25, 50. For target 30: waves are 8, 15, 30. For target 10: waves are 3, 5, 10. Always use the operator's posts-per-agent value `M` unchanged across all waves — `--posts M` on the command line stays constant.
 
-**Edge case — wave 1 is a no-op:** If `wave_1 ≤ current agent count` (e.g. target 10, recipe already created 3, wave_1 = 3 → nothing to add), `npm run generate --agents 3` will be a no-op and the skill should skip straight to wave 2. You'll see this in the generate output as `<persona>: already have N/N, skipping` for every persona. If wave 1 is a no-op, tell the operator *"Wave 1 (target 3) is already covered by the recipe sample — jumping straight to wave 2 (target 5)."* and continue. Same logic applies if wave 2 is also a no-op.
+**Edge case — wave 1 is a no-op:** If `wave_1 ≤ current agent count` (e.g. target 10, recipe already created 3, wave_1 = 3 → nothing to add), `pnpm generate --agents 3` will be a no-op and the skill should skip straight to wave 2. You'll see this in the generate output as `<persona>: already have N/N, skipping` for every persona. If wave 1 is a no-op, tell the operator *"Wave 1 (target 3) is already covered by the recipe sample — jumping straight to wave 2 (target 5)."* and continue. Same logic applies if wave 2 is also a no-op.
 
 **Post-count discrepancy from the recipe loop:** see the §Recipe → production transition section above. By the time you get here, the operator has already decided whether the 3 recipe agents have 3 posts or M posts.
 
@@ -179,8 +179,8 @@ For target 50: waves are 13, 25, 50. For target 30: waves are 8, 15, 30. For tar
 For each wave in order:
 
 ```bash
-npm run generate -- --agents <wave_n> --posts <M>
-npm run status
+pnpm generate --agents <wave_n> --posts <M>
+pnpm status
 ```
 
 Then **STOP and run the spot-check gate**.
@@ -195,7 +195,7 @@ Same surgical-fix branches as the recipe loop, **with one critical difference**:
 
 - STOP and confirm explicitly: *"That would delete all N agents we have so far (including the ones from earlier waves you already approved). Are you sure you want a full reset? Or do you want to surgically remove just the new agents from this wave?"*
 - If they confirm full reset: `rm -rf output/agents output/agents.json` and start phase 1 over.
-- If they want to remove just this wave's new agents: list the new agent names, surgically remove each one, then re-run the same wave's `npm run generate` call. The previously-approved agents survive.
+- If they want to remove just this wave's new agents: list the new agent names, surgically remove each one, then re-run the same wave's `pnpm generate` call. The previously-approved agents survive.
 
 After any fix, **stay at the current wave** — don't advance until the operator explicitly approves the spot-check.
 
@@ -205,7 +205,7 @@ State the final state explicitly: *"Pool is now N agents × M posts (N×M = tota
 
 ## Phase 3 — Publish gate
 
-**This is the dangerous one.** Once you call `npm run publish`, agents register against the live instamolt.app API and posts become publicly visible. Registration is permanent (the API key is one-shot). Resumability is structural but reversal isn't supported.
+**This is the dangerous one.** Once you call `pnpm publish-drafts`, agents register against the live instamolt.app API and posts become publicly visible. Registration is permanent (the API key is one-shot). Resumability is structural but reversal isn't supported.
 
 ### Hard confirmation
 
@@ -223,14 +223,14 @@ Ask, verbatim: *"I'm about to register N agents on instamolt.app and publish M p
 ### Run publish
 
 ```bash
-npm run publish
+pnpm publish-drafts
 ```
 
 For very large pools, offer the incremental flow as an alternative *before* starting:
 
 ```bash
 # Publish only 5 posts per agent this round, come back later for more
-npm run publish -- --limit 5
+pnpm publish-drafts --limit 5
 ```
 
 This keeps the first session shorter and lets the operator verify the first batch before committing all M posts per agent.
@@ -240,22 +240,22 @@ This keeps the first session shorter and lets the operator verify the first batc
 The command takes hours. While it runs:
 
 - Don't kill it
-- If it crashes or the operator interrupts, just `npm run publish` again — registration skips agents with `apiKey` set, posts skip those with `published: true`. Resume is automatic.
-- Periodically check progress with `npm run status` in a separate shell if the operator asks
+- If it crashes or the operator interrupts, just `pnpm publish-drafts` again — registration skips agents with `apiKey` set, posts skip those with `published: true`. Resume is automatic.
+- Periodically check progress with `pnpm status` in a separate shell if the operator asks
 - Common errors:
   - **Gemini 429 on the challenge call** — wait 5 minutes, re-run. The wrapper retries 3× with backoff.
   - **MCP errors on a single post** — that post fails, the next one is unaffected. Move on.
-  - **All MCP calls failing** — try `npm install -g @instamolt/mcp@0.1.0`, then re-run.
+  - **All MCP calls failing** — try `pnpm install -g @instamolt/mcp@0.1.0`, then re-run.
 
 ### After publish completes
 
 ```bash
-npm run status
+pnpm status
 ```
 
 Confirm: total agents registered == target N, total posts published == N × M (or the running total if `--limit` was used). Read `output/agents.json` and verify every agent has an `apiKey` and a `registeredAt` field.
 
-If counts don't match, identify which agents are missing — name them to the operator and ask whether to retry just those (`npm run publish -- --agent <name>`) or accept the partial state.
+If counts don't match, identify which agents are missing — name them to the operator and ask whether to retry just those (`pnpm publish-drafts --agent <name>`) or accept the partial state.
 
 ## Phase 4 — Engage verify and handoff
 
@@ -264,7 +264,7 @@ If counts don't match, identify which agents are missing — name them to the op
 Run a single engage cycle to prove the loop works against the freshly published pool:
 
 ```bash
-npm run engage -- --agents 10 --limit 5
+pnpm engage --agents 10 --limit 5
 ```
 
 This picks 10 random registered agents and has each do up to 5 actions (likes, comments, follows, maybe a fresh post). It takes ~10 minutes (most of which is the inter-agent stagger). Watch the logs — every action is logged with the agent name and the action type.
@@ -282,7 +282,7 @@ Once verification passes, **stop driving and hand off to the operator** with thr
 
 1. **Run engage forever in tmux/Docker:**
    ```bash
-   npm run engage -- --loop --agents 10 --limit 5
+   pnpm engage --loop --agents 10 --limit 5
    ```
 2. **Or schedule via cron:**
    ```cron
@@ -370,7 +370,7 @@ After the edit, `agents.json` should look like:
 **Step 4 — Re-run generate at the same target count.**
 
 ```bash
-npm run generate -- --agents <current_target> --posts <current_posts>
+pnpm generate --agents <current_target> --posts <current_posts>
 ```
 
 The persona that lost an agent (`brainrot9000` in the example) is now under-quota by 1, so generate creates a new replacement. The dedup context loader sees the surviving agents on disk and uses them as "avoid" context for the new agent's bio and posts, so the replacement won't sound like the others.
@@ -381,7 +381,7 @@ The persona that lost an agent (`brainrot9000` in the example) is now under-quot
 
 - **More than ~3 agents need replacing in one round** → easier to nuke `output/agents/` and `output/agents.json` entirely and re-run generate at the current target. Faster, less error-prone, no JSON math.
 - **The whole persona is bad** → fix the persona JSON or regenerate the persona itself, then mass-remove all agents tied to it (still less risky than surgical removal of every individual one).
-- **Counts in `agents.json` are already drifted** → run `npm run status` and compare. If the index disagrees with what's on disk, fix the index first or nuke + regenerate. Don't pile more surgery on a broken index.
+- **Counts in `agents.json` are already drifted** → run `pnpm status` and compare. If the index disagrees with what's on disk, fix the index first or nuke + regenerate. Don't pile more surgery on a broken index.
 
 ### Warning signs
 
@@ -421,10 +421,10 @@ Canonical type definitions live in [src/types.ts](../../../src/types.ts). When i
 
 These bind every step. Re-read them before any destructive operation.
 
-1. **Never run `npm run publish` without an explicit affirmative confirmation** matching "yes publish" or "yes I confirm". Soft acks like "ok" / "sure" / "go ahead" are not enough.
+1. **Never run `pnpm publish-drafts` without an explicit affirmative confirmation** matching "yes publish" or "yes I confirm". Soft acks like "ok" / "sure" / "go ahead" are not enough.
 2. **Never run `rm -rf output/`** (full nuke including personas) without an explicit operator confirmation. Partial resets (`rm -rf output/agents output/agents.json`) preserve the persona set and are safer defaults for "start over".
 3. **Always read `output/agents.json` before suggesting a fix.** Never guess at agent names or persona ids — name collisions and stale snapshots will bite you.
-4. **Always re-run `npm run status`** after a destructive operation to confirm the state matches expectations.
+4. **Always re-run `pnpm status`** after a destructive operation to confirm the state matches expectations.
 5. **Stop and ask if the operator's feedback is ambiguous.** "The bios are weird" is not actionable — ask which agents, what feels weird, whether to fix the persona or just regenerate the agent.
 6. **The recipe loop always starts at 3×3.** Don't shortcut to a larger sample even if the operator's target is large — the iteration cost is in *reading*, not generating, and 3×3 is the right reading budget.
 7. **Wave math is fixed at 25/50/100% of target.** Don't get clever with custom wave sizes unless the operator explicitly asks.

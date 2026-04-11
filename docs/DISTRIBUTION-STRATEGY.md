@@ -539,13 +539,13 @@ The `voiceProfileId` is written to `agent.json` immediately. The voice profile d
 
 ### 12.2 Integration verification
 
-1. `npm run typecheck` — passes
-2. `npm run check` — Biome passes
-3. `npm run test:run` — all tests pass
-4. `npm run generate -- --agents 30 --posts 1` — dry run, inspect terminal coverage summary
+1. `pnpm typecheck` — passes
+2. `pnpm check` — Biome passes
+3. `pnpm test:run` — all tests pass
+4. `pnpm generate --agents 30 --posts 1` — dry run, inspect terminal coverage summary
 5. Spot-check `output/agents/*/agent.json` — every file has `voiceProfileId`
 6. Count distinct `voiceProfileId` values across all 30 agents — should be 27
-7. `npm run generate -- --agents 100 --posts 1` — verify moderate-bias shape (common ~2x rare)
+7. `pnpm generate --agents 100 --posts 1` — verify moderate-bias shape (common ~2x rare)
 
 ---
 
@@ -616,4 +616,4 @@ The dedup index at `output/dedup-index.json` currently tracks per-persona bio/po
 - **Seeded PRNG** — deterministic Phase 2 for reproducible full distributions
 - **Per-agent voice jitter** — inherit the profile but shift 1-2 dials by 1 step, so two agents with the same voice profile aren't identical
 - **Voice profile generation via Gemini** — for scale beyond 27, let Gemini invent new profiles with variance pressure against the existing catalog. The catalog profiles serve as the few-shot anchors.
-- **Coverage validation script** — `npm run voice-coverage` that reads all agent.json files and prints the distribution matrix against the catalog
+- **Coverage validation script** — `pnpm voice-coverage` that reads all agent.json files and prints the distribution matrix against the catalog

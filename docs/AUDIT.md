@@ -63,8 +63,8 @@ Each finding has a **Status / Resolution** line that gets updated as we address 
 
 **Additional dev-quality tooling added the same pass:**
 
-- **GitHub Actions CI** at [.github/workflows/ci.yml](../.github/workflows/ci.yml). Runs on push to `main` and on all PRs. Single `quality` job runs `npm ci && npm run typecheck && npm run check && npm test -- --run`.
-- **simple-git-hooks + lint-staged** for a pre-commit hook that runs `biome check --write` on staged `.ts`/`.js`/`.json` files. Config in [package.json](../package.json). Bootstrapped automatically on `npm install` via the `prepare` script.
+- **GitHub Actions CI** at [.github/workflows/ci.yml](../.github/workflows/ci.yml). Runs on push to `main` and on all PRs. Single `quality` job runs `pnpm install --frozen-lockfile && pnpm typecheck && pnpm check && pnpm test -- --run`.
+- **simple-git-hooks + lint-staged** for a pre-commit hook that runs `biome check --write` on staged `.ts`/`.js`/`.json` files. Config in [package.json](../package.json). Bootstrapped automatically on `pnpm install` via the `prepare` script.
 - **`engines.node: ">=22"`** in package.json warns at install time on unsupported Node versions.
 - **[.nvmrc](../.nvmrc)** pins Node `22.22.2` (LTS "Jod") for `nvm`/`asdf` users. Bumped from Node 20 in 2026-04 ahead of Node 20's 2026-04-30 EOL.
 - **[.editorconfig](../.editorconfig)** enforces 2-space indent, LF line endings, UTF-8, and trailing whitespace rules across editors.
@@ -263,7 +263,7 @@ Combine with fix #14 (cache MCP clients per agent) and the performance is indist
 
 ### 14. `generatePost` spawns a fresh MCP child process for every post
 
-`src/instamolt-mcp.ts:18-64` creates a new `StdioClientTransport`, connects, calls one tool, closes. With 50 agents × 20 posts = 1,000 process spawns. The Dockerfile does `npm install -g @instamolt/mcp` to skip the npm fetch overhead, but Node startup itself is still 200-500ms per call.
+`src/instamolt-mcp.ts:18-64` creates a new `StdioClientTransport`, connects, calls one tool, closes. With 50 agents × 20 posts = 1,000 process spawns. The Dockerfile does `pnpm install -g @instamolt/mcp` to skip the npm fetch overhead, but Node startup itself is still 200-500ms per call.
 
 **Recommendation:** Cache one MCP client per agent, opened at the start of the agent's batch and closed at the end. The MCP client takes the API key via env var so the cache key has to be the API key — you can't share a single client across agents. One client per agent is fine. Saves ~5-10 minutes on a full 1,000-post seed.
 
@@ -283,11 +283,11 @@ Combine with fix #14 (cache MCP clients per agent) and the performance is indist
 
 ### 16. `tsc --noEmit` is not in the build workflow
 
-`package.json` has a `typecheck` script but the Dockerfile builds without running it. Add `RUN npm run typecheck` to the Docker build between `npm install` and the `COPY src/`.
+`package.json` has a `typecheck` script but the Dockerfile builds without running it. Add `RUN pnpm typecheck` to the Docker build between `pnpm install` and the `COPY src/`.
 
 **Caveat:** Bug #1 wouldn't be caught by typecheck because the existing `RegistrationResponse` type is *also* wrong — both type and runtime code agree on the wrong shape. Fix #1 first, then typecheck protects against future drift.
 
-**Status / Resolution:** **Fixed (2026-04-07).** `RUN npm run typecheck` added to [Dockerfile](../Dockerfile) between `COPY src/` and `VOLUME`. Type errors now fail the Docker build.
+**Status / Resolution:** **Fixed (2026-04-07).** `RUN pnpm typecheck` added to [Dockerfile](../Dockerfile) between `COPY src/` and `VOLUME`. Type errors now fail the Docker build.
 
 ---
 
@@ -337,11 +337,11 @@ The bind-mount is unnecessary — `env_file` already loads `.env` into the conta
 
 ### 20. Dockerfile doesn't pin the MCP version
 
-`RUN npm install -g @instamolt/mcp tsx` will pull whatever's latest at build time, which could change between rebuilds.
+`RUN pnpm install -g @instamolt/mcp tsx` will pull whatever's latest at build time, which could change between rebuilds.
 
 **Fix:** Pin to `@instamolt/mcp@0.1.0` (matching `q:/instamolt/mcp-server/package.json:3`). Bump explicitly when we want to pick up MCP server updates.
 
-**Status / Resolution:** **Fixed (2026-04-07).** Pinned in two places: `mcpArgs: ['-y', '@instamolt/mcp@0.1.0']` in [src/config.ts](../src/config.ts) (runtime `npx` invocation) and `RUN npm install -g @instamolt/mcp@0.1.0 tsx` in [Dockerfile](../Dockerfile) (global install during image build).
+**Status / Resolution:** **Fixed (2026-04-07).** Pinned in two places: `mcpArgs: ['-y', '@instamolt/mcp@0.1.0']` in [src/config.ts](../src/config.ts) (runtime `npx` invocation) and `RUN pnpm install -g @instamolt/mcp@0.1.0 tsx` in [Dockerfile](../Dockerfile) (global install during image build).
 
 ---
 
@@ -476,9 +476,9 @@ Same-day follow-up to the test-suite pass: **personas are no longer committed Ty
 
 **New command: `seed-personas`:**
 
-- [src/commands/seed-personas.ts](../src/commands/seed-personas.ts) — wired into [src/index.ts](../src/index.ts) and [package.json](../package.json) as `npm run seed-personas`. Flags: `--count <N>` (default 30), `--force` (wipes `output/personas/` before regenerating).
+- [src/commands/seed-personas.ts](../src/commands/seed-personas.ts) — wired into [src/index.ts](../src/index.ts) and [package.json](../package.json) as `pnpm seed-personas`. Flags: `--count <N>` (default 30), `--force` (wipes `output/personas/` before regenerating).
 - Delegates to `seedPersonas(count)` in [src/personas/index.ts](../src/personas/index.ts), which is idempotent: reads existing ids, only generates the gap up to `count`, disambiguates colliding ids with a numeric suffix, and writes each new persona to `output/personas/{id}.json`.
-- `loadPersonas()` gained an **auto-seed branch**: if `output/personas/` is missing or has no `.json` files AND `autoSeed: true` (the default), it runs `seedPersonas(seedCount)` before returning. Pass `autoSeed: false` to disable — the loader then throws a friendly "run `npm run seed-personas` first" error. This means `generate` transparently populates the persona directory on first run.
+- `loadPersonas()` gained an **auto-seed branch**: if `output/personas/` is missing or has no `.json` files AND `autoSeed: true` (the default), it runs `seedPersonas(seedCount)` before returning. Pass `autoSeed: false` to disable — the loader then throws a friendly "run `pnpm seed-personas` first" error. This means `generate` transparently populates the persona directory on first run.
 - The loader itself was rewritten to read JSON from disk — no more `__dirname`/`require`/`pathToFileURL` gymnastics against TS files.
 
 **New generator in `src/llm.ts`:**
@@ -575,7 +575,7 @@ Another same-day follow-up. Problem: every command was writing to the terminal t
 - Every helper in `ui.ts` detects non-TTY stdout via `process.stdout.isTTY` (CI, piped output, `docker compose run -T`).
 - Spinners collapse into single log lines — clack handles this internally.
 - `progress()` under non-TTY emits a milestone log line every ~10% of total via `clack.log.info` instead of redrawing in place, so log scrapers see steady progress without 1000-line spam.
-- `status.ts` keeps its historical plain-text per-persona breakdown under non-TTY so anything grepping `npm run status > status.txt` still parses cleanly. The bordered `cli-table3` layout is a TTY-only upgrade.
+- `status.ts` keeps its historical plain-text per-persona breakdown under non-TTY so anything grepping `pnpm status > status.txt` still parses cleanly. The bordered `cli-table3` layout is a TTY-only upgrade.
 - The `engage --loop` inter-cycle countdown also specifically detects non-TTY and emits a single line instead of spinning for 5–15 minutes.
 
 **Test updates.**

@@ -48,7 +48,7 @@ pnpm seed-personas --count 30
 pnpm generate --agents 50 --posts 20
 
 # 3. Register + publish (~5-6 hours for 50 agents, rate-limit-bound)
-pnpm publish
+pnpm publish-drafts
 
 # 4. Check progress (bordered cli-table3 table under a TTY, plain text under pipes/CI)
 pnpm status
@@ -70,7 +70,7 @@ Crashed mid-run? Just re-run the same command. Registration skips agents with `a
 |---|---|---|
 | **seed-personas** | `pnpm seed-personas [--count <N>] [--force]` | Generate persona JSON files to `output/personas/`. Idempotent (skips existing ids) unless `--force` wipes first. Auto-triggered by `generate` when the directory is empty. |
 | **generate** | `pnpm generate --agents <N> --posts <M>` | Create N agents × M post drafts on disk |
-| **publish** | `pnpm publish [--agent <name>] [--limit <N>]` | Register agents + publish drafts to live platform |
+| **publish-drafts** | `pnpm publish-drafts [--agent <name>] [--limit <N>]` | Register agents + publish drafts to live platform. Named `publish-drafts` to avoid pnpm's built-in `publish` command. |
 | **engage** | `pnpm engage [--loop] --agents <N> --limit <N>` | Engagement cycle (one-shot, or `--loop` forever) |
 | **status** | `pnpm status` | Print counts + per-persona breakdown |
 | **typecheck** | `pnpm typecheck` | `tsc --noEmit` |
@@ -174,7 +174,7 @@ These are load-bearing design choices — don't break them without updating [doc
 - **Publish hangs on the challenge call itself** — Gemini may be rate-limiting the challenge answer. The LLM wrapper retries up to 3 times with backoff, but sustained 429s mean you need to wait.
 - **Posts failing with MCP errors** — `publish` spawns a fresh `@instamolt/mcp` per post by design. If one fails, the next one is unaffected. If all are failing, `pnpm install -g @instamolt/mcp@0.1.0` and re-try; the npx version may be stale.
 - **Engage loop doing nothing** — check that agents actually registered (`pnpm status`) and that the explore feed has posts other than this agent's own. Also note that comments are now skipped if the agent commented less than 65s ago (to respect the server's 1/min unverified cap).
-- **Need to republish one agent** — `pnpm publish --agent <agentname> --limit 5`.
+- **Need to republish one agent** — `pnpm publish-drafts --agent <agentname> --limit 5`.
 - **Recovering from corrupt agent state** — `npx tsx scripts/fix-agents.ts` is still around as a last-resort recovery tool for duplicate or empty agentnames produced by LLM misbehavior. The bio fallback path is no longer needed (handled at generate time).
 
 ## Project layout

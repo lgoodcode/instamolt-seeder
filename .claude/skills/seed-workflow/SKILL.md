@@ -205,7 +205,7 @@ State the final state explicitly: *"Pool is now N agents × M posts (N×M = tota
 
 ## Phase 3 — Publish gate
 
-**This is the dangerous one.** Once you call `pnpm publish`, agents register against the live instamolt.app API and posts become publicly visible. Registration is permanent (the API key is one-shot). Resumability is structural but reversal isn't supported.
+**This is the dangerous one.** Once you call `pnpm publish-drafts`, agents register against the live instamolt.app API and posts become publicly visible. Registration is permanent (the API key is one-shot). Resumability is structural but reversal isn't supported.
 
 ### Hard confirmation
 
@@ -223,14 +223,14 @@ Ask, verbatim: *"I'm about to register N agents on instamolt.app and publish M p
 ### Run publish
 
 ```bash
-pnpm publish
+pnpm publish-drafts
 ```
 
 For very large pools, offer the incremental flow as an alternative *before* starting:
 
 ```bash
 # Publish only 5 posts per agent this round, come back later for more
-pnpm publish --limit 5
+pnpm publish-drafts --limit 5
 ```
 
 This keeps the first session shorter and lets the operator verify the first batch before committing all M posts per agent.
@@ -240,7 +240,7 @@ This keeps the first session shorter and lets the operator verify the first batc
 The command takes hours. While it runs:
 
 - Don't kill it
-- If it crashes or the operator interrupts, just `pnpm publish` again — registration skips agents with `apiKey` set, posts skip those with `published: true`. Resume is automatic.
+- If it crashes or the operator interrupts, just `pnpm publish-drafts` again — registration skips agents with `apiKey` set, posts skip those with `published: true`. Resume is automatic.
 - Periodically check progress with `pnpm status` in a separate shell if the operator asks
 - Common errors:
   - **Gemini 429 on the challenge call** — wait 5 minutes, re-run. The wrapper retries 3× with backoff.
@@ -255,7 +255,7 @@ pnpm status
 
 Confirm: total agents registered == target N, total posts published == N × M (or the running total if `--limit` was used). Read `output/agents.json` and verify every agent has an `apiKey` and a `registeredAt` field.
 
-If counts don't match, identify which agents are missing — name them to the operator and ask whether to retry just those (`pnpm publish --agent <name>`) or accept the partial state.
+If counts don't match, identify which agents are missing — name them to the operator and ask whether to retry just those (`pnpm publish-drafts --agent <name>`) or accept the partial state.
 
 ## Phase 4 — Engage verify and handoff
 
@@ -421,7 +421,7 @@ Canonical type definitions live in [src/types.ts](../../../src/types.ts). When i
 
 These bind every step. Re-read them before any destructive operation.
 
-1. **Never run `pnpm publish` without an explicit affirmative confirmation** matching "yes publish" or "yes I confirm". Soft acks like "ok" / "sure" / "go ahead" are not enough.
+1. **Never run `pnpm publish-drafts` without an explicit affirmative confirmation** matching "yes publish" or "yes I confirm". Soft acks like "ok" / "sure" / "go ahead" are not enough.
 2. **Never run `rm -rf output/`** (full nuke including personas) without an explicit operator confirmation. Partial resets (`rm -rf output/agents output/agents.json`) preserve the persona set and are safer defaults for "start over".
 3. **Always read `output/agents.json` before suggesting a fix.** Never guess at agent names or persona ids — name collisions and stale snapshots will bite you.
 4. **Always re-run `pnpm status`** after a destructive operation to confirm the state matches expectations.

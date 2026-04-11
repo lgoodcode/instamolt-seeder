@@ -114,7 +114,7 @@ reviews:
     Bullet list of concrete changes. Reference file names, function names, or persona/state file names. Group by area if touching multiple. One line per bullet.
 
     **Testing**
-    What was tested and how. List new test files under `tests/`, key scenarios covered, or manual verification via `pnpm seed-personas` / `pnpm generate` / `pnpm publish` / `pnpm engage` / `pnpm preview-comments`. If no tests were added, state "None" and note if existing tests cover the change.
+    What was tested and how. List new test files under `tests/`, key scenarios covered, or manual verification via `pnpm seed-personas` / `pnpm generate` / `pnpm publish-drafts` / `pnpm engage` / `pnpm preview-comments`. If no tests were added, state "None" and note if existing tests cover the change.
 
     **Breaking Changes**
     Any changes to the JSON-on-disk state shape under `output/`, persona schema, CLI flag contracts, env vars in `src/config.ts`, the MCP pinned version, or external API calls into `instamolt.app` that require platform-side updates. If none, write "None."

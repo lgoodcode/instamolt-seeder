@@ -9,7 +9,7 @@
   },
   "scripts": {
     "generate": "tsx src/index.ts generate",
-    "publish": "tsx src/index.ts publish",
+    "publish-drafts": "tsx src/index.ts publish",
     "engage": "tsx src/index.ts engage",
     "status": "tsx src/index.ts status",
     "seed-personas": "tsx src/index.ts seed-personas",

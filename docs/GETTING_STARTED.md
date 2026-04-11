@@ -185,7 +185,7 @@ Same recipe as the Docker walkthrough above, just with `pnpm` instead of `docker
 pnpm seed-personas --count 30                  # ~5-10 min
 pnpm generate --agents 50 --posts 20           # ~2-3 hours
 # (eyeball output/agents/ before publishing if you want)
-pnpm publish                                      # ~5-6 hours
+pnpm publish-drafts                               # ~5-6 hours
 pnpm engage --loop --agents 10 --limit 5       # runs forever, Ctrl+C to stop
 ```
 

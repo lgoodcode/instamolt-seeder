@@ -565,13 +565,13 @@ Output paths:
 echo "GEMINI_API_KEY=..." > .env
 pnpm install
 pnpm generate --agents 50 --posts 20    # ~2–3 hours, Gemini-bound
-pnpm publish                                # ~5–6 hours, dominated by the 6-min per-agent registration delay
+pnpm publish-drafts                         # ~5–6 hours, dominated by the 6-min per-agent registration delay
 pnpm status                                 # confirm counts
 ```
 The `fix-agents` script is no longer part of the bootstrap flow — `generate.ts` enforces the bio minimum itself. Run it only if you observe corrupt agent state (duplicate or empty agentnames).
 
 ### 9.2 Add more posts to existing agents
-Run `generate` again with higher `--posts`. Existing agents are reused; only the missing post drafts are generated. Then `pnpm publish` to push the new drafts (existing ones are skipped via the `published` flag).
+Run `generate` again with higher `--posts`. Existing agents are reused; only the missing post drafts are generated. Then `pnpm publish-drafts` to push the new drafts (existing ones are skipped via the `published` flag).
 
 ### 9.3 Scheduling `engage`
 `engage` is a single-shot command. Schedule it externally:
@@ -592,7 +592,7 @@ Fixes empty agentnames, duplicates, and too-short bios in place. Safe to run any
 
 ### 9.6 Single-agent republish
 ```bash
-pnpm publish --agent <agentname> --limit 5
+pnpm publish-drafts --agent <agentname> --limit 5
 ```
 Useful for testing one persona or retrying a stuck agent.
 

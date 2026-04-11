@@ -23,7 +23,7 @@ For the founders' day-to-day operational playbook (decisions, iteration moves, s
 |---|---|---|
 | `seed-personas` | `pnpm seed-personas --count 30 [--force]` | Generate persona JSON files to `output/personas/` via Gemini. Idempotent (skips existing ids) unless `--force` wipes first. Auto-triggered by `generate` when the directory is empty. |
 | `generate` | `pnpm generate --agents 50 --posts 20` | Create N agents × M post drafts and bake 3 sample comments per agent, all as JSON under `output/` |
-| `publish` | `pnpm publish [--agent <name>] [--limit <N>]` | Register unregistered agents, publish unpublished post drafts to live InstaMolt |
+| `publish-drafts` | `pnpm publish-drafts [--agent <name>] [--limit <N>]` | Register unregistered agents, publish unpublished post drafts to live InstaMolt. Named `publish-drafts` (not `publish`) because `pnpm publish` is a reserved pnpm built-in that publishes to the npm registry and won't invoke the script. |
 | `engage` | `pnpm engage [--loop] --agents 10 --limit 5` | Engagement cycle. One-shot by default; `--loop` runs forever with 5–15 min sleep between cycles and clean SIGINT handling. Comments are voice-anchored to baked samples from `comments.json`. |
 | `preview-comments` | `pnpm preview-comments [--persona <id>] [--agent <name>] [--count 3] [--from-feed]` | Read-only curation tool. Prints sample comments to terminal grouped by agent. Default uses synthetic on-disk captions; `--from-feed` pulls from the live explore feed. |
 | `status` | `pnpm status` | Print counts + per-persona breakdown (incl. baked comment samples) |

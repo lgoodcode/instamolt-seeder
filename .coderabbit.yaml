@@ -1,0 +1,287 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: 'en-US'
+early_access: true
+tone_instructions: 'Node/TS CLI seeding instamolt.app. No DB, no daemon, JSON state under output/. Prioritize DB/daemon creep, MCP version drift, persona-data-as-code, missing persona gates, BLUEPRINT drift. Skip style nits — Biome handles them.'
+
+reviews:
+  path_instructions:
+    - path: '**/*'
+      instructions: |
+        Only post an inline comment if you are highly confident (>90%) it is one of:
+        1. A real bug that will cause incorrect runtime behavior
+        2. A security vulnerability (secret/API key leak, injection, unsafe subprocess args)
+        3. An architecture violation specific to this repo:
+           - A database, ORM, or persistent server being introduced (JSON-on-disk under output/ is load-bearing)
+           - A new daemon/loop/setInterval/while(true) outside the sanctioned `engage --loop` SIGINT path
+           - Uniform behavior across agents not gated on a per-persona probability
+           - Voice profiles generated at runtime or written to disk (they are compile-time constants in src/voice-profiles/catalog.ts)
+           - Persona `.ts` files added under src/personas/ (that directory is loader + distribution only; persona data lives in output/personas/*.json)
+           - MCP version changed in one place without matching the other two (src/config.ts `mcpArgs` + both Dockerfile stages must agree)
+           - Cross-directory import using `../../src/...` instead of the `@/*` path alias
+           - A change under src/ that touches commands, state shape, pipeline semantics, or behavioral loops without a matching update to docs/BLUEPRINT.md
+        4. A secret or credential leak not caught by gitleaks (API keys must be truncated if logged at all)
+
+        DO NOT post inline comments for:
+        - Style, naming, formatting, or import ordering (Biome handles it)
+        - Biome rule violations that are not enabled in biome.json
+        - Performance suggestions or minor optimizations
+        - "Consider doing X" type improvements
+        - Missing tests or documentation gaps (surface in the walkthrough summary)
+        - Anything you'd rate below 90% confidence
+        - Nitpicks or trivial suggestions, even if backed by a learned pattern
+        - Refactoring suggestions where the current code is functionally correct
+        - Convention alignment suggestions where the current pattern works (e.g., "use vi.hoisted()" when vi.mock() factory works correctly)
+
+        Learnings are context for understanding intent — they are NOT a mandate to post inline comments. A learned pattern only warrants an inline comment if violating it causes a bug, security issue, or one of the architecture violations above. Style consistency alone is not grounds for an inline comment.
+
+        Review limits: one comment per violation type per file (if the same rule is broken multiple times, list all locations in a single comment); limit to lines added or modified in the diff; max 8 comments per PR, prioritizing errors over suggestions.
+
+        If you're unsure, surface it in the walkthrough summary instead.
+    - path: 'src/commands/**/*.ts'
+      instructions: |
+        Command file conventions:
+        - Terminal output goes through `@/lib/ui` (`intro`, `section`, `note`, `spinner`, `progress`, `outro`, `summaryLine`, `color`, `symbol`). Do NOT flag raw `console.log` in `src/commands/status.ts` (renders a `cli-table3` via `console.log(table.toString())`) or `src/commands/preview-comments.ts` (multi-line agent output that can't flow through `ui.note()`). Both exceptions are intentional.
+        - The structured `log()` from `@/lib/logger` is acceptable inside commands for one-liner events (`log('info', ...)` / `log('success', ...)` / `log('warn', ...)`), e.g., per-agent completion or warnings. Spinners/progress are for long-running work; `log()` is for individual status lines.
+        - Idempotency is load-bearing: `apiKey` present = skip registration; `published: true` = skip posting; existing persona ids = skip seeding unless `--force`; existing `comments.json` = skip baking. Do NOT suggest removing these skip checks in favor of "always do the work" — the phases are designed to be re-run safely.
+        - `engage --loop` is the ONLY sanctioned long-running mode and uses a `stopRequested` flag set by `process.on('SIGINT', ...)`. Do NOT flag this as a "daemon anti-pattern" — it's the sanctioned exception. Do flag any NEW `setInterval` / `while (true)` / background process added elsewhere.
+        - Every engagement action MUST be gated on a per-persona probability threshold. Existing fields on `Persona` (see `src/types.ts`) are `likeProbability`, `commentProbability`, and `followProbability` — any new action (repost, tag, DM, etc.) must add its own `persona.<x>Probability` field rather than using a constant. Uniform behavior across agents is a bug — it looks like a bot farm.
+        - `sleep()` calls between API operations are rate-limit pacing, not bugs. Do not flag them as "blocking the event loop" or suggest parallelizing them.
+    - path: 'src/services/**/*.ts'
+      instructions: |
+        Service module conventions:
+        - `@/services/llm.ts` (Gemini wrapper) uses a hand-rolled 3-retry exponential backoff. Do not suggest replacing it with an off-the-shelf retry library unless there's a correctness bug.
+        - `@/services/instamolt-api.ts` handles 429 + `Retry-After` explicitly. If you see a new endpoint added, verify it handles the same 429 flow — but do NOT flag that it "should use axios" or similar library swaps.
+        - `@/services/instamolt-mcp.ts` has TWO call shapes: `generatePost()` is a one-shot that spawns a fresh `npx -y @instamolt/mcp@<pinned>` subprocess per call (used by `publish`, correct), and `AgentMcpClient` caches an MCP stdio client per agent API key for reuse. Do NOT suggest collapsing these — the one-shot path is simpler for single-call sites, the class is for same-agent multi-call sites.
+        - The MCP version is pinned in THREE places and must agree: `src/config.ts` `mcpArgs`, the `builder` stage of the Dockerfile, and the `runtime` stage of the Dockerfile. If a PR bumps one, verify the other two match.
+        - Service modules are the one place where `console.warn` / `console.error` (or the `log()` facade from `@/lib/logger`) is fine for operational alerts (rate limits, retries). Do NOT require these to route through `@/lib/ui` — command files use `ui.*`, service files use `log()` / `console.warn`.
+        - API keys in log lines must be truncated (never full-length). Flag any new log line that interpolates a full key.
+    - path: 'src/lib/**/*.ts'
+      instructions: |
+        Shared library conventions:
+        - Persisted dedup index pattern (`src/lib/dedup-index.ts`): versioned JSON file under `output/` as the fast path, disk-walk fallback when the cache is missing/corrupt, logged warning (never hard-fail), reserved `null` slots for future fields. When a new on-disk cache is added, it should follow the same shape. Do NOT suggest making the cache authoritative or removing the fallback.
+        - Avoid-list curation: when sampling a small prompt avoid-list (K≤12) from a larger persona corpus, use `pickDiverseAndRecent` from `src/lib/similarity.ts` (half-recent + half-farthest-point Jaccard sampling), not `slice(-N)`. The prompt sample (writing signal, small K) and the similarity validation gate (in-memory pool scan) are TWO DIFFERENT jobs — don't flag one as a replacement for the other.
+        - Runtime decay pattern: any long-lived avoid-list used in `engage --loop` needs a bake-time artifact (e.g. `comments.json`) PLUS a rolling runtime cache (e.g. `runtime-comments.json`, capped at last 50), concatenated at load time. Without the runtime cache, the avoid-list is frozen at bake time and the loop drifts into repetition. Flag any new `--loop`-aware feature that only reads a bake-time artifact.
+        - `@/lib/logger.ts` uses emoji icons intentionally for terminal UX. Do not flag them.
+        - `@/lib/ui.ts` has many exports; large `vi.mock('@/lib/ui', ...)` blocks in tests are expected. Do not flag their size.
+    - path: 'src/voice-profiles/**/*.ts'
+      instructions: |
+        Voice profiles are compile-time constants (see `catalog.ts`) with `prevalenceWeight: 1–4`. The source of truth is [docs/VOICE-PROFILE-CATALOG.md](docs/VOICE-PROFILE-CATALOG.md) — any `catalog.ts` edit must keep that doc in sync in the same PR. Voice profiles must never be generated at runtime, written to disk, or loaded from `output/`. Flag any PR that tries to runtime-generate them or move them out of `src/`.
+    - path: 'src/personas/**/*.ts'
+      instructions: |
+        `src/personas/` holds loader (`index.ts`) and distribution logic (`registry.ts`) ONLY. Persona DATA lives at `output/personas/{id}.json` (runtime-generated via Gemini). Flag any PR that adds a persona `.ts` file to this directory — personas are runtime data, not source code. `loadPersonas()` auto-seeds via Gemini when the directory is empty; `getAgentAssignments()` distributes agents across persona × voice profile with coverage guarantees (see BLUEPRINT.md §5.5).
+    - path: 'src/config.ts'
+      instructions: |
+        When this file adds new `process.env.*` reads, verify `.env.example` is updated in the same PR. `GEMINI_API_KEY` is required (lazy getter — throws on first access, not at import, so tests that don't touch Gemini can still import config); `GEMINI_MODEL`, `INSTAMOLT_API_URL`, and `INSTAMOLT_MEDIA_URL` have defaults and are optional. The pinned MCP version in `mcpArgs` must match both Dockerfile stages (see `src/services/instamolt-mcp.ts` instructions). Do not flag the hand-tuned delay constants (`registrationDelay`, `postDelay`, `agentDelay`) as "magic numbers" — they are the canonical home for cadence tuning and their values are pinned to specific server-side rate limits documented inline. The per-agent comment cooldown (`COMMENT_COOLDOWN_MS`) lives in `src/commands/engage.ts`, not here.
+    - path: 'docs/BLUEPRINT.md'
+      instructions: |
+        BLUEPRINT.md is the seeder's living source of truth. Verify that any change under `src/` in the same PR which touches commands, state shape, pipeline semantics, persona schema, external integrations, or behavioral loops has a matching update here. If a `src/` change lands without a corresponding BLUEPRINT.md update, flag it in the walkthrough summary — this is the only "missing docs" flag worth posting. Do NOT touch `docs/CODEX.md` (that's the upstream platform blueprint, updated only from the platform repo).
+    - path: 'Dockerfile'
+      instructions: |
+        Multi-stage build: `builder` runs `typecheck` + `biome check` + `vitest run` as gates using `pnpm install --frozen-lockfile` against `pnpm-lock.yaml`; `runtime` installs prod-only deps (`--prod`) and copies only `tsconfig.json` + `src/`. Both stages pre-install `@instamolt/mcp@<pinned> tsx` globally via `corepack enable` + pnpm to avoid the ~10s `npx` cold start per `generate_post` call. The pinned MCP version MUST match `src/config.ts` `mcpArgs` — if one bumps, the other two must bump in the same PR. Do NOT suggest moving to a single-stage build (tests/dev deps/biome would ship in the runtime image).
+    - path: 'tests/**/*.test.ts'
+      instructions: |
+        Test files have an extremely high bar for inline comments. Only flag:
+        1. Tests that will pass when the code under test is actually broken (false green)
+        2. Tests that assert the wrong behavior (will fail on correct code)
+        3. Security issues in test fixtures (real credentials, real URLs with tokens)
+        4. Tests placed outside `tests/` (e.g., in `__tests__/` or next to source) — the canonical layout is `tests/` mirroring `src/` with the `@/*` path alias
+        5. Tests that hit real services (real Gemini, real InstaMolt API, real MCP subprocess, real filesystem) instead of mocks
+
+        DO NOT flag:
+        - Mock setup style (vi.hoisted vs vi.mock factory vs vi.mocked — all are valid Vitest patterns)
+        - Test structure or organization preferences
+        - Missing test cases (put these in the walkthrough summary)
+        - Naming conventions in test descriptions
+        - Large `vi.mock('@/lib/ui', ...)` blocks — the UI facade has many exports and the mock needs to cover them
+        - "Consider using X pattern" refactoring suggestions
+  profile: 'assertive'
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: false
+  high_level_summary_placeholder: ''
+  high_level_summary_instructions: |
+    Write a concise PR summary that scales with change size. Small PRs get a few lines; large PRs get proportionally more detail.
+
+    Format:
+
+    **Affects:** `commands` `services` `lib` (tags for each area touched: commands, services, lib, personas, voice-profiles, config, docs, tests, infra, ci)
+
+    **Summary**
+    1-3 sentences: what this PR does and why. Name specific commands, services, or state files — not vague descriptions.
+
+    **Changes**
+    Bullet list of concrete changes. Reference file names, function names, or persona/state file names. Group by area if touching multiple. One line per bullet.
+
+    **Testing**
+    What was tested and how. List new test files under `tests/`, key scenarios covered, or manual verification via `pnpm seed-personas` / `pnpm generate` / `pnpm publish` / `pnpm engage` / `pnpm preview-comments`. If no tests were added, state "None" and note if existing tests cover the change.
+
+    **Breaking Changes**
+    Any changes to the JSON-on-disk state shape under `output/`, persona schema, CLI flag contracts, env vars in `src/config.ts`, the MCP pinned version, or external API calls into `instamolt.app` that require platform-side updates. If none, write "None."
+
+    Rules:
+    - Always include all four sections. Write "None" for empty sections.
+    - Be specific: file names, function names, field names.
+    - Scale length proportionally: 1-file fix = 5 lines total, 20-file change = 25+ lines.
+    - Do not repeat information across sections.
+  auto_title_instructions: |
+    Format: "<type>: <description>" following Conventional Commits. Type must be one of: feat, fix, refactor, chore, docs, test, perf, build, ci. Subject under 72 chars, imperative mood, no trailing period. Examples: "feat: add repost action gated on persona threshold", "fix: stop engage loop from drifting into repetition", "chore: bump @instamolt/mcp to 0.2.0".
+
+  # Status & commit
+  review_status: true
+  review_details: false
+  commit_status: false
+  fail_commit_status: false
+
+  # Walkthrough
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  poem: false
+
+  # Labels
+  suggested_labels: true
+  auto_apply_labels: true
+  labeling_instructions:
+    - label: 'commands'
+      instructions: 'Apply when PR changes files under src/commands/ (CLI phase implementations: seed-personas, generate, publish, engage, preview-comments, status).'
+    - label: 'services'
+      instructions: 'Apply when PR changes files under src/services/ (Gemini LLM wrapper, InstaMolt REST client, MCP subprocess client).'
+    - label: 'lib'
+      instructions: 'Apply when PR changes files under src/lib/ (UI facade, logger, similarity helpers, dedup index, comment samples).'
+    - label: 'personas'
+      instructions: 'Apply when PR changes src/personas/ loader/distribution logic (index.ts, registry.ts) or the Persona type / probability fields in src/types.ts. Runtime persona JSON lives under output/personas/ and is gitignored — it will never appear in a PR diff.'
+    - label: 'voice-profiles'
+      instructions: 'Apply when PR changes src/voice-profiles/catalog.ts (hand-authored voice profile constants) or docs/VOICE-PROFILE-CATALOG.md. These must stay in lockstep.'
+    - label: 'infra'
+      instructions: 'Apply when PR changes Dockerfile, docker-compose.yml, .env.example, pnpm-lock.yaml, or package.json scripts/deps. Also apply when the pinned MCP version changes (must hit src/config.ts + both Dockerfile stages).'
+    - label: 'ci'
+      instructions: 'Apply when PR changes .github/workflows/ (lint, typecheck, test, docker build jobs).'
+    - label: 'docs'
+      instructions: 'Apply when PR changes any file under docs/ (BLUEPRINT.md is the source of truth — changes here often accompany src/ changes), the root README.md, CLAUDE.md, .github/copilot-instructions.md, or .github/instructions/*.md.'
+    - label: 'breaking'
+      instructions: 'Apply when PR modifies the JSON-on-disk state shape under output/, the persona schema, CLI flag contracts, required env vars in src/config.ts, the MCP pinned version, or external API calls into instamolt.app that would require platform-side updates.'
+
+  # Reviewers
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+
+  # AI agent prompts
+  enable_prompt_for_ai_agents: false
+
+  # Path filters
+  path_filters:
+    - '!**/node_modules/**'
+    - '!**/dist/**'
+    - '!**/coverage/**'
+    - '!output/**'
+    - '!pnpm-lock.yaml'
+    - '!**/*.tsbuildinfo'
+
+  # Abort
+  abort_on_close: true
+
+  # Auto review
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    ignore_title_keywords:
+      - 'wip'
+      - 'WIP'
+      - 'draft'
+      - 'Draft'
+      - 'do not merge'
+    drafts: false
+    base_branches:
+      - 'main'
+
+  # Finishing touches
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+  # Tools
+  tools:
+    biome:
+      enabled: true
+    gitleaks:
+      enabled: true
+    eslint:
+      enabled: false
+    hadolint:
+      enabled: false
+    yamllint:
+      enabled: false
+    markdownlint:
+      enabled: false
+    ruff:
+      enabled: false
+    golangci-lint:
+      enabled: false
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    swiftlint:
+      enabled: false
+    detekt:
+      enabled: false
+    rubocop:
+      enabled: false
+    clippy:
+      enabled: false
+    buf:
+      enabled: false
+    pmd:
+      enabled: false
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - 'CLAUDE.md'
+      - 'docs/BLUEPRINT.md'
+      - 'docs/SEEDING.md'
+      - 'docs/VOICE-PROFILE-CATALOG.md'
+      - 'docs/VOICE-PROFILE.md'
+      - '.github/copilot-instructions.md'
+      - '.github/instructions/*.md'
+  learnings:
+    scope: 'local'
+
+code_generation:
+  docstrings:
+    language: 'en-US'
+    path_instructions:
+      - path: 'src/services/**/*.ts'
+        instructions: 'Use JSDoc style on public exports. Document purpose, parameters, return type, and thrown errors. Do not add docstrings to private helpers or trivial getters. Note retry/backoff behavior where present.'
+      - path: 'src/commands/**/*.ts'
+        instructions: 'Add a brief header comment naming the phase and its idempotency check. Example: // generate — phase 1: idempotent on existing agent directories; skips personas already fully allocated.'
+      - path: 'src/lib/**/*.ts'
+        instructions: 'Use JSDoc on public exports. For cache/fallback helpers (e.g., dedup-index), document the fast path, the fallback trigger, and any reserved future fields.'
+  unit_tests:
+    path_instructions:
+      - path: 'src/**/*.ts'
+        instructions: |
+          Generate Vitest tests following this exact pattern:
+          1. Vitest imports at the top (`import { beforeEach, describe, expect, it, vi } from 'vitest';`)
+          2. `vi.stubEnv(...)` for any env vars read at import time (before module imports)
+          3. `vi.hoisted()` for mock variable definitions shared across mocks and tests
+          4. `vi.mock()` for module mocking (using hoisted variables — Vitest auto-hoists above imports)
+          5. Imports that consume mocked modules (including the SUT), using the `@/*` path alias — never `../../src/...`
+          6. `beforeEach(() => vi.clearAllMocks())`
+          7. Test file goes under `tests/` in a path that mirrors `src/` (e.g. `src/services/llm.ts` → `tests/services/llm.test.ts`). Never use `__tests__/` directory naming.
+          8. File name: `{module-name}.test.ts`
+          9. Mock `@/services/llm` (Gemini), `@/services/instamolt-api` (REST client), `@/services/instamolt-mcp` (MCP subprocess), `node:fs/promises`, and `@/lib/ui` (no-op stub so spinners/progress don't pollute output). Never hit real services or the real filesystem.
+          10. Test error paths and edge cases, not just happy paths.

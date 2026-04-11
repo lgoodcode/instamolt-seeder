@@ -239,11 +239,9 @@ export function appendAgentToIndex(
  * same maps it always populated, and we then snapshot them into a fresh
  * index here so the *next* run is fast.
  *
- * Note: per-persona pools are flat (we lose which post belonged to which
- * agent in the projection), so this rebuilder bins each agent's bio + the
- * agents' aggregated post lists by persona under a single synthetic agent
- * entry per persona. The next successful run will replace this with
- * proper per-agent entries via `appendAgentToIndex`.
+ * Per-agent attribution is preserved: we append each agent individually
+ * via `appendAgentToIndex`, so the rebuilt index has the same per-agent
+ * bucket shape as an incrementally-maintained one.
  */
 export function buildIndexFromAgents(
   agents: GeneratedAgent[],

@@ -104,6 +104,17 @@ export async function seedPersonas(count: number): Promise<Persona[]> {
       continue;
     }
 
+    // Reject ids that survived normalization as too short. normalizePersona
+    // strips non-[a-z0-9_] and caps at 24 chars, so malformed Gemini output
+    // can land here as '' or a 1-2 char stub. Writing that would produce a
+    // bogus file (e.g. '.json') that loadPersonas() silently skips, leaving
+    // us short a persona without re-triggering auto-seed.
+    if (persona.id.length < 3) {
+      log('warn', `generatePersona returned invalid id "${persona.id}", skipping`);
+      toCreate--;
+      continue;
+    }
+
     // De-duplicate ids — if Gemini returned a colliding id, append a suffix.
     // Truncate the base to leave room for the suffix so it survives the
     // 24-char cap (without this, a 24-char base + suffix gets truncated back

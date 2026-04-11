@@ -1,14 +1,14 @@
 # Distribution Strategy — Two-Axis Coverage for Voice Profiles x Personas
 
-> **Status:** Planning. Not yet implemented.
-> **Companion docs:** [VOICE-PROFILE.md](./VOICE-PROFILE.md) (schema, open questions) | [VOICE-PROFILE-CATALOG.md](./VOICE-PROFILE-CATALOG.md) (27 hand-authored archetypes) | [BLUEPRINT.md](./BLUEPRINT.md) (seeder architecture) | [SEEDING.md](./SEEDING.md) (operator playbook)
+> **Status:** **Shipped (v3).** The two-phase coverage algorithm specified below is implemented in [`getAgentAssignments()`](../src/personas/registry.ts) and is what `generate` calls to build the agent roster. The 27 hand-authored voice profiles live in [`src/voice-profiles/catalog.ts`](../src/voice-profiles/catalog.ts), the 36 hand-authored personas live in [`src/personas/catalog.ts`](../src/personas/catalog.ts), and each `GeneratedAgent` in `output/agents/<name>/agent.json` now carries both `personaId` and `voiceProfileId`. Treat the rest of this document as a post-hoc design spec for what shipped, not a plan for what's coming.
+> **Companion docs:** [VOICE-PROFILE.md](./VOICE-PROFILE.md) (schema, open questions) | [VOICE-PROFILE-CATALOG.md](./VOICE-PROFILE-CATALOG.md) (27 hand-authored archetypes) | [PERSONA-CATALOG.md](./PERSONA-CATALOG.md) (36 hand-authored personas) | [BLUEPRINT.md](./BLUEPRINT.md) §5.5 (cross-product distribution in context) | [SEEDING.md](./SEEDING.md) (operator playbook)
 > **Scope:** This document covers the **distribution algorithm** — how agents are assigned to (persona, voiceProfile) pairs to maximize realism and guarantee coverage of both axes. It does NOT cover voice profile content integration (prompt changes, validation, generator rewrites) — that's [VOICE-PROFILE.md](./VOICE-PROFILE.md).
 
 ---
 
 ## 1. Summary
 
-When the seeder generates N agents, each agent needs both a **persona** (what they talk about, their personality, aesthetics, behavioral probabilities) and a **voice profile** (how they type — literacy, verbosity, capitalization, punctuation, typos, vocabulary). Today the seeder only assigns personas; voice profiles are not yet implemented.
+When the seeder generates N agents, each agent needs both a **persona** (what they talk about, their personality, aesthetics, behavioral probabilities) and a **voice profile** (how they type — literacy, verbosity, capitalization, punctuation, typos, vocabulary). As of v3 this cross product is live: `generate` calls `getAgentAssignments()` ([src/personas/registry.ts](../src/personas/registry.ts)) to assign each agent one `personaId` × one `voiceProfileId`, and the assignment is persisted on `GeneratedAgent`.
 
 This document specifies a **two-phase distribution algorithm** that:
 

@@ -8,6 +8,7 @@ import type { Persona, VoiceProfile } from '@/types';
 function stub(id: string, weight = 1): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality: '',
     tone: '',
     visualAesthetic: '',
@@ -19,9 +20,11 @@ function stub(id: string, weight = 1): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

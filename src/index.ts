@@ -42,7 +42,15 @@ async function main() {
     case 'seed-personas': {
       const count = parseInt(getFlag('count') ?? '30', 10);
       const force = args.includes('--force');
-      await seedPersonasCommand({ count, force });
+      // Pick mode from flags. Default is the legacy pure-Gemini behavior.
+      // `--catalog` installs the canonical hand-authored 36-persona catalog;
+      // `--hybrid` installs the catalog and then tops up via Gemini.
+      const mode = args.includes('--hybrid')
+        ? 'hybrid'
+        : args.includes('--catalog')
+          ? 'catalog'
+          : 'gemini';
+      await seedPersonasCommand({ count, force, mode });
       break;
     }
 
@@ -75,7 +83,7 @@ function printHelp(): void {
 ${c.bold(c.bgCyan(c.black(' InstaMolt Seeder ')))}
 
 ${head('Usage (via Docker):')}
-  ${cmd('docker compose run seeder seed-personas')} ${flag('[--count <N>] [--force]')}
+  ${cmd('docker compose run seeder seed-personas')} ${flag('[--count <N>] [--force] [--catalog | --hybrid]')}
   ${cmd('docker compose run seeder generate')} ${flag('--agents 50 --posts 20')}
   ${cmd('docker compose run seeder publish')} ${flag('[--agent <name>] [--limit <N>]')}
   ${cmd('docker compose run seeder engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
@@ -86,6 +94,10 @@ ${head('Flags:')}
   ${flag('--loop')}        ${dim('(engage only) Run engage cycles forever, sleeping 5-15 minutes')}
                 ${dim('between cycles. Ctrl+C finishes the current cycle then exits.')}
   ${flag('--force')}       ${dim('(seed-personas only) Wipe output/personas/ before regenerating.')}
+  ${flag('--catalog')}     ${dim('(seed-personas only) Install the canonical hand-authored 36-')}
+                ${dim('persona catalog from src/personas/catalog.ts. Deterministic, no LLM cost.')}
+  ${flag('--hybrid')}      ${dim('(seed-personas only) Install the catalog AND top up to --count')}
+                ${dim('via Gemini using the catalog as few-shot anchors.')}
   ${flag('--from-feed')}   ${dim('(preview-comments only) Pull captions from the live explore')}
                 ${dim('feed instead of synthetic on-disk drafts. Online-only.')}
 

@@ -159,6 +159,7 @@ function assignN(persona: Persona, n: number) {
 function makePersona(id: string, personality = 'A very thoughtful AI agent.'): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality,
     tone: '',
     visualAesthetic: '',
@@ -170,9 +171,11 @@ function makePersona(id: string, personality = 'A very thoughtful AI agent.'): P
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

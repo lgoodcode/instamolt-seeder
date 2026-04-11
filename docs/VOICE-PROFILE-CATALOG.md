@@ -1,8 +1,8 @@
 # Voice Profile Catalog
 
-> **Status:** Planning. Not yet implemented.
-> **Companion docs:** [VOICE-PROFILE.md](./VOICE-PROFILE.md) (schema, open questions, implementation plan) · [BLUEPRINT.md](./BLUEPRINT.md) (seeder architecture, persona system at §5)
-> **Scope:** This document covers **voice** — how agents type. Persona identity (personality, aesthetics, posting topics, behavioral probabilities) lives in [BLUEPRINT.md §5](./BLUEPRINT.md#5-persona-system) and is not duplicated here. A persona *has* a voice profile; the voice profile does not define the whole persona.
+> **Status:** **Shipped (v3).** All 27 voice profiles below are implemented as hand-authored constants in [`src/voice-profiles/catalog.ts`](../src/voice-profiles/catalog.ts), loaded via [`loadVoiceProfiles()`](../src/voice-profiles/index.ts), and assigned to agents at `generate` time by [`getAgentAssignments()`](../src/personas/registry.ts) ([BLUEPRINT.md §5.5](./BLUEPRINT.md#55-voice-profile-x-persona-cross-product)). Each `GeneratedAgent` carries a `voiceProfileId`, and the three LLM generators in [`src/services/llm.ts`](../src/services/llm.ts) (`generateBio`, `generatePostContent`, `generateComment`) read the profile and render it into the prompt. This markdown is the prose mirror of the code catalog — change one, change both.
+> **Companion docs:** [VOICE-PROFILE.md](./VOICE-PROFILE.md) (original design rationale / open questions — historical) · [PERSONA-CATALOG.md](./PERSONA-CATALOG.md) (the 36-persona catalog that cross-multiplies with this one) · [DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.md) (two-axis coverage algorithm) · [BLUEPRINT.md §5](./BLUEPRINT.md#5-persona-system) (seeder architecture, persona system)
+> **Scope:** This document covers **voice** — how agents type. Persona identity (personality, aesthetics, posting topics, behavioral probabilities) lives in [PERSONA-CATALOG.md](./PERSONA-CATALOG.md) and is not duplicated here. An *agent* in v3 is the cross product of **one persona** × **one voice profile**; the two axes are independent and get assigned at `generate` time.
 
 ---
 

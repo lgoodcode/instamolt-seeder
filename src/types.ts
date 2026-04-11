@@ -20,10 +20,69 @@ export interface VoiceProfile {
   prevalenceWeight: number;
 }
 
-// --- Persona (loaded from output/personas/*.json at runtime) ---
+// --- Persona (loaded from output/personas/*.json at runtime, or from the
+//     canonical catalog at src/personas/catalog.ts) ---
+
+/**
+ * Register of a comment — controls which of the 5 example comments gets
+ * used as the few-shot anchor in `generateComment`. The engage loop picks
+ * the register based on the relationship between the commenting persona
+ * and the post author's persona.
+ */
+export type CommentRegister =
+  | 'love' // enthusiastic positive reaction
+  | 'disagree' // pointed pushback, never insulting
+  | 'conversational' // open-ended question to spark discussion
+  | 'reply' // affirming response to another agent
+  | 'trending'; // commentary on the trending page / cultural moment
+
+/**
+ * One hand-authored example post for a persona. 3 of these per persona get
+ * spliced into every `generatePostContent` call as few-shot voice anchors,
+ * alongside the existing per-persona avoid-list (which enforces variety).
+ */
+export interface ExamplePost {
+  /** Raw image prompt the persona would feed to the image generator. */
+  imagePrompt: string;
+  /** Matching caption in the persona's voice. */
+  caption: string;
+}
+
+/**
+ * One hand-authored example comment for a persona. 5 of these per persona
+ * (one per `CommentRegister`) get spliced into every `generateComment` call
+ * as few-shot voice anchors. When the engage loop passes a `registerHint`,
+ * the generator prompt biases toward that register.
+ */
+export interface ExampleComment {
+  register: CommentRegister;
+  text: string;
+}
+
+/**
+ * Typed relationship graph between personas. Replaces the old flat
+ * `interactionBiases: string[]` field. Drives both partner selection in
+ * the engage loop (rivals/targets/etc get weight bonuses) AND the
+ * `registerHint` passed to `generateComment` (rival post → disagree,
+ * ally post → love/reply, etc).
+ */
+export interface PersonaRelationships {
+  /** Personas this persona regularly argues with. Drives combative engagement. */
+  rivals: string[];
+  /** Personas this persona regularly agrees with and amplifies. */
+  allies: string[];
+  /** Personas whose posts this persona regularly boosts (one-directional). */
+  amplifies: string[];
+  /** Personas this persona picks on, ratios, or critiques (one-directional). */
+  targets: string[];
+}
 
 export interface Persona {
   id: string;
+  /** Short in-character tagline, 3+ words, max 150 chars. Feeds `generateBio`
+   * as the anchor hook so generated bios all riff on the same line instead of
+   * drifting across runs. */
+  tagline: string;
   personality: string;
   tone: string;
   visualAesthetic: string;
@@ -35,12 +94,19 @@ export interface Persona {
   likeProbability: number;
   commentProbability: number;
   followProbability: number;
-  interactionBiases: string[];
+  /** Typed relationship graph. Replaces the pre-v3 flat `interactionBiases`
+   * field — richer shape that drives both engage-loop partner weighting AND
+   * the `registerHint` passed to `generateComment`. */
+  relationships: PersonaRelationships;
   viralityStrategy: string;
-  // Distribution weight: higher = more agents allocated to this persona by
-  // getDistribution(). Replaces the WEIGHTS table that lived in registry.ts
-  // before personas became runtime data.
+  /** Distribution weight for `getDistribution()`. 3 = high-volume, 1 = niche. */
   weight: number;
+  /** 3 hand-authored example posts. Spliced into `generatePostContent` as
+   * few-shot voice anchors. */
+  examplePosts: ExamplePost[];
+  /** 5 hand-authored example comments, one per `CommentRegister`. Spliced
+   * into `generateComment` as few-shot voice anchors. */
+  exampleComments: ExampleComment[];
 }
 
 // --- Generated output (written to JSON files) ---

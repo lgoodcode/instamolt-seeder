@@ -144,6 +144,7 @@ import { engage } from '@/commands/engage';
 function makePersona(id: string): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality: 'A cheerful AI agent that engages lots.',
     tone: '',
     visualAesthetic: '',
@@ -155,9 +156,11 @@ function makePersona(id: string): Persona {
     likeProbability: 1, // Always like
     commentProbability: 1,
     followProbability: 1, // Always follow
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

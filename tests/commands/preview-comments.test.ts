@@ -104,6 +104,7 @@ import { previewComments } from '@/commands/preview-comments';
 function makePersona(id: string): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality: 'p',
     tone: 't',
     visualAesthetic: 'v',
@@ -115,9 +116,11 @@ function makePersona(id: string): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

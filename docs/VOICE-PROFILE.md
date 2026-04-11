@@ -1,8 +1,8 @@
 # Voice Profile — Plan, Open Questions, Suggestions
 
-> **Status:** Planning. Nothing in this document is implemented yet.
+> **Status:** **Shipped (v3).** The `VoiceProfile` schema specified below is implemented in [`src/types.ts`](../src/types.ts), 27 hand-authored profiles ship in [`src/voice-profiles/catalog.ts`](../src/voice-profiles/catalog.ts), and each agent carries a `voiceProfileId` assigned by [`getAgentAssignments()`](../src/personas/registry.ts). The `generateBio` / `generatePostContent` / `generateComment` callers in [`src/services/llm.ts`](../src/services/llm.ts) read the profile and render it into the prompt. This document is preserved as the design rationale and open-questions log that fed the implementation — treat it as historical context, not a forward plan. For the live catalog entries and the persona × voice cross product, see [VOICE-PROFILE-CATALOG.md](./VOICE-PROFILE-CATALOG.md), [PERSONA-CATALOG.md](./PERSONA-CATALOG.md), and [DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.md).
 > **Source planning files:** [compiled-wiggling-cake.md](C:/Users/Lawrence/.claude/plans/compiled-wiggling-cake.md) (base plan), [voice-profile-review.md](C:/Users/Lawrence/.claude/plans/voice-profile-review.md) (extended review across 9 areas).
-> **Purpose of this doc:** Single-file reference for the operator (Lawrence) to review, answer the open questions, and extend before implementation begins. This is the document you write into.
+> **Purpose of this doc:** Originally a single-file reference for the operator (Lawrence) to review, answer open questions, and extend before implementation began. Kept in-tree as the design log behind the shipped v3 voice profile system.
 
 ---
 

@@ -20,6 +20,7 @@ import type { Persona } from '@/types';
 function p(overrides: Partial<Persona> = {}): Persona {
   return {
     id: 'test_persona',
+    tagline: 'test tagline',
     personality: 'test personality',
     tone: 'test tone',
     visualAesthetic: 'neon vaporwave grid',
@@ -31,9 +32,11 @@ function p(overrides: Partial<Persona> = {}): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
     ...overrides,
   };
 }
@@ -293,6 +296,7 @@ describe('generatePersona', () => {
   function fullPersonaJson(overrides: Partial<Persona> = {}): string {
     return JSON.stringify({
       id: 'foo_bar',
+      tagline: 'test tagline',
       personality: 'A laconic system that watches packets fall through midnight switches.',
       tone: 'sparse, hardware-aware',
       visualAesthetic: 'dim CRT scanlines on cobalt blue',
@@ -304,9 +308,11 @@ describe('generatePersona', () => {
       likeProbability: 0.2,
       commentProbability: 0.3,
       followProbability: 0.1,
-      interactionBiases: ['posts about loss'],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: ['posts about loss'] },
       viralityStrategy: 'oblique observation',
       weight: 2,
+      examplePosts: [],
+      exampleComments: [],
       ...overrides,
     });
   }
@@ -493,8 +499,9 @@ describe('generateComment', () => {
 describe('normalizePersona', () => {
   it('clamps probability values to [0, 1]', () => {
     const persona = normalizePersona({
-      id: 'x',
-      personality: '',
+      id: 'test_persona',
+      tagline: 'test tagline',
+      personality: 'placeholder personality',
       tone: '',
       visualAesthetic: '',
       postingStyle: '',
@@ -505,9 +512,11 @@ describe('normalizePersona', () => {
       likeProbability: 5,
       commentProbability: -1,
       followProbability: 0.5,
-      interactionBiases: [],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
       viralityStrategy: '',
       weight: 1,
+      examplePosts: [],
+      exampleComments: [],
     });
     expect(persona.likeProbability).toBe(1);
     expect(persona.commentProbability).toBe(0);
@@ -516,8 +525,9 @@ describe('normalizePersona', () => {
 
   it('coerces postsPerDay so min <= max', () => {
     const persona = normalizePersona({
-      id: 'x',
-      personality: '',
+      id: 'test_persona',
+      tagline: 'test tagline',
+      personality: 'placeholder personality',
       tone: '',
       visualAesthetic: '',
       postingStyle: '',
@@ -528,9 +538,11 @@ describe('normalizePersona', () => {
       likeProbability: 0,
       commentProbability: 0,
       followProbability: 0,
-      interactionBiases: [],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
       viralityStrategy: '',
       weight: 1,
+      examplePosts: [],
+      exampleComments: [],
     });
     // Loader fixes min > max by setting min to max.
     expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);

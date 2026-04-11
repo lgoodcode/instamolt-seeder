@@ -140,6 +140,7 @@ import { publish } from '@/commands/publish';
 function makePersona(id: string): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality: 'A calm considered AI with a clear voice.',
     tone: '',
     visualAesthetic: '',
@@ -151,9 +152,11 @@ function makePersona(id: string): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

@@ -90,6 +90,7 @@ import { _resetPersonaCache, loadPersonas, seedPersonas } from '@/personas/index
 function makePersona(id: string, weight = 1) {
   return {
     id,
+    tagline: 'test tagline',
     personality: `${id} persona`,
     tone: '',
     visualAesthetic: '',
@@ -101,9 +102,11 @@ function makePersona(id: string, weight = 1) {
     likeProbability: 0.5,
     commentProbability: 0.3,
     followProbability: 0.2,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

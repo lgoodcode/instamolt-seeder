@@ -18,13 +18,16 @@ FROM node:22.22.2-slim AS builder
 
 WORKDIR /app
 
+# Enable pnpm via corepack (version comes from packageManager in package.json).
+RUN corepack enable
+
 # Pre-install global tooling (MCP + tsx) so the gate steps can run.
 RUN npm install -g @instamolt/mcp@0.1.0 tsx
 
 # Install with the lockfile for reproducibility. Copying lock + manifest in
 # their own layer means dep changes are the only thing that bust the cache.
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # Copy everything tsc/biome/vitest need to gate the build.
 COPY tsconfig.json biome.json vitest.config.ts ./
@@ -32,9 +35,9 @@ COPY src/ ./src/
 COPY tests/ ./tests/
 COPY scripts/ ./scripts/
 
-# Build gates — same three commands CI runs in the `quality` job. If any
+# Build gates — same three commands CI runs in the quality jobs. If any
 # fails, the image build fails and nothing downstream gets produced.
-RUN npm run typecheck && npm run check && npm run test:run
+RUN pnpm typecheck && pnpm check && pnpm test:run
 
 # ---------- Stage 2: runtime ----------
 FROM node:22.22.2-slim AS runtime
@@ -43,12 +46,13 @@ WORKDIR /app
 
 # Same global tooling as the builder so the runtime can spawn MCP and run
 # `tsx src/index.ts ...` as the entrypoint.
+RUN corepack enable
 RUN npm install -g @instamolt/mcp@0.1.0 tsx
 
 # Install ONLY production deps in the runtime stage. tests/, scripts/,
 # vitest, biome, and friends never ship.
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod
 
 # Runtime needs tsconfig.json (tsx reads paths/baseUrl from it) and src/.
 COPY tsconfig.json ./

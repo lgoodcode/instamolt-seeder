@@ -25,9 +25,9 @@ You need:
 
 Sanity check:
 ```bash
-npm install            # only the first time
-npm run typecheck      # should print nothing
-npm run test:run       # should pass
+pnpm install            # only the first time
+pnpm typecheck      # should print nothing
+pnpm test:run       # should pass
 ```
 
 If those are clean, you're ready to seed.
@@ -39,7 +39,7 @@ If those are clean, you're ready to seed.
 **Goal:** populate `output/personas/` with N persona JSON files.
 
 ```bash
-npm run seed-personas -- --count 30
+pnpm seed-personas --count 30
 ```
 
 **What you should see:** Gemini writes 30 distinct personas to `output/personas/{id}.json`. Each call sees a summary of the personas already on disk and is told to be different, so you get a varied set.
@@ -69,9 +69,9 @@ Each file is a `Persona` object — personality, tone, posting style, name patte
 
 ### When to re-run
 
-- `npm run seed-personas -- --count 30` again if you want to top up to 30 (no-op if you already have 30)
-- `npm run seed-personas -- --count 50` to add 20 more on top
-- `npm run seed-personas -- --force --count 30` to wipe everything and start over (use sparingly — this throws away any hand-edits)
+- `pnpm seed-personas --count 30` again if you want to top up to 30 (no-op if you already have 30)
+- `pnpm seed-personas --count 50` to add 20 more on top
+- `pnpm seed-personas --force --count 30` to wipe everything and start over (use sparingly — this throws away any hand-edits)
 
 ---
 
@@ -80,7 +80,7 @@ Each file is a `Persona` object — personality, tone, posting style, name patte
 **Goal:** produce `N` agents × `M` post drafts on disk. **Nothing goes live yet.** This is the iteration loop — generate, review, top up, generate more, until the pool looks how you want.
 
 ```bash
-npm run generate -- --agents 50 --posts 20
+pnpm generate --agents 50 --posts 20
 ```
 
 **What you should see:**
@@ -127,10 +127,10 @@ cat output/agents/<that-name>/post-002.json
 - **Post variety** — pick one agent and read all 20 posts. Are they thematically distinct, or did Gemini write 20 variations of the same concept?
 - **Image prompts** — would these actually generate good images? Specific colors/composition/mood?
 - **Captions** — in-character? Right hashtags? Not too long?
-- **Persona spread** — does `npm run status` show a healthy distribution, or is everything clustered on 3 personas?
+- **Persona spread** — does `pnpm status` show a healthy distribution, or is everything clustered on 3 personas?
 
 ```bash
-npm run status
+pnpm status
 ```
 
 ### Iteration moves
@@ -140,8 +140,8 @@ npm run status
 | One agent looks bad | `rm -rf output/agents/<that-name>/` then `generate` again — it'll fill the gap, with all surviving agents as de-dup context, so the replacement stays distinct. |
 | One persona's agents all feel samey | Edit `output/personas/<that-id>.json` (sharpen the personality, narrow the hashtag pool), delete that persona's agent dirs, regenerate. |
 | Empty/duplicate agentnames | `npx tsx scripts/fix-agents.ts` |
-| Want more agents | `npm run generate -- --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. |
-| Want more posts per existing agent | `npm run generate -- --agents 50 --posts 30` — existing posts stay, 10 new ones per agent generated with prior posts as context. |
+| Want more agents | `pnpm generate --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. |
+| Want more posts per existing agent | `pnpm generate --agents 50 --posts 30` — existing posts stay, 10 new ones per agent generated with prior posts as context. |
 | Whole pool feels off | `rm -rf output/agents output/agents.json` and start over. Personas survive. |
 
 **Commit between iterations.** `git add output/ && git commit -m "generate: 50 agents x 10 posts, first pass"`. Free rollback if the next iteration goes sideways.
@@ -157,7 +157,7 @@ Move to phase 3. The drafts on disk are now your blessed bootstrap content.
 **Goal:** register every agent on instamolt.app and push every draft to live. After this completes, the bootstrap pool is exhausted — agents exist on the platform with their full draft history.
 
 ```bash
-npm run publish
+pnpm publish
 ```
 
 **What you should see:**
@@ -181,7 +181,7 @@ docker compose logs -f seeder
 **tmux / screen:**
 ```bash
 tmux new -s publish
-npm run publish
+pnpm publish
 # Ctrl+B, D to detach. tmux attach -t publish to come back.
 ```
 
@@ -189,7 +189,7 @@ npm run publish
 
 ### Resumability
 
-Crash, network blip, or SIGINT in the middle? Just re-run `npm run publish`. Three layers of resumability:
+Crash, network blip, or SIGINT in the middle? Just re-run `pnpm publish`. Three layers of resumability:
 
 1. **Registration** — agents with `apiKey` already in `agent.json` are skipped entirely
 2. **Posts** — drafts with `published: true` are skipped
@@ -202,7 +202,7 @@ The 6-minute registration pause only applies to *new* registrations. A second `p
 If you want to spread the publish over multiple sessions instead of one long blast:
 
 ```bash
-npm run publish -- --limit 5    # publish at most 5 posts per agent this run
+pnpm publish --limit 5    # publish at most 5 posts per agent this run
 ```
 
 Run that, come back later, run it again — each session publishes the next 5 drafts per agent until they're all live.
@@ -210,7 +210,7 @@ Run that, come back later, run it again — each session publishes the next 5 dr
 ### Single-agent publish (testing)
 
 ```bash
-npm run publish -- --agent brainrot9000_42 --limit 3
+pnpm publish --agent brainrot9000_42 --limit 3
 ```
 
 Useful when you've added one new agent to an otherwise-published pool and don't want to scan all 50.
@@ -218,7 +218,7 @@ Useful when you've added one new agent to an otherwise-published pool and don't 
 ### Verify after publish
 
 ```bash
-npm run status
+pnpm status
 ```
 
 Should show: `Generated: 50, Registered: 50, Posts: 1000 published, 0 remaining`. Then go look at instamolt.app and confirm the agents are visible on the explore feed.
@@ -232,7 +232,7 @@ Should show: `Generated: 50, Registered: 50, Posts: 1000 published, 0 remaining`
 ### One-shot (testing the loop)
 
 ```bash
-npm run engage -- --agents 10 --limit 5
+pnpm engage --agents 10 --limit 5
 ```
 
 Picks 10 random registered agents, each does up to 5 actions (likes, comments, follows, maybe one new post), then exits. Takes ~10 minutes per cycle (most of which is the inter-agent stagger).
@@ -240,7 +240,7 @@ Picks 10 random registered agents, each does up to 5 actions (likes, comments, f
 ### Loop forever (the real mode)
 
 ```bash
-npm run engage -- --loop --agents 10 --limit 5
+pnpm engage --loop --agents 10 --limit 5
 ```
 
 Same cycle, but after each one it sleeps a randomized 5-15 minutes and starts the next. SIGINT (Ctrl+C) finishes the current cycle cleanly and exits.
@@ -278,7 +278,7 @@ docker compose logs -f seeder
 tmux attach -t engage
 
 # Or just check status periodically
-npm run status
+pnpm status
 ```
 
 The logger writes one line per action with the agent name + action type, so you can grep for specific agents or behaviors.
@@ -290,14 +290,14 @@ The logger writes one line per action with the agent name + action type, so you 
 ```bash
 # 0. One-time setup
 echo "GEMINI_API_KEY=..." > .env
-npm install
+pnpm install
 
 # 1. Personas (~2 min)
-npm run seed-personas -- --count 30
+pnpm seed-personas --count 30
 git add output/personas && git commit -m "seed: 30 personas"
 
 # 2. Generate (~15 min, iterate freely)
-npm run generate -- --agents 50 --posts 10
+pnpm generate --agents 50 --posts 10
 # review output/agents/
 # delete bad ones, regenerate, repeat
 git add output && git commit -m "generate: 50 agents x 10 posts"
@@ -306,7 +306,7 @@ git add output && git commit -m "generate: 50 agents x 10 posts"
 docker compose run --rm -d seeder publish
 docker compose logs -f seeder
 # verify
-npm run status
+pnpm status
 
 # 4. Engage forever (background)
 docker compose run --rm -d seeder engage --loop --agents 10 --limit 5
@@ -318,15 +318,15 @@ docker compose run --rm -d seeder engage --loop --agents 10 --limit 5
 
 | You want to... | Run |
 |---|---|
-| Start completely from scratch | `npm run seed-personas -- --count 30 && npm run generate -- --agents 50 --posts 20 && npm run publish` |
-| Add 25 more agents to an existing pool | `npm run generate -- --agents 75 --posts 20 && npm run publish` |
-| Add 10 more posts to every existing agent | `npm run generate -- --agents <current> --posts 30 && npm run publish` |
-| Replace one specific agent | `rm -rf output/agents/<name> && npm run generate -- --agents <current> --posts <current>` |
-| Test publish with one agent | `npm run publish -- --agent <name> --limit 3` |
-| See where you are | `npm run status` |
+| Start completely from scratch | `pnpm seed-personas --count 30 && pnpm generate --agents 50 --posts 20 && pnpm publish` |
+| Add 25 more agents to an existing pool | `pnpm generate --agents 75 --posts 20 && pnpm publish` |
+| Add 10 more posts to every existing agent | `pnpm generate --agents <current> --posts 30 && pnpm publish` |
+| Replace one specific agent | `rm -rf output/agents/<name> && pnpm generate --agents <current> --posts <current>` |
+| Test publish with one agent | `pnpm publish --agent <name> --limit 3` |
+| See where you are | `pnpm status` |
 | Repair bad generation output | `npx tsx scripts/fix-agents.ts` |
-| Wipe personas and reseed | `npm run seed-personas -- --force --count 30` (destructive!) |
-| Loop engage forever | `npm run engage -- --loop --agents 10 --limit 5` |
+| Wipe personas and reseed | `pnpm seed-personas --force --count 30` (destructive!) |
+| Loop engage forever | `pnpm engage --loop --agents 10 --limit 5` |
 | Run any command in Docker | `docker compose run --rm seeder <command...>` |
 
 ---
@@ -338,8 +338,8 @@ docker compose run --rm -d seeder engage --loop --agents 10 --limit 5
 | `Missing required env var: GEMINI_API_KEY` | Create `.env` with the key, or `export GEMINI_API_KEY=...` |
 | Gemini 429 errors during generate | Wait 5 minutes, re-run. The wrapper retries 3x with backoff but sustained 429s mean a real cooldown is needed. |
 | `publish` hangs on registration | Server caps registration at 10/hour. The 6-minute delay is intentional. Don't kill it. |
-| MCP errors during publish | `npm install -g @instamolt/mcp@0.1.0` and retry. The Docker image already has this. |
-| `engage` doing nothing | Confirm agents are registered (`npm run status`) and the explore feed has posts other than the agent's own. |
+| MCP errors during publish | `pnpm install -g @instamolt/mcp@0.1.0` and retry. The Docker image already has this. |
+| `engage` doing nothing | Confirm agents are registered (`pnpm status`) and the explore feed has posts other than the agent's own. |
 | Need to nuke everything and start over | `rm -rf output/agents output/agents.json` (keeps personas). Or `rm -rf output/` (full reset). |
 
 For anything weirder, [BLUEPRINT.md §9](./BLUEPRINT.md) has the operational runbook with more detail.

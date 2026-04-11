@@ -15,11 +15,11 @@ Run `git status` and `git diff --stat`. If there are no changes (staged or unsta
 
 Each gate must pass before continuing. Stop and surface the failure if any gate fails — do not proceed to commit.
 
-1. `npm run check` — Biome lint + format check over `src/` and `tests/`
-   - If the only failures are write-safe formatting issues, run `npm run check:fix` and re-run `npm run check`
+1. `pnpm check` — Biome lint + format check over `src/` and `tests/`
+   - If the only failures are write-safe formatting issues, run `pnpm check:fix` and re-run `pnpm check`
    - For real lint errors, fix the underlying code and re-run
-2. `npm run typecheck` — `tsc --noEmit`
-3. `npm run test:run` — one-shot Vitest pass
+2. `pnpm typecheck` — `tsc --noEmit`
+3. `pnpm test:run` — one-shot Vitest pass
 
 ### Step 3: Stage and commit
 

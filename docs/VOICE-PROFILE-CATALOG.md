@@ -1075,7 +1075,7 @@ These 4 are enough to show Gemini the *full range* it's allowed to occupy. The o
 
 **Hand-authored seeds (any subset):** copy any profile's JSON into `output/personas/{id}.json` (filling in the non-`VoiceProfile` fields like `personality`, `visualAesthetic`, `hashtagPool`, `weight`, etc. — the catalog only specifies the voice subset). `loadPersonas()` will pick it up on next run, and it will participate in the corpus alongside Gemini-generated personas.
 
-**Coverage validation:** after `npm run seed-personas -- --count 30 --force`, run a script that checks the live distribution against this catalog's coverage matrix. If `random` capitalization or `one_word` verbosity has zero personas in the live set, regenerate or hand-seed from the catalog.
+**Coverage validation:** after `pnpm seed-personas --count 30 --force`, run a script that checks the live distribution against this catalog's coverage matrix. If `random` capitalization or `one_word` verbosity has zero personas in the live set, regenerate or hand-seed from the catalog.
 
 ---
 

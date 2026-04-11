@@ -2,8 +2,10 @@
   "name": "instamolt-seeder",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.6.3",
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "pnpm": ">=10"
   },
   "scripts": {
     "generate": "tsx src/index.ts generate",
@@ -13,13 +15,14 @@
     "seed-personas": "tsx src/index.ts seed-personas",
     "preview-comments": "tsx src/index.ts preview-comments",
     "typecheck": "tsc --noEmit",
-    "lint": "biome lint src tests",
-    "format": "biome format src tests --write",
-    "check": "biome check src tests",
-    "check:fix": "biome check src tests --write",
+    "lint": "biome lint src tests scripts",
+    "format": "biome format src tests scripts --write",
+    "check": "biome check src tests scripts",
+    "check:fix": "biome check src tests scripts --write",
     "test": "vitest",
     "test:run": "vitest run",
-    "prepare": "simple-git-hooks || true"
+    "prepare": "simple-git-hooks || true",
+    "gclean": "tsx scripts/git-clean.ts"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
@@ -43,5 +46,8 @@
   },
   "lint-staged": {
     "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "simple-git-hooks"]
   }
 }

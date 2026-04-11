@@ -6,18 +6,20 @@
  *
  * Also updates agents.json master index to match.
  *
- * Usage: npx tsx scripts/fix-agents.ts
+ * Usage: pnpm tsx scripts/fix-agents.ts
  */
 
-import { readdir, readFile, writeFile, rename, access } from 'fs/promises';
-import { join } from 'path';
+import { access, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 // Inline the paths so this script runs standalone without dotenv/config
 const AGENTS_DIR = './output/agents';
 const INDEX_PATH = './output/agents.json';
 
 // Minimal persona loader — re-uses the project's persona files
-async function loadPersonaMap(): Promise<Map<string, { namePatterns: string[]; personality: string }>> {
+async function loadPersonaMap(): Promise<
+  Map<string, { namePatterns: string[]; personality: string }>
+> {
   const personasDir = join(__dirname, '..', 'src', 'personas');
   const files = await readdir(personasDir);
   const SKIP = new Set(['index.ts', 'index.js', 'registry.ts', 'registry.js']);
@@ -67,7 +69,12 @@ function firstSentence(text: string): string {
 }
 
 async function dirExists(path: string): Promise<boolean> {
-  try { await access(path); return true; } catch { return false; }
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function main() {
@@ -176,7 +183,7 @@ async function main() {
   for (const { oldDir, newDir } of renames) {
     const oldPath = join(AGENTS_DIR, oldDir);
     const newPath = join(AGENTS_DIR, newDir);
-    if (await dirExists(oldPath) && oldPath !== newPath) {
+    if ((await dirExists(oldPath)) && oldPath !== newPath) {
       await rename(oldPath, newPath);
     }
   }
@@ -191,7 +198,7 @@ async function main() {
   try {
     const raw = await readFile(INDEX_PATH, 'utf-8');
     const index = JSON.parse(raw);
-    index.agents = agents.map(a => a.data);
+    index.agents = agents.map((a) => a.data);
     index.totalAgents = agents.length;
     await writeFile(INDEX_PATH, JSON.stringify(index, null, 2));
     console.log(`\nUpdated ${INDEX_PATH}`);
@@ -199,10 +206,12 @@ async function main() {
     console.log(`\nWarning: Could not update ${INDEX_PATH}`);
   }
 
-  console.log(`\nDone. Fixed ${fixedEmpty} empty names, ${fixedDuplicates} duplicates, ${fixedBios} short bios.`);
+  console.log(
+    `\nDone. Fixed ${fixedEmpty} empty names, ${fixedDuplicates} duplicates, ${fixedBios} short bios.`,
+  );
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error('Fatal:', err);
   process.exit(1);
 });

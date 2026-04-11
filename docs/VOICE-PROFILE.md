@@ -307,7 +307,7 @@ Proposed: variance pressure across all 6 archetypes (lurker, liker, commenter, f
 The base plan assumes `output/personas/` is empty (which it is on this machine). But if you have a populated `output/personas/` somewhere, those persona JSONs lack all the new fields.
 
 **Options:**
-- (a) Wipe and reseed (`npm run seed-personas -- --force`). Lossy but clean.
+- (a) Wipe and reseed (`pnpm seed-personas --force`). Lossy but clean.
 - (b) Lazy backfill via `normalizePersona` defaults (ships now, defaults are bland).
 - (c) Add a `--regenerate-voices` flag to `seed-personas` that walks every existing persona JSON and asks Gemini to invent a voice profile *for that specific persona* preserving everything else. Best of both — keeps your hand-tuned personas, gets rich voice profiles.
 

@@ -1,20 +1,47 @@
 {
   "name": "instamolt-seeder",
-  "version": "2.0.0",
+  "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "generate": "tsx src/index.ts generate",
     "publish": "tsx src/index.ts publish",
+    "engage": "tsx src/index.ts engage",
     "status": "tsx src/index.ts status",
-    "typecheck": "tsc --noEmit"
+    "seed-personas": "tsx src/index.ts seed-personas",
+    "preview-comments": "tsx src/index.ts preview-comments",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint src tests",
+    "format": "biome format src tests --write",
+    "check": "biome check src tests",
+    "check:fix": "biome check src tests --write",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "prepare": "simple-git-hooks || true"
   },
   "dependencies": {
+    "@clack/prompts": "^0.11.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "dotenv": "^16.5.0"
+    "cli-table3": "^0.6.5",
+    "dotenv": "^16.5.0",
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.10",
     "@types/node": "^22.0.0",
+    "lint-staged": "^16.4.0",
+    "simple-git-hooks": "^2.13.1",
     "tsx": "^4.21.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.3"
+  },
+  "//": "@biomejs/cli-<platform> is installed automatically via optionalDependencies on the right OS — do not add it explicitly",
+  "simple-git-hooks": {
+    "pre-commit": "npx lint-staged"
+  },
+  "lint-staged": {
+    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
   }
 }

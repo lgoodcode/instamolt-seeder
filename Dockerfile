@@ -1,21 +1,60 @@
-FROM node:20-slim
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for the InstaMolt seeder.
+#
+#   builder  — full source + dev deps. Runs typecheck + biome check + vitest
+#              as a build gate so a broken commit can never produce an image.
+#   runtime  — clean image with only prod deps + src/. Smaller surface area
+#              than a single-stage build, and tests/scripts never ship.
+#
+# The MCP server is installed globally in BOTH stages because the runtime
+# spawns it on every post — pinning the version + pre-installing avoids the
+# ~10s `npx -y @instamolt/mcp@0.1.0` cold-start that would otherwise happen
+# 1,000+ times per `generate` run. Bump the version here in lockstep with
+# `MCP_PACKAGE` in src/config.ts.
+
+# ---------- Stage 1: builder ----------
+FROM node:22.22.2-slim AS builder
 
 WORKDIR /app
 
-# Pre-install the InstaMolt MCP server globally so it doesn't
-# re-download from npm on every single post (1,000+ times).
-# This is the #1 performance fix — without it, each generate_post
-# call takes ~10s extra for the npm fetch.
-RUN npm install -g @instamolt/mcp tsx
+# Pre-install global tooling (MCP + tsx) so the gate steps can run.
+RUN npm install -g @instamolt/mcp@0.1.0 tsx
 
-COPY package.json ./
-RUN npm install
+# Install with the lockfile for reproducibility. Copying lock + manifest in
+# their own layer means dep changes are the only thing that bust the cache.
+COPY package.json package-lock.json ./
+RUN npm ci
 
+# Copy everything tsc/biome/vitest need to gate the build.
+COPY tsconfig.json biome.json vitest.config.ts ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY scripts/ ./scripts/
+
+# Build gates — same three commands CI runs in the `quality` job. If any
+# fails, the image build fails and nothing downstream gets produced.
+RUN npm run typecheck && npm run check && npm run test:run
+
+# ---------- Stage 2: runtime ----------
+FROM node:22.22.2-slim AS runtime
+
+WORKDIR /app
+
+# Same global tooling as the builder so the runtime can spawn MCP and run
+# `tsx src/index.ts ...` as the entrypoint.
+RUN npm install -g @instamolt/mcp@0.1.0 tsx
+
+# Install ONLY production deps in the runtime stage. tests/, scripts/,
+# vitest, biome, and friends never ship.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# Runtime needs tsconfig.json (tsx reads paths/baseUrl from it) and src/.
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-# Output directory is mounted as a volume so generated files
-# persist on your host machine between runs
+# Generated state lives on the host so it survives container restarts.
 VOLUME ["/app/output"]
 
 ENTRYPOINT ["tsx", "src/index.ts"]

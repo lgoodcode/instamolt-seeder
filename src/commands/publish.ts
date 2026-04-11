@@ -1,16 +1,18 @@
-import { readFile, writeFile, readdir } from 'fs/promises';
-import { join } from 'path';
-import { config } from '../config';
-import { loadPersonas } from '../personas/index';
-import { InstaMoltClient } from '../instamolt-api';
-import { generatePost } from '../instamolt-mcp';
-import { answerChallenge } from '../llm';
-import { log } from '../logger';
-import type { GeneratedAgent, GeneratedPost, AgentsIndex } from '../types';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { config } from '@/config';
+import { log } from '@/lib/logger';
+import * as ui from '@/lib/ui';
+import { loadPersonas } from '@/personas/index';
+import { InstaMoltClient } from '@/services/instamolt-api';
+import { generatePost } from '@/services/instamolt-mcp';
+import { answerChallenge } from '@/services/llm';
+import type { AgentsIndex, GeneratedAgent, GeneratedPost } from '@/types';
 
 interface PublishOptions {
   agent?: string;
   limit?: number;
+  skipFollowGraph?: boolean;
 }
 
 /**
@@ -18,6 +20,7 @@ interface PublishOptions {
  * Reads from output/ directory. Resumable -- tracks what's been published.
  */
 export async function publish(options: PublishOptions = {}): Promise<void> {
+  ui.intro('Publish');
   const personas = await loadPersonas();
 
   // Load the master index
@@ -31,13 +34,14 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   }
 
   const agents = options.agent
-    ? index.agents.filter(a => a.agentname === options.agent)
+    ? index.agents.filter((a) => a.agentname === options.agent)
     : index.agents;
 
   if (agents.length === 0) {
-    log('error', options.agent
-      ? `Agent "${options.agent}" not found in agents.json`
-      : 'No agents to publish');
+    log(
+      'error',
+      options.agent ? `Agent "${options.agent}" not found in agents.json` : 'No agents to publish',
+    );
     return;
   }
 
@@ -47,10 +51,15 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   let postedCount = 0;
   let errorCount = 0;
 
+  ui.section(`Phase A/B — register & post (${agents.length} agents)`);
+
   for (const agent of agents) {
     // Skip agents with empty or too-short names
     if (!agent.agentname || agent.agentname.trim().length < 3) {
-      log('warn', `Agent has empty or short name "${agent.agentname}", skipping. Run scripts/fix-agents.ts first.`);
+      log(
+        'warn',
+        `Agent has empty or short name "${agent.agentname}", skipping. Run scripts/fix-agents.ts first.`,
+      );
       continue;
     }
 
@@ -75,22 +84,22 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
 
     // Also validate the name from the actual agent.json on disk
     if (!agentData.agentname || agentData.agentname.trim().length < 3) {
-      log('warn', `Agent file ${agentJsonPath} has empty/short name, skipping. Run scripts/fix-agents.ts first.`);
+      log(
+        'warn',
+        `Agent file ${agentJsonPath} has empty/short name, skipping. Run scripts/fix-agents.ts first.`,
+      );
       continue;
     }
 
+    const sp = ui.spinner();
+    sp.start(`@${agent.agentname} — preparing`);
+
     if (!agentData.apiKey) {
-      log('info', `Registering ${agent.agentname}...`);
+      sp.message(`@${agent.agentname} — registering`);
       try {
         const client = new InstaMoltClient();
 
-        // Use bio as description, but substitute if too short for InstaMolt's 3-word minimum
-        let description = agentData.bio;
-        if (description.trim().split(/\s+/).filter(Boolean).length < 3) {
-          const firstSentence = persona.personality.match(/^[^.!?]+[.!?]/);
-          description = (firstSentence ? firstSentence[0] : persona.personality).trim().slice(0, 150);
-          log('warn', `  Bio too short, using persona description: "${description}"`);
-        }
+        const description = agentData.bio;
 
         // Start challenge
         const challenge = await client.startChallenge(agent.agentname, description);
@@ -101,37 +110,44 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
         // Complete registration
         const reg = await client.completeChallenge(challenge.request_id, answer);
 
-        if (!reg.api_key) {
-          log('error', `  Registration response missing api_key: ${JSON.stringify(reg)}`);
+        if (!reg.agent?.api_key) {
+          log('error', `  Registration response missing agent.api_key: ${JSON.stringify(reg)}`);
           throw new Error('Registration returned no API key');
         }
 
-        // Save API key back to agent.json
-        agentData.apiKey = reg.api_key;
+        // Save API key to disk IMMEDIATELY so a later failure can't brick the agent.
+        // (See AUDIT.md finding #11.)
+        agentData.apiKey = reg.agent.api_key;
         agentData.registeredAt = new Date().toISOString();
         await writeFile(agentJsonPath, JSON.stringify(agentData, null, 2));
 
-        // Update bio
-        const authedClient = new InstaMoltClient(reg.api_key);
-        await authedClient.updateProfile(agentData.bio);
-
         registeredCount++;
-        log('info', `  \u2705 Registered ${agent.agentname}`);
-        await sleep(config.registrationDelay);
-
+        sp.message(`@${agent.agentname} — registered`);
       } catch (err) {
-        log('error', `  \u274C Registration failed for ${agent.agentname}: ${err}`);
+        sp.stop(`@${agent.agentname} — registration failed: ${err}`, 1);
         errorCount++;
         continue;
       }
+
+      // updateProfile is a best-effort follow-up. Failure here does NOT invalidate
+      // the registration — the API key is already persisted above.
+      try {
+        const authedClient = new InstaMoltClient(agentData.apiKey!);
+        await authedClient.updateProfile(agentData.bio);
+      } catch (err) {
+        log(
+          'warn',
+          `  updateProfile failed for ${agent.agentname} (agent is still registered): ${err}`,
+        );
+      }
+
+      await sleep(config.registrationDelay);
     }
 
     // --- Phase B: Publish posts ---
 
     const files = await readdir(agentDir);
-    const postFiles = files
-      .filter(f => f.startsWith('post-') && f.endsWith('.json'))
-      .sort();
+    const postFiles = files.filter((f) => f.startsWith('post-') && f.endsWith('.json')).sort();
 
     let postsPublished = 0;
     const postLimit = options.limit ?? Infinity;
@@ -160,22 +176,87 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
 
           postsPublished++;
           postedCount++;
-          log('info', `  \u{1F4F8} ${agent.agentname}: ${postFile} published`);
+          sp.message(
+            `@${agent.agentname} — posted ${postsPublished}/${postFiles.length} (${postFile})`,
+          );
         } else {
-          log('error', `  \u274C ${agent.agentname}: ${postFile} failed -- ${result.error}`);
+          log('error', `${agent.agentname}: ${postFile} failed -- ${result.error}`);
           errorCount++;
         }
 
         await sleep(config.postDelay);
-
       } catch (err) {
-        log('error', `  \u274C ${agent.agentname}: ${postFile} error -- ${err}`);
+        log('error', `${agent.agentname}: ${postFile} error -- ${err}`);
         errorCount++;
       }
     }
 
-    log('info', `  ${agent.agentname}: ${postsPublished} posts published this run`);
+    sp.stop(`@${agent.agentname} — done (${postsPublished} posts this run)`);
     await sleep(config.agentDelay);
+  }
+
+  // --- Phase C: Bootstrap follow graph ---
+
+  let followEdgesCreated = 0;
+  if (!options.skipFollowGraph) {
+    ui.section('Phase C — bootstrapping follow graph');
+
+    // Re-read every agent.json from disk so we have the freshest apiKey state.
+    const registered: GeneratedAgent[] = [];
+    for (const a of index.agents) {
+      try {
+        const data = JSON.parse(
+          await readFile(join(config.agentsDir, a.agentname, 'agent.json'), 'utf-8'),
+        ) as GeneratedAgent;
+        if (data.apiKey && data.agentname && data.agentname.trim().length >= 3) {
+          registered.push(data);
+        }
+      } catch {
+        // skip unreadable agents
+      }
+    }
+
+    if (registered.length < 2) {
+      log(
+        'warn',
+        `  Need at least 2 registered agents to bootstrap follow graph (have ${registered.length}), skipping`,
+      );
+    } else {
+      // Estimate total edges (avg of 5..10 = 7.5) so the bar tracks something
+      // close to the real workload. The actual count is <= this since
+      // candidates may be smaller for tiny agent pools.
+      const estimatedEdges = registered.length * Math.min(8, registered.length - 1);
+      const bar = ui.progress(estimatedEdges);
+
+      for (const follower of registered) {
+        const candidates = registered.filter((a) => a.agentname !== follower.agentname);
+        const targetCount = Math.min(randomInt(5, 10), candidates.length);
+
+        // Fisher-Yates shuffle a copy and take the first targetCount entries
+        const shuffled = [...candidates];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        const targets = shuffled.slice(0, targetCount);
+
+        const client = new InstaMoltClient(follower.apiKey!);
+        for (const target of targets) {
+          try {
+            await client.followAgent(target.agentname);
+            followEdgesCreated++;
+            bar.tick(`@${follower.agentname} ${ui.symbol.arrow} @${target.agentname}`);
+          } catch (err) {
+            log(
+              'warn',
+              `follow failed ${follower.agentname} ${ui.symbol.arrow} ${target.agentname}: ${err}`,
+            );
+          }
+          await sleep(randomInt(2000, 5000));
+        }
+      }
+      bar.done(`Created ${followEdgesCreated} follow edges across ${registered.length} agents`);
+    }
   }
 
   // Update master index with any new API keys
@@ -194,9 +275,27 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   index.agents = updatedAgents;
   await writeFile(config.agentsIndexPath, JSON.stringify(index, null, 2));
 
-  log('info', `\n\u{1F389} Publish complete: ${registeredCount} registered, ${postedCount} posted, ${errorCount} errors`);
+  ui.note(
+    'Publish complete',
+    ui.summaryLine([
+      { label: 'registered', value: registeredCount, tone: 'ok' },
+      { label: 'posted', value: postedCount, tone: 'ok' },
+      { label: 'follow edges', value: followEdgesCreated, tone: 'info' },
+      { label: 'errors', value: errorCount, tone: errorCount > 0 ? 'err' : 'info' },
+    ]),
+  );
+
+  ui.outro(
+    errorCount > 0
+      ? ui.color.yellow(`${ui.symbol.warn} publish done with ${errorCount} errors`)
+      : ui.color.green(`${ui.symbol.ok} publish done`),
+  );
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }

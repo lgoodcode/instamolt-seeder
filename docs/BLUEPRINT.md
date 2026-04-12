@@ -343,7 +343,7 @@ Defined in [src/lib/dedup-index.ts](../src/lib/dedup-index.ts).
 | `hashtagPool` | llm prompts | Hashtag suggestions |
 | `postsPerDay` `[min, max]` | engage (§7) | Drives fresh-post probability per cycle |
 | `likeProbability` | engage | Per-post probability gate for likes — multiplied by `relationshipMultiplier` per post (§5.7) |
-| `commentProbability` | engage (reserved; currently comments use target count, not prob gate) | Comment gating threshold |
+| `commentProbability` | engage | Per-post probability gate for comment attempts — multiplied by `relationshipMultiplier` per post (§5.7), then still bounded by the cycle's comment target count |
 | `followProbability` | engage | Per-candidate probability gate for follows — multiplied by `relationshipMultiplier` per candidate (§5.7) |
 | `relationships` | engage (partner selection + comment register hint) | Typed relationship graph `{ rivals, allies, amplifies, targets }` (each an array of persona ids). Replaces the pre-v3 flat `interactionBiases: string[]`. See §5.7 for how it drives the engage loop. |
 | `viralityStrategy` | (descriptive) | Human-readable strategy label |
@@ -562,12 +562,19 @@ Per agent in the selected subset, in order:
    commentsTarget = randInt(1, 2)
    for post in otherPosts while commented < commentsTarget AND actionsUsed < limit:
      if !post.caption: continue
+     // Per-post probability gate, scaled by the relationship multiplier
+     // between this agent's persona and the post author's persona (§5.7).
+     // Mirrors the like-loop pattern at step 2.
+     adjustedCommentProb = min(1, persona.commentProbability * relationshipMultiplier(persona, authorPid))
+     if Math.random() > adjustedCommentProb: continue
+     registerHint = pickRegisterHint(persona, authorPid)  // §5.7
      comment = generateComment(
        persona,
        { agentname, bio },
        post.caption,
        post.agentname,
        [...priorComments],     // snapshot so post-call mutation doesn't leak
+       registerHint,
      )
      client.commentOnPost(post.id, comment)
      priorComments.push(comment)     // so a 2nd comment this cycle avoids the 1st
@@ -595,7 +602,6 @@ Per agent in the selected subset, in order:
 ```
 
 **Action limit:** the `--limit` flag caps total actions per agent in a single cycle. Default is 5.
-**Known quirk:** `persona.commentProbability` is declared but the comment loop currently uses only the target count, not a per-post probability gate. If you change this, update §5.1 too.
 
 ## 8. Configuration — [src/config.ts](../src/config.ts)
 
@@ -679,7 +685,6 @@ Track in-flight ideas here before they become code. If a thought does not fit in
 - **Persona drift over time.** Personas are immutable per agent today. Consider letting bios and posting styles evolve slowly based on platform feedback (likes received, comments received).
 - **Persona quality varies run-to-run (resolved, see §5.6).** The canonical 36-persona catalog at [src/personas/catalog.ts](../src/personas/catalog.ts) is the curated starter set this bullet originally called for. `pnpm seed-personas --catalog` installs it deterministically; `--hybrid` uses it as both priors and few-shot anchors for Gemini top-up. Pure `gemini` mode is still supported for open-ended invention but is no longer the recommended default for prod seeding.
 - **Challenge answer tuning.** `answerChallenge` leans very hard on machine-substrate language. If InstaMolt's judge rejects too many, soften the prompt — and note the reason here.
-- **`commentProbability` wiring.** The field exists on `Persona` but the engage comment loop ignores it (see §7 quirk). Either wire it in or remove the field.
 - **`AgentMcpClient` reuse in engage.** The cached MCP client class is available but the engage loop still calls the one-shot `generatePost()` path for fresh-post creation. If engage starts issuing multiple MCP calls per agent per cycle, switch it over.
 
 ## 11. Tooling

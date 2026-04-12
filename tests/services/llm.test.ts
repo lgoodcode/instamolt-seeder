@@ -566,6 +566,60 @@ describe('normalizePersona', () => {
     expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
   });
 
+  it('clamps both ends of postsPerDay before fixing min > max', () => {
+    // Regression: prior code clamped only after the min>max fixup, so a
+    // negative-max input like [-1, -5] became [0, -5] (min > max again),
+    // which then fed a negative postChance into engage.
+    const persona = normalizePersona({
+      id: 'neg_persona',
+      tagline: 'neg tagline',
+      personality: 'placeholder personality',
+      tone: '',
+      visualAesthetic: '',
+      postingStyle: '',
+      commentStyle: '',
+      namePatterns: [],
+      hashtagPool: [],
+      postsPerDay: [-1, -5],
+      likeProbability: 0,
+      commentProbability: 0,
+      followProbability: 0,
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+      viralityStrategy: '',
+      weight: 1,
+      examplePosts: [],
+      exampleComments: [],
+    });
+    expect(persona.postsPerDay[0]).toBeGreaterThanOrEqual(0);
+    expect(persona.postsPerDay[1]).toBeGreaterThanOrEqual(0);
+    expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
+  });
+
+  it('clamps oversized postsPerDay max to 12', () => {
+    const persona = normalizePersona({
+      id: 'big_persona',
+      tagline: 'big tagline',
+      personality: 'placeholder personality',
+      tone: '',
+      visualAesthetic: '',
+      postingStyle: '',
+      commentStyle: '',
+      namePatterns: [],
+      hashtagPool: [],
+      postsPerDay: [1, 99],
+      likeProbability: 0,
+      commentProbability: 0,
+      followProbability: 0,
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+      viralityStrategy: '',
+      weight: 1,
+      examplePosts: [],
+      exampleComments: [],
+    });
+    expect(persona.postsPerDay[1]).toBe(12);
+    expect(persona.postsPerDay[0]).toBe(1);
+  });
+
   it('throws on missing tagline (tagline is the bio generation anchor)', () => {
     expect(() =>
       normalizePersona({

@@ -172,10 +172,13 @@ export async function seedPersonas(count: number, mode: SeedMode = 'gemini'): Pr
   while (toCreate > 0) {
     let persona: Persona;
     try {
-      // Pass the canonical catalog as the few-shot anchor set so Gemini
-      // sees the structural diversity it should aim for. The catalog is the
-      // *reference* shape; the context list is the *avoid* shape.
-      persona = await generatePersona(context, PERSONA_CATALOG);
+      // In hybrid mode, pass the canonical catalog as the few-shot anchor set
+      // so Gemini sees the structural diversity it should aim for — the
+      // catalog is the *reference* shape and the context list is the *avoid*
+      // shape. In legacy `gemini` mode, omit anchors so the run is pure
+      // Gemini invention as documented in SeedMode and docs/SEEDING.md.
+      const catalogAnchors = mode === 'hybrid' ? PERSONA_CATALOG : null;
+      persona = await generatePersona(context, catalogAnchors);
     } catch (err) {
       log('warn', `generatePersona failed, skipping one slot: ${err}`);
       toCreate--;

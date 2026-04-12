@@ -533,9 +533,9 @@ export function normalizePersona(raw: unknown): Persona {
   const postsPerDay: [number, number] = Array.isArray(postsPerDayRaw)
     ? [Math.round(num(postsPerDayRaw[0], 1)), Math.round(num(postsPerDayRaw[1], 3))]
     : [1, 3];
+  postsPerDay[0] = clamp(postsPerDay[0], 0, 12);
+  postsPerDay[1] = clamp(postsPerDay[1], 0, 12);
   if (postsPerDay[0] > postsPerDay[1]) postsPerDay[0] = postsPerDay[1];
-  if (postsPerDay[0] < 0) postsPerDay[0] = 0;
-  if (postsPerDay[1] > 12) postsPerDay[1] = 12;
 
   const relationships = normalizeRelationships(p.relationships);
   const examplePosts = normalizeExamplePosts(p.examplePosts);

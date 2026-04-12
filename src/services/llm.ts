@@ -20,8 +20,37 @@ interface GeminiResponse {
 }
 
 /**
+ * Thrown when Gemini returns a 429 whose body indicates the project's billing
+ * credits are exhausted (as opposed to a transient per-minute rate limit).
+ * Non-retryable: `callGemini` bails out immediately and the top-level handler
+ * in `src/index.ts` catches this to print a friendly fail-fast message.
+ */
+export class GeminiQuotaError extends Error {
+  readonly status = 429;
+  readonly bodySnippet: string;
+  constructor(bodySnippet: string) {
+    super('Gemini API: prepayment credits depleted');
+    this.name = 'GeminiQuotaError';
+    this.bodySnippet = bodySnippet;
+  }
+}
+
+/**
+ * Heuristic: a Gemini 429 body indicates billing exhaustion (rather than a
+ * transient per-minute rate limit) when it mentions credits/billing/quota
+ * exhaustion explicitly. Per-minute rate limits use phrases like "Quota
+ * exceeded for quota metric" referencing a *_per_minute metric — those should
+ * still retry.
+ */
+function isCreditExhaustedBody(body: string): boolean {
+  return /credits?\s+(are\s+)?depleted|billing|prepayment/i.test(body);
+}
+
+/**
  * Raw Gemini call with retry. All generation goes through this.
- * Retries up to 3 times on rate limit (429) or server errors (5xx).
+ * Retries up to 3 times on transient rate limit (429) or server errors (5xx).
+ * 429s whose body indicates billing exhaustion throw `GeminiQuotaError`
+ * immediately without retrying — there's nothing to wait for.
  */
 async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
   const url = `${GEMINI_URL}/${MODEL}:generateContent?key=${config.geminiApiKey}`;
@@ -49,6 +78,14 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
     });
 
     if (res.status === 429 || res.status >= 500) {
+      // Read the body once so we can both log it and inspect it for the
+      // billing-exhaustion signal. If credits are gone, retrying just burns
+      // wall time — bail out with a typed error the top-level handler can
+      // turn into a friendly fail-fast message.
+      const text = await res.text();
+      if (res.status === 429 && isCreditExhaustedBody(text)) {
+        throw new GeminiQuotaError(text.slice(0, 500));
+      }
       if (attempt < MAX_RETRIES - 1) {
         const waitMs = 2 ** attempt * 1000 + Math.random() * 1000;
         console.warn(
@@ -57,7 +94,6 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
-      const text = await res.text();
       throw new Error(`Gemini API error ${res.status}: ${text}`);
     }
 
@@ -450,12 +486,15 @@ const VALID_COMMENT_REGISTERS: readonly CommentRegister[] = [
  * Strict normalization of a persona from untrusted input (Gemini output or
  * catalog JSON). Validates all required fields, coerces numeric strings,
  * clamps probability/weight ranges, and drops malformed sub-objects. Throws
- * on missing or structurally-invalid core fields — pre-launch, there is no
- * backcompat for the old `interactionBiases` shape.
+ * on missing or structurally-invalid core fields (`id`, `personality`,
+ * `tagline`) — pre-launch, there is no backcompat for the old
+ * `interactionBiases` shape.
  *
  * Optional hand-curated fields (`examplePosts`, `exampleComments`) coerce to
  * empty arrays when missing, which lets the generators fall back to abstract
  * prompting without the few-shot anchors — still valid output, just thinner.
+ * `relationships` also coerces to the empty graph shape, which disables
+ * register-hint biasing but keeps the generator call sites from crashing.
  */
 export function normalizePersona(raw: unknown): Persona {
   if (!raw || typeof raw !== 'object') {
@@ -485,6 +524,11 @@ export function normalizePersona(raw: unknown): Persona {
     throw new Error(`normalizePersona: persona "${id}" missing personality`);
   }
 
+  const tagline = str(p.tagline);
+  if (!tagline) {
+    throw new Error(`normalizePersona: persona "${id}" missing tagline`);
+  }
+
   const postsPerDayRaw = p.postsPerDay;
   const postsPerDay: [number, number] = Array.isArray(postsPerDayRaw)
     ? [Math.round(num(postsPerDayRaw[0], 1)), Math.round(num(postsPerDayRaw[1], 3))]
@@ -499,7 +543,7 @@ export function normalizePersona(raw: unknown): Persona {
 
   return {
     id,
-    tagline: str(p.tagline),
+    tagline,
     personality,
     tone: str(p.tone),
     visualAesthetic: str(p.visualAesthetic),
@@ -649,7 +693,7 @@ Persona traits:
 
 You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}
 
-Write a short comment (1-3 sentences) in YOUR voice — not a generic persona voice. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
+Write a comment in YOUR voice — not a generic persona voice. The length should feel natural for this persona and register: it can be a single word, a fragment, or multiple sentences if that fits the voice anchored by the example comments above. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
 
 Reply with ONLY the comment text, nothing else.`;
 

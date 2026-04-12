@@ -143,26 +143,30 @@ export async function seedPersonas(count: number, mode: SeedMode = 'gemini'): Pr
 
   // ── Step 2: Gemini top-up (gemini + hybrid modes) ─────────────────
 
-  // Re-read whatever's on disk (including any catalog entries we just wrote)
-  // so the progressive-context prompt sees them and we don't regenerate ids
-  // that already exist.
-  const existing: Persona[] = [];
+  // Re-read whatever's on disk (including any catalog entries we just wrote
+  // in step 1) so the progressive-context prompt sees them and we don't
+  // regenerate ids that already exist. `context` is the single source of
+  // truth for the avoid-list passed to Gemini — we push new Gemini-generated
+  // personas into it as they arrive rather than concatenating `created`,
+  // which in hybrid mode would duplicate every catalog entry (they're in
+  // both arrays after step 1).
+  const context: Persona[] = [];
   try {
     const files = await readdir(config.personasDir);
     for (const f of files.filter((x) => x.endsWith('.json'))) {
       try {
         const raw = await readFile(join(config.personasDir, f), 'utf-8');
-        existing.push(normalizePersona(JSON.parse(raw)));
+        context.push(normalizePersona(JSON.parse(raw)));
       } catch {}
     }
   } catch {}
 
-  const usedIds = new Set(existing.map((p) => p.id));
+  const usedIds = new Set(context.map((p) => p.id));
 
-  let toCreate = Math.max(0, count - existing.length);
+  let toCreate = Math.max(0, count - context.length);
   log(
     'info',
-    `seedPersonas: ${existing.length} already on disk, creating ${toCreate} new via Gemini`,
+    `seedPersonas: ${context.length} already on disk, creating ${toCreate} new via Gemini`,
   );
 
   while (toCreate > 0) {
@@ -170,8 +174,8 @@ export async function seedPersonas(count: number, mode: SeedMode = 'gemini'): Pr
     try {
       // Pass the canonical catalog as the few-shot anchor set so Gemini
       // sees the structural diversity it should aim for. The catalog is the
-      // *reference* shape; the prior list is the *avoid* shape.
-      persona = await generatePersona([...existing, ...created], PERSONA_CATALOG);
+      // *reference* shape; the context list is the *avoid* shape.
+      persona = await generatePersona(context, PERSONA_CATALOG);
     } catch (err) {
       log('warn', `generatePersona failed, skipping one slot: ${err}`);
       toCreate--;
@@ -205,6 +209,7 @@ export async function seedPersonas(count: number, mode: SeedMode = 'gemini'): Pr
     const path = join(config.personasDir, `${persona.id}.json`);
     await writeFile(path, JSON.stringify(persona, null, 2));
     created.push(persona);
+    context.push(persona);
     log('info', `  + ${persona.id} (weight ${persona.weight})`);
     toCreate--;
   }

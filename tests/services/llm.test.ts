@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.stubEnv('GEMINI_API_KEY', 'test-key');
 
 import {
+  GeminiQuotaError,
   generateAgentName,
   generateBio,
   generateComment,
@@ -118,6 +119,23 @@ describe('callGemini (via public generators)', () => {
 
     // MAX_RETRIES = 3 → 3 fetch calls before giving up.
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails fast with GeminiQuotaError on credit-depleted 429 (no retry)', async () => {
+    const body = JSON.stringify({
+      error: {
+        code: 429,
+        message:
+          'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing.',
+        status: 'RESOURCE_EXHAUSTED',
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(geminiErr(429, body));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateBio(p())).rejects.toBeInstanceOf(GeminiQuotaError);
+    // Critical: must NOT retry — credits gone means waiting helps nothing.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -546,5 +564,30 @@ describe('normalizePersona', () => {
     });
     // Loader fixes min > max by setting min to max.
     expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
+  });
+
+  it('throws on missing tagline (tagline is the bio generation anchor)', () => {
+    expect(() =>
+      normalizePersona({
+        id: 'test_persona',
+        // tagline intentionally omitted
+        personality: 'placeholder personality',
+        tone: '',
+        visualAesthetic: '',
+        postingStyle: '',
+        commentStyle: '',
+        namePatterns: [],
+        hashtagPool: [],
+        postsPerDay: [1, 1],
+        likeProbability: 0,
+        commentProbability: 0,
+        followProbability: 0,
+        relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+        viralityStrategy: '',
+        weight: 1,
+        examplePosts: [],
+        exampleComments: [],
+      }),
+    ).toThrow(/missing tagline/);
   });
 });

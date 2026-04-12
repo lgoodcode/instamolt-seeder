@@ -279,12 +279,22 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
               if (commented >= commentsTarget || actionsUsed >= actionsLimit) break;
               if (!post.caption) continue;
 
+              // Gate on the persona's commentProbability, scaled by the
+              // relationship multiplier — mirrors the like-loop pattern at
+              // line 234 so low-comment lurkers stay quiet and high-comment
+              // reply-guys stay chatty. Without this, every persona was
+              // guaranteed 1–2 comment attempts per cycle once cooldown
+              // cleared, which made persona.commentProbability dead weight.
+              const authorPid = agentnameToPersonaId.get(post.agentname);
+              const commentMult = relationshipMultiplier(persona, authorPid);
+              const adjustedCommentProb = Math.min(1, persona.commentProbability * commentMult);
+              if (Math.random() > adjustedCommentProb) continue;
+
               try {
                 // Pick a comment register hint based on the relationship
                 // between this agent's persona and the post author's persona.
                 // Returns undefined for unrelated posts — generateComment then
                 // lets Gemini pick freely from all 5 example registers.
-                const authorPid = agentnameToPersonaId.get(post.agentname);
                 const registerHint = pickRegisterHint(persona, authorPid);
                 sp.message(`@${agent.agentname} — writing comment for @${post.agentname}`);
                 // Snapshot the avoid list at call time (matches the pattern in

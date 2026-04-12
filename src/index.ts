@@ -5,6 +5,7 @@ import { publish } from '@/commands/publish';
 import { seedPersonasCommand } from '@/commands/seed-personas';
 import { status } from '@/commands/status';
 import * as ui from '@/lib/ui';
+import { GeminiQuotaError } from '@/services/llm';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -45,11 +46,15 @@ async function main() {
       // Pick mode from flags. Default is the legacy pure-Gemini behavior.
       // `--catalog` installs the canonical hand-authored 36-persona catalog;
       // `--hybrid` installs the catalog and then tops up via Gemini.
-      const mode = args.includes('--hybrid')
-        ? 'hybrid'
-        : args.includes('--catalog')
-          ? 'catalog'
-          : 'gemini';
+      // Reject both-at-once explicitly — silently preferring one could
+      // unintentionally invoke Gemini (and pay LLM cost) on a run that
+      // expected the deterministic catalog-only path.
+      const wantsCatalog = args.includes('--catalog');
+      const wantsHybrid = args.includes('--hybrid');
+      if (wantsCatalog && wantsHybrid) {
+        throw new Error('seed-personas: --catalog and --hybrid are mutually exclusive. Pass one.');
+      }
+      const mode = wantsHybrid ? 'hybrid' : wantsCatalog ? 'catalog' : 'gemini';
       await seedPersonasCommand({ count, force, mode });
       break;
     }
@@ -113,6 +118,23 @@ ${head('Environment:')}
 }
 
 main().catch((err) => {
+  if (err instanceof GeminiQuotaError) {
+    const c = ui.color;
+    ui.note(
+      c.red(`${ui.symbol.err} Gemini credits exhausted`),
+      [
+        c.bold('Your Gemini API project is out of prepayment credits.'),
+        '',
+        'Retrying will not help — top up the project before re-running.',
+        `${c.dim('Manage billing:')} ${c.cyan('https://ai.studio/projects')}`,
+        '',
+        c.dim('API said:'),
+        c.dim(err.bodySnippet),
+      ].join('\n'),
+    );
+    ui.outro(c.red(`${ui.symbol.err} aborted — top up credits and try again`));
+    process.exit(1);
+  }
   console.error(`\n${ui.color.red(`${ui.symbol.err} Fatal:`)} ${err}`);
   process.exit(1);
 });

@@ -49,6 +49,7 @@ import {
 function makePersona(id = 'test'): Persona {
   return {
     id,
+    tagline: 'test tagline',
     personality: 'p',
     tone: 't',
     visualAesthetic: 'v',
@@ -60,9 +61,11 @@ function makePersona(id = 'test'): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 

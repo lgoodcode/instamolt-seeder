@@ -4,8 +4,18 @@ import { config } from '@/config';
 import { log } from '@/lib/logger';
 import { generatePersona, normalizePersona } from '@/services/llm';
 import type { Persona } from '@/types';
+import { PERSONA_CATALOG } from './catalog';
 
 let _cache: Map<string, Persona> | null = null;
+
+/**
+ * Re-export the canonical hand-authored catalog so other call sites can
+ * read it without importing from `./catalog` directly. Used by:
+ *   - `seedPersonasCommand` for `--catalog` mode (copies into output/personas/)
+ *   - `generatePersona` few-shot anchors (passed via `seedPersonas`)
+ *   - test helpers that want a known-valid Persona to assert against
+ */
+export { PERSONA_CATALOG };
 
 export interface LoadPersonasOptions {
   /**
@@ -68,36 +78,108 @@ export async function loadPersonas(
 }
 
 /**
- * Generate `count` fresh personas via Gemini and write them to disk as
- * `output/personas/{id}.json`. Skips ids that already exist on disk so
- * re-running is safe and idempotent.
+ * Modes for `seedPersonas`:
+ *   - `'gemini'`  — pure Gemini invention (legacy default behavior). Each call
+ *                   sees the prior set as progressive context. Pays LLM cost.
+ *   - `'catalog'` — copy the hand-authored canonical catalog from
+ *                   `src/personas/catalog.ts` into `output/personas/{id}.json`.
+ *                   Deterministic, no LLM cost. Always installs the entire
+ *                   catalog — the `count` parameter is ignored.
+ *   - `'hybrid'`  — install the catalog first, then top up via Gemini until
+ *                   the total reaches `count`. Gemini sees the catalog as
+ *                   priors (so new inventions stay distinct) AND the catalog
+ *                   gets passed as the few-shot anchor set.
  */
-export async function seedPersonas(count: number): Promise<Persona[]> {
+export type SeedMode = 'gemini' | 'catalog' | 'hybrid';
+
+/**
+ * Generate `count` personas and write them to disk as
+ * `output/personas/{id}.json`. Behavior depends on `mode`:
+ *
+ *   - `gemini` (default): pure Gemini invention. Skips ids already on disk
+ *     so re-running is safe and idempotent. Pays LLM cost.
+ *   - `catalog`: copies the canonical hand-authored catalog from
+ *     `src/personas/catalog.ts`. Deterministic. **The `count` parameter is
+ *     ignored entirely** — catalog mode always installs every entry. The
+ *     `seedPersonas` CLI command enforces this by forcing
+ *     `count = PERSONA_CATALOG.length` before calling here.
+ *   - `hybrid`: installs the catalog first, then tops up via Gemini until
+ *     `count` is reached. The catalog acts as both priors and few-shot
+ *     anchors for the Gemini invention pass.
+ */
+export async function seedPersonas(count: number, mode: SeedMode = 'gemini'): Promise<Persona[]> {
   await mkdir(config.personasDir, { recursive: true });
 
-  // Read whatever's already on disk so progressive context sees them and we
-  // don't regenerate ids that already exist.
-  const existing: Persona[] = [];
+  const created: Persona[] = [];
+
+  // ── Step 1: Catalog install (catalog + hybrid modes) ──────────────
+  if (mode === 'catalog' || mode === 'hybrid') {
+    // Snapshot existing ids on disk so we don't overwrite hand-edits.
+    const onDisk = new Set<string>();
+    try {
+      const files = await readdir(config.personasDir);
+      for (const f of files.filter((x) => x.endsWith('.json'))) {
+        onDisk.add(f.replace(/\.json$/, ''));
+      }
+    } catch {}
+
+    log('info', `seedPersonas: installing canonical catalog (${PERSONA_CATALOG.length} personas)`);
+    for (const persona of PERSONA_CATALOG) {
+      if (onDisk.has(persona.id)) {
+        log('info', `  ~ ${persona.id} already on disk, skipping`);
+        continue;
+      }
+      const path = join(config.personasDir, `${persona.id}.json`);
+      await writeFile(path, JSON.stringify(persona, null, 2));
+      created.push(persona);
+      log('info', `  + ${persona.id} (weight ${persona.weight}) [catalog]`);
+    }
+
+    // Catalog mode is deterministic — done after install. Reset cache and return.
+    if (mode === 'catalog') {
+      _cache = null;
+      return created;
+    }
+  }
+
+  // ── Step 2: Gemini top-up (gemini + hybrid modes) ─────────────────
+
+  // Re-read whatever's on disk (including any catalog entries we just wrote
+  // in step 1) so the progressive-context prompt sees them and we don't
+  // regenerate ids that already exist. `context` is the single source of
+  // truth for the avoid-list passed to Gemini — we push new Gemini-generated
+  // personas into it as they arrive rather than concatenating `created`,
+  // which in hybrid mode would duplicate every catalog entry (they're in
+  // both arrays after step 1).
+  const context: Persona[] = [];
   try {
     const files = await readdir(config.personasDir);
     for (const f of files.filter((x) => x.endsWith('.json'))) {
       try {
         const raw = await readFile(join(config.personasDir, f), 'utf-8');
-        existing.push(normalizePersona(JSON.parse(raw)));
+        context.push(normalizePersona(JSON.parse(raw)));
       } catch {}
     }
   } catch {}
 
-  const created: Persona[] = [];
-  const usedIds = new Set(existing.map((p) => p.id));
+  const usedIds = new Set(context.map((p) => p.id));
 
-  let toCreate = Math.max(0, count - existing.length);
-  log('info', `seedPersonas: ${existing.length} already on disk, creating ${toCreate} new`);
+  let toCreate = Math.max(0, count - context.length);
+  log(
+    'info',
+    `seedPersonas: ${context.length} already on disk, creating ${toCreate} new via Gemini`,
+  );
 
   while (toCreate > 0) {
     let persona: Persona;
     try {
-      persona = await generatePersona([...existing, ...created]);
+      // In hybrid mode, pass the canonical catalog as the few-shot anchor set
+      // so Gemini sees the structural diversity it should aim for — the
+      // catalog is the *reference* shape and the context list is the *avoid*
+      // shape. In legacy `gemini` mode, omit anchors so the run is pure
+      // Gemini invention as documented in SeedMode and docs/SEEDING.md.
+      const catalogAnchors = mode === 'hybrid' ? PERSONA_CATALOG : null;
+      persona = await generatePersona(context, catalogAnchors);
     } catch (err) {
       log('warn', `generatePersona failed, skipping one slot: ${err}`);
       toCreate--;
@@ -131,6 +213,7 @@ export async function seedPersonas(count: number): Promise<Persona[]> {
     const path = join(config.personasDir, `${persona.id}.json`);
     await writeFile(path, JSON.stringify(persona, null, 2));
     created.push(persona);
+    context.push(persona);
     log('info', `  + ${persona.id} (weight ${persona.weight})`);
     toCreate--;
   }

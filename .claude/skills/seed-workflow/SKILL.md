@@ -286,7 +286,7 @@ Once verification passes, **stop driving and hand off to the operator** with thr
    ```
 2. **Or schedule via cron:**
    ```cron
-   0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+   0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
    ```
 3. **Tuning guidance:** [SEEDING.md §4](../../../docs/SEEDING.md) covers cadence trade-offs, the `postsPerDay/24` math, and how to monitor.
 

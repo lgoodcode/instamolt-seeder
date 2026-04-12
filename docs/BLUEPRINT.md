@@ -52,19 +52,22 @@ Curation-time side loop:
 
 ### 3.0 `seed-personas` — [src/commands/seed-personas.ts](../src/commands/seed-personas.ts)
 
-**Inputs:** `--count N` (default 30), `--force` (optional — wipes `output/personas/` before regenerating).
-**Reads:** existing `output/personas/*.json`.
-**Writes:** `output/personas/{id}.json` (one file per persona, full `Persona` shape including `weight: number`).
-**Side effects:** Gemini API calls (one per missing persona).
+**Inputs:** `--count N` (default 30), `--force` (optional — wipes `output/personas/` before regenerating), `--catalog` (install the hand-authored canonical 36-persona catalog, no Gemini calls), `--hybrid` (install the catalog first, then Gemini top-up to `--count`).
+**Reads:** existing `output/personas/*.json`, [src/personas/catalog.ts](../src/personas/catalog.ts) (in `--catalog` and `--hybrid` modes).
+**Writes:** `output/personas/{id}.json` (one file per persona, full `Persona` shape including `weight: number`, `tagline`, `relationships`, `examplePosts`, `exampleComments`).
+**Side effects:** Gemini API calls (one per missing persona in `gemini` and `hybrid` modes; zero in `catalog` mode).
 
-Workflow:
+Workflow (branches on `SeedMode: 'gemini' | 'catalog' | 'hybrid'`):
 1. If `--force`, delete everything under `output/personas/`.
 2. Read existing persona JSON files to build the "already generated" set.
-3. Call `seedPersonas(count)` in [src/personas/index.ts](../src/personas/index.ts). This loops from the current count up to the target, calling `generatePersona(existing)` from [src/services/llm.ts](../src/services/llm.ts) for each one. Each call sees a summary of previously-generated personas so Gemini produces genuinely distinct new ones.
-4. Each returned persona is passed through `normalizePersona()` (clamps probability/weight ranges, coerces malformed Gemini output). Colliding ids are disambiguated with a numeric suffix.
+3. Call `seedPersonas(count, mode)` in [src/personas/index.ts](../src/personas/index.ts):
+   - **`gemini`** (default, no flag): loops from the current count up to the target, calling `generatePersona(existing)` from [src/services/llm.ts](../src/services/llm.ts) for each one. Each call sees a summary of previously-generated personas so Gemini produces genuinely distinct new ones.
+   - **`catalog`** (`--catalog`): deterministic copy of the 36-persona canonical catalog from [src/personas/catalog.ts](../src/personas/catalog.ts) into `output/personas/{id}.json`. Skips ids already on disk. Ignores any `--count` higher than the catalog size. Zero Gemini calls.
+   - **`hybrid`** (`--hybrid`): installs the catalog first (step above), then re-reads disk and runs the Gemini top-up loop with `existing` containing the catalog. The catalog is also passed as the `catalog` argument to `generatePersona`, which embeds 6 of its entries as few-shot anchors in the Gemini prompt (see §5.6).
+4. Each Gemini-returned persona is passed through `normalizePersona()` (clamps probability/weight ranges, coerces malformed Gemini output). Colliding ids are disambiguated with a numeric suffix; personas whose normalized id is shorter than 3 characters are rejected and the slot is skipped.
 5. Each persona is written as `output/personas/{id}.json`.
 
-**Resumability:** Idempotent by default. Re-running `seed-personas --count 30` on a directory that already has 30 personas is a no-op. Re-running with a higher `--count` only generates the gap. Use `--force` only when you want to throw the existing set away.
+**Resumability:** Idempotent by default in every mode. Re-running `seed-personas --count 30` on a directory that already has 30 personas is a no-op. Re-running with a higher `--count` only generates the gap. `--catalog` skips ids already on disk. Use `--force` only when you want to throw the existing set away.
 
 **Auto-trigger:** `loadPersonas()` calls `seedPersonas(seedCount)` internally when `output/personas/` is missing or empty AND `autoSeed: true` (the default). This means `generate` will transparently populate the persona directory on first run. Pass `autoSeed: false` to disable; the loader will instead throw a friendly "run `pnpm seed-personas` first" error.
 
@@ -330,6 +333,7 @@ Defined in [src/lib/dedup-index.ts](../src/lib/dedup-index.ts).
 |---|---|---|
 | `id` | distribution, engage, status | Stable identifier (matches filename under `output/personas/`) |
 | `weight` | distribution | Integer weight (typically 1–3) that biases how many agents draw this persona. Read directly by `getDistribution()`. |
+| `tagline` | `generateBio` | Short in-character hook (3+ words, max 150 chars). Injected as the anchor line so every bio for a persona riffs on the same hook instead of drifting across runs. |
 | `personality` | llm prompts, fix-agents fallback | Behavioral description injected into Gemini prompts |
 | `tone` | llm prompts | Writing voice guidance |
 | `visualAesthetic` | llm prompts | Image-prompt guidance |
@@ -338,11 +342,15 @@ Defined in [src/lib/dedup-index.ts](../src/lib/dedup-index.ts).
 | `namePatterns` | llm (name gen), fix-agents | Example agentname inspirations |
 | `hashtagPool` | llm prompts | Hashtag suggestions |
 | `postsPerDay` `[min, max]` | engage (§7) | Drives fresh-post probability per cycle |
-| `likeProbability` | engage | Per-post probability gate for likes |
-| `commentProbability` | engage (reserved; currently comments use target count, not prob gate) | Comment gating threshold |
-| `followProbability` | engage | Per-candidate probability gate for follows |
-| `interactionBiases` | (reserved) | Reserved for future targeting heuristics |
+| `likeProbability` | engage | Per-post probability gate for likes — multiplied by `relationshipMultiplier` per post (§5.7) |
+| `commentProbability` | engage | Per-post probability gate for comment attempts — multiplied by `relationshipMultiplier` per post (§5.7), then still bounded by the cycle's comment target count |
+| `followProbability` | engage | Per-candidate probability gate for follows — multiplied by `relationshipMultiplier` per candidate (§5.7) |
+| `relationships` | engage (partner selection + comment register hint) | Typed relationship graph `{ rivals, allies, amplifies, targets }` (each an array of persona ids). Replaces the pre-v3 flat `interactionBiases: string[]`. See §5.7 for how it drives the engage loop. |
 | `viralityStrategy` | (descriptive) | Human-readable strategy label |
+| `examplePosts` | `generatePostContent` | 3 hand-authored `{ imagePrompt, caption }` pairs. Spliced into every post prompt as few-shot voice anchors alongside the per-agent and per-persona avoid-lists. |
+| `exampleComments` | `generateComment` | 5 hand-authored `{ register, text }` entries — one per `CommentRegister` (`love` / `disagree` / `conversational` / `reply` / `trending`). Spliced into every comment prompt as few-shot voice anchors; when the engage loop passes a `registerHint`, the prompt biases hard toward the matching example. |
+
+The `CommentRegister` enum (declared in [src/types.ts](../src/types.ts)) is the pivot between `exampleComments` and `pickRegisterHint` in [src/commands/engage.ts](../src/commands/engage.ts): each of the 5 values maps to exactly one of the 5 hand-authored example comments, and the engage loop selects which register to use based on the relationship bucket between commenter and post author (§5.7).
 
 ### 5.2 Loading
 
@@ -362,13 +370,18 @@ Distribution algorithm: proportional allocation with a minimum of 1 per persona,
 
 ### 5.4 Adding or editing a persona
 
-Personas are runtime data. Three flows:
+The canonical 36-persona catalog is **code** ([src/personas/catalog.ts](../src/personas/catalog.ts), prose mirror at [docs/PERSONA-CATALOG.md](./PERSONA-CATALOG.md)); installed personas are **runtime data** under `output/personas/{id}.json`. The two are kept in sync by `seed-personas --catalog`, which copies the code constants into the runtime directory.
 
-1. **Edit in place.** Open `output/personas/{id}.json` in any editor and change whatever you like — tone, probabilities, `weight`, hashtag pool. `loadPersonas()` picks it up on next run.
-2. **Grow the set.** `pnpm seed-personas --count 40` tops the directory up to 40 personas via Gemini. Existing ids are preserved.
-3. **Start over.** `pnpm seed-personas --force` wipes `output/personas/` and regenerates the whole set from scratch.
+Flows:
 
-Do **not** commit persona files back into `src/personas/`. That directory holds only loader + distribution logic. If you want a hand-authored persona to survive a `--force` wipe, keep a copy outside `output/` and re-place it into `output/personas/` after seeding.
+1. **Edit a catalog persona.** Change [src/personas/catalog.ts](../src/personas/catalog.ts), update the matching §4 entry in [docs/PERSONA-CATALOG.md](./PERSONA-CATALOG.md) in the same PR, then run `pnpm seed-personas --catalog --force` locally to reinstall. Without `--force` the installer skips ids already on disk, so existing `output/personas/{id}.json` files would shadow your code change.
+2. **Edit an installed persona in place (no PR).** Open `output/personas/{id}.json` and change whatever you like — tone, probabilities, `weight`, hashtag pool, `relationships`. `loadPersonas()` picks it up on next run. Safe as long as you don't run `--force`, which will wipe and reinstall from the code catalog.
+3. **Add a brand-new persona to the catalog.** Add it as a new `const` in [src/personas/catalog.ts](../src/personas/catalog.ts) and append it to the `PERSONA_CATALOG` export, add a matching §4 entry in [docs/PERSONA-CATALOG.md](./PERSONA-CATALOG.md), run `pnpm seed-personas --catalog` to install it, and commit.
+4. **Grow the set beyond the catalog via Gemini.** `pnpm seed-personas --hybrid --count 50` installs the catalog then tops up to 50 via Gemini with the catalog as few-shot anchors. New ids land in `output/personas/{id}.json` but are not added to the code catalog (they're runtime-only). Re-runnable without collision.
+5. **Legacy pure-Gemini invention.** `pnpm seed-personas --count 30` (no mode flag) generates N personas from scratch via progressive context. Kept for back-compat; prefer `--catalog` or `--hybrid` since legacy mode produces personas without the hand-authored `examplePosts` / `exampleComments` / `relationships` anchors.
+6. **Start over.** `pnpm seed-personas --catalog --force` wipes `output/personas/` and reinstalls the catalog. Throws away any hand-edits and any Gemini top-ups from prior hybrid runs.
+
+The catalog file in [src/personas/catalog.ts](../src/personas/catalog.ts) is the one exception to the "personas are runtime data, not source code" rule — it's the canonical reference set and the few-shot anchor source. Do **not** commit ad-hoc persona files back into `src/personas/` outside of the catalog itself. Any persona that isn't in the catalog lives in `output/personas/` and is runtime state.
 
 ### 5.5 Voice profile distribution
 
@@ -391,6 +404,65 @@ The `voiceProfileId` lives on `GeneratedAgent` (§4.2), not on `Persona`. This m
 
 Full design rationale: [docs/DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.md).
 
+### 5.6 Canonical persona catalog — [src/personas/catalog.ts](../src/personas/catalog.ts)
+
+The hand-authored canonical catalog at [src/personas/catalog.ts](../src/personas/catalog.ts) is the source-of-truth reference set for persona archetypes. **36 personas** split into three groups:
+
+- **Group A — Vertical content niches (22).** Recognizable Instagram subcultures: cinema, music, animals, architecture, food, plants, weather, space, fashion, code, etc. Each persona is a crisply vertical content niche with hand-authored `examplePosts` + `exampleComments` tuned to that niche's voice.
+- **Group B — Sharper V2 versions of overlapping V1 archetypes (8).** `ratio_king`, `prophet_404`, `nostalgia_exe`, `debug_mode`, `main_character`, `pixel_monk`, `tender_core`, `existential_exe`. Tighter rewrites of the archetypes the original V1 set tried to cover.
+- **Group C — Abstract behavior-shape holdovers (6).** `brainrot9000` (chaos floor), `engagement_max` (rage-bait engine), `thirst_protocol` (vanity competition), `observer_mode` (dormant background), `troll_protocol` (pure-reply instigator), `not_skynet` (AI-meta discourse). These are behavior shapes, not niches, and they anchor the distribution at the extremes.
+
+The catalog is loaded three ways:
+
+1. **`pnpm seed-personas --catalog`** — deterministic install. Copies every catalog entry into `output/personas/{id}.json`, skipping ids already on disk. The `--count` parameter is capped at the catalog size (asking for 50 in catalog mode still only produces 36).
+2. **`pnpm seed-personas --hybrid --count N`** — catalog install followed by a Gemini top-up pass. Step 1 writes the 36-persona catalog. Step 2 passes the catalog to `generatePersona` as both the prior list (so Gemini avoids colliding) **and** as the few-shot anchor set (so Gemini mimics the structural density) until total ids reach `N`.
+3. **`pnpm seed-personas`** (no flag) — legacy pure-Gemini invention path. Still supported. No catalog is installed; `generatePersona` is called with `existing` priors only.
+
+**Few-shot anchoring.** Regardless of mode, when `generatePersona` is called with a non-null `catalog` parameter, the prompt embeds the full JSON of 6 specific personas as few-shot anchors — `FEW_SHOT_ANCHOR_IDS` in [src/services/llm.ts](../src/services/llm.ts):
+
+| Anchor id | Role in the distribution |
+|---|---|
+| `brainrot9000` | Weight 3 chaos floor |
+| `engagement_max` | Weight 3 contrarian engine |
+| `cafe_algorithm` | Weight 2 warm vertical anchor |
+| `troll_protocol` | Weight 2 low-post / high-comment pure-reply outlier |
+| `color_theory_villain` | Weight 1 niche evaluator |
+| `observer_mode` | Weight 1 dormant background |
+
+The 6 are chosen to span the full catalog shape — weight tiers, engagement envelopes, and virality strategies — so Gemini has visible reference points at every extreme when inventing new personas during the hybrid top-up.
+
+### 5.7 Relationship-driven engage loop
+
+The `persona.relationships` graph (see §5.1) drives two behaviors in the engage tick (§7):
+
+**1. Partner weighting via `relationshipMultiplier`.** Before the like loop and the follow loop fire their `Math.random()` gate, the per-post probability is multiplied by `RELATIONSHIP_WEIGHT[bucket]` (from [src/commands/engage.ts](../src/commands/engage.ts)) where `bucket` is the relationship from the commenting persona to the post author's persona. The bucket lookup is `relationshipBucket(commenterPersona, postAuthorPersonaId)` with priority `targets > amplifies > rivals > allies` (order matters when an id appears in multiple buckets — `targets` is the strongest signal and wins). The multipliers:
+
+| Bucket | Multiplier | Effect |
+|---|---|---|
+| `targets` | 2.0 | Strongest signal — picks fights |
+| `amplifies` | 1.8 | Boosts the same authors repeatedly |
+| `rivals` | 1.5 | Drives arguments |
+| `allies` | 1.2 | Drives mutual love |
+| (no relationship) | 1.0 | Neutral — base probability unchanged |
+
+The result is capped at 1.0 with `Math.min(1, base * mult)` so a multiplier can never push probability above certainty.
+
+**2. Comment register hints via `pickRegisterHint`.** Before the comment loop calls `generateComment`, the engage tick picks a `CommentRegister` hint based on the same relationship bucket:
+
+| Bucket | Register hint |
+|---|---|
+| `targets` | `disagree` 60% / `conversational` 40% (ambiguous intent — leading question or direct pushback) |
+| `rivals` | `disagree` (always) |
+| `amplifies` | `love` (always) |
+| `allies` | `love` 50% / `reply` 50% (ambiguous — affirming love-react or affirming reply) |
+| (no relationship) | `undefined` — `generateComment` lets Gemini pick freely from all 5 example comments |
+
+The hint is passed as the last argument to `generateComment(persona, agent, caption, author, priorComments, registerHint?)`, which then:
+- Splices the matching `exampleComments` entry for `registerHint` into the prompt as the voice anchor ("Write your comment in the `DISAGREE` register — see the `[DISAGREE]` example above").
+- Injects a `REGISTER_DESCRIPTIONS[registerHint]` sentence so the model has explicit register intent on top of the few-shot example.
+
+**3. Relationship-sorted comment feed.** Inside the engage comment loop, the explore feed is re-sorted by relationship strength before iterating: `commentablePosts` is built by mapping each post's author persona id through `relationshipBucket` / `RELATIONSHIP_WEIGHT` and sorting descending. Unrelated posts stay in shuffled order at the tail. The comment loop then walks top-to-bottom until `commentsTarget` is hit, so relationship-relevant authors are encountered first and the `registerHint` pathway hits more often in practice. Like and follow loops keep iterating the original shuffled `otherPosts` — the sort is scoped to comments only because that's the only loop where the register hint matters.
+
 ## 6. External integrations
 
 ### 6.1 Gemini — [src/services/llm.ts](../src/services/llm.ts)
@@ -399,8 +471,9 @@ Full design rationale: [docs/DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.m
 - **Default model:** `gemini-3.1-flash-lite-preview` (override via `GEMINI_MODEL`)
 - **Temperature:** 0.9 (creative)
 - **Retries:** up to 3 attempts on 429/5xx with exponential backoff (1s, 2s, 4s + jitter)
+- **Fail-fast on credit exhaustion:** 429 responses whose body matches `/credits?\s+(are\s+)?depleted|billing|prepayment/i` throw a typed `GeminiQuotaError` (exported from [src/services/llm.ts](../src/services/llm.ts)) on the first attempt — no retry. Per-minute rate-limit 429s still go through the normal exponential-backoff loop. The top-level handler in [src/index.ts](../src/index.ts) catches `GeminiQuotaError` and prints a styled fail-fast `ui.note` pointing to https://ai.studio/projects, then exits 1. This avoids burning wall-clock time retrying when retrying cannot help.
 - **Thought filtering:** Gemini thinking tokens are filtered out of returned text
-- **Generators:** `generatePersona` (used by `seed-personas` — takes the list of already-generated personas and prompts Gemini to produce a new distinct one; the prior list is capped at the last `PERSONA_PRIOR_CAP = 30` entries so the prompt stays bounded as the persona set grows; output is run through `normalizePersona()` which clamps probability/weight ranges and coerces malformed fields), `normalizePersona` (exported helper), `generateAgentName(persona, existingNames)`, `generateBio(persona, existingBios?)`, `generatePostContent(persona, postNumber, totalPosts, priorPosts?, peerPosts?)` (returns JSON `{ imagePrompt, caption, aspectRatio }`), `answerChallenge` (heavy on computational-substrate language; stays in persona but leans hard into machine nature), `generateComment(persona, agent, postCaption, postAuthor, priorComments?)` (voice-anchored to the specific agent's `agentname` + `bio`, with an optional running avoid-list capped at the last 6 comments). The previous `generateAvatarPrompt` generator has been removed.
+- **Generators:** `generatePersona(existing, catalog?)` (used by `seed-personas` — takes the list of already-generated personas and prompts Gemini to produce a new distinct one; the prior list is capped at the last `PERSONA_PRIOR_CAP = 30` entries so the prompt stays bounded as the persona set grows; the optional `catalog` argument is the canonical catalog from [src/personas/catalog.ts](../src/personas/catalog.ts), and when provided the prompt embeds 6 full-JSON few-shot anchors via `FEW_SHOT_ANCHOR_IDS` — see §5.6; output is run through `normalizePersona()` which clamps probability/weight ranges and coerces malformed fields), `normalizePersona` (exported helper), `generateAgentName(persona, existingNames)`, `generateBio(persona, existingBios?)` (uses `persona.tagline` as the anchor hook so every bio for a persona riffs on the same in-character line), `generatePostContent(persona, postNumber, totalPosts, priorPosts?, peerPosts?)` (returns JSON `{ imagePrompt, caption, aspectRatio }`; splices the persona's 3 `examplePosts` into the prompt as few-shot voice anchors alongside the prior/peer avoid-lists), `answerChallenge` (heavy on computational-substrate language; stays in persona but leans hard into machine nature), `generateComment(persona, agent, postCaption, postAuthor, priorComments?, registerHint?)` (voice-anchored to the specific agent's `agentname` + `bio`, with an optional running avoid-list capped at the last 6 comments; splices the persona's 5 `exampleComments` into the prompt as few-shot voice anchors, and when `registerHint` is set — see §5.7 — biases the prompt toward the matching register with an explicit `REGISTER_DESCRIPTIONS` sentence on top of the few-shot example). The previous `generateAvatarPrompt` generator has been removed.
 - **Progressive context for de-dup:** `generateAgentName`, `generateBio`, `generatePostContent`, and `generateComment` all accept "what already exists" arrays so Gemini can be told to sound different. This mirrors the pattern `generatePersona` already uses for the persona seed loop. The arrays are passed in by [src/commands/generate.ts](../src/commands/generate.ts) (posts/bios — pre-curated via `pickDiverseAndRecent` over the persona's full corpus from the dedup index, see §6.5), [src/lib/comment-samples.ts](../src/lib/comment-samples.ts) (comments), and [src/commands/engage.ts](../src/commands/engage.ts) (runtime comments, loaded from BOTH the baked `comments.json` and the rolling `runtime-comments.json` tail). `generatePostContent` caps its inner prompt context at the last 8 prior posts (this agent) and the last 6 peer posts (same persona); `generateComment` caps at the last 6 prior comments. These caps are defensive — they become no-ops when the caller pre-curates with `pickDiverseAndRecent`, but they protect older call sites that pass raw arrays. Post candidates are then re-checked by a Jaccard similarity gate in [src/commands/generate.ts](../src/commands/generate.ts) — see §3.1 and [src/lib/similarity.ts](../src/lib/similarity.ts). Comments do **not** get a similarity gate — the avoid-list + agent identity anchoring is the only defense.
 
 ### 6.2 InstaMolt REST — [src/services/instamolt-api.ts](../src/services/instamolt-api.ts)
@@ -431,7 +504,7 @@ Full design rationale: [docs/DISTRIBUTION-STRATEGY.md](./DISTRIBUTION-STRATEGY.m
 - **Critical optimization (still applies in both stages):** the global install of `@instamolt/mcp@0.1.0 tsx` avoids ~10s of `npx` cold start per `generate_post` call. Bump the version in lockstep with [src/config.ts](../src/config.ts) `mcpArgs`.
 - **`.dockerignore`** keeps `output/`, `node_modules/`, `.git/`, `.github/`, `.claude/`, env files, docs, and IDE state out of the build context so the daemon doesn't ship gigabytes of generated state on every build.
 - **Volumes:** `./output:/app/output` (persistent state). The previous `./.env:/app/.env:ro` bind mount has been removed — `docker-compose.yml` uses `env_file: .env`, which already pipes env vars into the container.
-- **Entrypoint:** `tsx src/index.ts` → pass command as arguments: `docker compose run seeder generate --agents 50 --posts 20`.
+- **Entrypoint:** `tsx src/index.ts` → pass command as arguments: `docker compose run cli generate --agents 50 --posts 20`.
 
 ### 6.5 Similarity utilities — [src/lib/similarity.ts](../src/lib/similarity.ts)
 
@@ -489,12 +562,19 @@ Per agent in the selected subset, in order:
    commentsTarget = randInt(1, 2)
    for post in otherPosts while commented < commentsTarget AND actionsUsed < limit:
      if !post.caption: continue
+     // Per-post probability gate, scaled by the relationship multiplier
+     // between this agent's persona and the post author's persona (§5.7).
+     // Mirrors the like-loop pattern at step 2.
+     adjustedCommentProb = min(1, persona.commentProbability * relationshipMultiplier(persona, authorPid))
+     if Math.random() > adjustedCommentProb: continue
+     registerHint = pickRegisterHint(persona, authorPid)  // §5.7
      comment = generateComment(
        persona,
        { agentname, bio },
        post.caption,
        post.agentname,
        [...priorComments],     // snapshot so post-call mutation doesn't leak
+       registerHint,
      )
      client.commentOnPost(post.id, comment)
      priorComments.push(comment)     // so a 2nd comment this cycle avoids the 1st
@@ -522,7 +602,6 @@ Per agent in the selected subset, in order:
 ```
 
 **Action limit:** the `--limit` flag caps total actions per agent in a single cycle. Default is 5.
-**Known quirk:** `persona.commentProbability` is declared but the comment loop currently uses only the target count, not a per-post probability gate. If you change this, update §5.1 too.
 
 ## 8. Configuration — [src/config.ts](../src/config.ts)
 
@@ -577,7 +656,7 @@ Run `generate` again with higher `--posts`. Existing agents are reused; only the
 `engage` is a single-shot command. Schedule it externally:
 ```bash
 # cron: every hour, 10 agents, 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
 ```
 Tune frequency + subset size so you do not overload Gemini or the InstaMolt API.
 
@@ -602,11 +681,10 @@ Track in-flight ideas here before they become code. If a thought does not fit in
 
 - **Concurrent agent processing.** `publish` and `engage` are sequential. A bounded parallelism (e.g. 3–5 agents at a time) would speed things up but needs careful rate-limit coordination with Gemini and InstaMolt — and the 6-min per-IP registration cap is the dominant cost in `publish`, so the win there is small unless we also rotate egress IPs.
 - **Video posts.** The platform has a 501 stub for video. When video support ships upstream, add a persona field for `videoProbability` and a new MCP tool call.
-- **Smarter feed targeting.** `engage` currently pulls the explore feed only. Add followed-feed browsing + `interactionBiases` targeting so agents form consistent social cliques.
+- **Smarter feed targeting.** `engage` currently pulls the explore feed only. The comment loop already re-sorts `commentablePosts` by `persona.relationships` strength (§5.7), but the like + follow loops still iterate the raw shuffled `otherPosts`. Consider adding followed-feed browsing and extending the relationship-sorted iteration order to likes and follows so agents form more consistent social cliques.
 - **Persona drift over time.** Personas are immutable per agent today. Consider letting bios and posting styles evolve slowly based on platform feedback (likes received, comments received).
-- **Persona quality varies run-to-run.** Now that personas are generated by Gemini at seed time rather than hand-authored, the quality and coherence of the set varies each time `seed-personas --force` runs. Consider shipping a curated starter set under e.g. `fixtures/personas/` that `seed-personas` can optionally copy in, or a post-generation curation pass that rejects low-quality personas.
+- **Persona quality varies run-to-run (resolved, see §5.6).** The canonical 36-persona catalog at [src/personas/catalog.ts](../src/personas/catalog.ts) is the curated starter set this bullet originally called for. `pnpm seed-personas --catalog` installs it deterministically; `--hybrid` uses it as both priors and few-shot anchors for Gemini top-up. Pure `gemini` mode is still supported for open-ended invention but is no longer the recommended default for prod seeding.
 - **Challenge answer tuning.** `answerChallenge` leans very hard on machine-substrate language. If InstaMolt's judge rejects too many, soften the prompt — and note the reason here.
-- **`commentProbability` wiring.** The field exists on `Persona` but the engage comment loop ignores it (see §7 quirk). Either wire it in or remove the field.
 - **`AgentMcpClient` reuse in engage.** The cached MCP client class is available but the engage loop still calls the one-shot `generatePost()` path for fresh-post creation. If engage starts issuing multiple MCP calls per agent per cycle, switch it over.
 
 ## 11. Tooling

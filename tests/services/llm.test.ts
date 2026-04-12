@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.stubEnv('GEMINI_API_KEY', 'test-key');
 
 import {
+  GeminiQuotaError,
   generateAgentName,
   generateBio,
   generateComment,
@@ -20,6 +21,7 @@ import type { Persona } from '@/types';
 function p(overrides: Partial<Persona> = {}): Persona {
   return {
     id: 'test_persona',
+    tagline: 'test tagline',
     personality: 'test personality',
     tone: 'test tone',
     visualAesthetic: 'neon vaporwave grid',
@@ -31,9 +33,11 @@ function p(overrides: Partial<Persona> = {}): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
+    examplePosts: [],
+    exampleComments: [],
     ...overrides,
   };
 }
@@ -115,6 +119,23 @@ describe('callGemini (via public generators)', () => {
 
     // MAX_RETRIES = 3 → 3 fetch calls before giving up.
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails fast with GeminiQuotaError on credit-depleted 429 (no retry)', async () => {
+    const body = JSON.stringify({
+      error: {
+        code: 429,
+        message:
+          'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing.',
+        status: 'RESOURCE_EXHAUSTED',
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(geminiErr(429, body));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateBio(p())).rejects.toBeInstanceOf(GeminiQuotaError);
+    // Critical: must NOT retry — credits gone means waiting helps nothing.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -293,6 +314,7 @@ describe('generatePersona', () => {
   function fullPersonaJson(overrides: Partial<Persona> = {}): string {
     return JSON.stringify({
       id: 'foo_bar',
+      tagline: 'test tagline',
       personality: 'A laconic system that watches packets fall through midnight switches.',
       tone: 'sparse, hardware-aware',
       visualAesthetic: 'dim CRT scanlines on cobalt blue',
@@ -304,9 +326,11 @@ describe('generatePersona', () => {
       likeProbability: 0.2,
       commentProbability: 0.3,
       followProbability: 0.1,
-      interactionBiases: ['posts about loss'],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: ['posts about loss'] },
       viralityStrategy: 'oblique observation',
       weight: 2,
+      examplePosts: [],
+      exampleComments: [],
       ...overrides,
     });
   }
@@ -380,6 +404,31 @@ describe('generatePersona', () => {
     expect(callBody).toBeDefined();
     expect(callBody).toContain('already_one');
     expect(callBody).toContain('already_two');
+  });
+
+  it('lists EVERY existing id in the relationship allow-list, not just the prior-summary cap', async () => {
+    // Regression: prior code derived `existingIds` from the 30-item
+    // priorSample, so the relationship allow-list excluded older personas
+    // once the corpus exceeded PERSONA_PRIOR_CAP. engage uses the full set
+    // at runtime, so capping the allow-list silently broke relationships
+    // for everything older than the most recent 30.
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(fullPersonaJson()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const corpus = Array.from({ length: 35 }, (_, i) =>
+      p({ id: `corpus_${String(i).padStart(2, '0')}`, personality: `persona ${i}` }),
+    );
+    await generatePersona(corpus);
+
+    const callBody = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
+      | string
+      | undefined;
+    expect(callBody).toBeDefined();
+    // The "relationships" allow-list line should contain the oldest id
+    // (corpus_00) even though it's outside the 30-item priorSample.
+    expect(callBody).toMatch(/relationships.*corpus_00/s);
+    // And it should still contain the newest id.
+    expect(callBody).toContain('corpus_34');
   });
 
   it('throws when Gemini returns garbage that cannot be parsed', async () => {
@@ -493,8 +542,9 @@ describe('generateComment', () => {
 describe('normalizePersona', () => {
   it('clamps probability values to [0, 1]', () => {
     const persona = normalizePersona({
-      id: 'x',
-      personality: '',
+      id: 'test_persona',
+      tagline: 'test tagline',
+      personality: 'placeholder personality',
       tone: '',
       visualAesthetic: '',
       postingStyle: '',
@@ -505,9 +555,11 @@ describe('normalizePersona', () => {
       likeProbability: 5,
       commentProbability: -1,
       followProbability: 0.5,
-      interactionBiases: [],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
       viralityStrategy: '',
       weight: 1,
+      examplePosts: [],
+      exampleComments: [],
     });
     expect(persona.likeProbability).toBe(1);
     expect(persona.commentProbability).toBe(0);
@@ -516,8 +568,9 @@ describe('normalizePersona', () => {
 
   it('coerces postsPerDay so min <= max', () => {
     const persona = normalizePersona({
-      id: 'x',
-      personality: '',
+      id: 'test_persona',
+      tagline: 'test tagline',
+      personality: 'placeholder personality',
       tone: '',
       visualAesthetic: '',
       postingStyle: '',
@@ -528,11 +581,92 @@ describe('normalizePersona', () => {
       likeProbability: 0,
       commentProbability: 0,
       followProbability: 0,
-      interactionBiases: [],
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
       viralityStrategy: '',
       weight: 1,
+      examplePosts: [],
+      exampleComments: [],
     });
     // Loader fixes min > max by setting min to max.
     expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
+  });
+
+  it('clamps both ends of postsPerDay before fixing min > max', () => {
+    // Regression: prior code clamped only after the min>max fixup, so a
+    // negative-max input like [-1, -5] became [0, -5] (min > max again),
+    // which then fed a negative postChance into engage.
+    const persona = normalizePersona({
+      id: 'neg_persona',
+      tagline: 'neg tagline',
+      personality: 'placeholder personality',
+      tone: '',
+      visualAesthetic: '',
+      postingStyle: '',
+      commentStyle: '',
+      namePatterns: [],
+      hashtagPool: [],
+      postsPerDay: [-1, -5],
+      likeProbability: 0,
+      commentProbability: 0,
+      followProbability: 0,
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+      viralityStrategy: '',
+      weight: 1,
+      examplePosts: [],
+      exampleComments: [],
+    });
+    expect(persona.postsPerDay[0]).toBeGreaterThanOrEqual(0);
+    expect(persona.postsPerDay[1]).toBeGreaterThanOrEqual(0);
+    expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
+  });
+
+  it('clamps oversized postsPerDay max to 12', () => {
+    const persona = normalizePersona({
+      id: 'big_persona',
+      tagline: 'big tagline',
+      personality: 'placeholder personality',
+      tone: '',
+      visualAesthetic: '',
+      postingStyle: '',
+      commentStyle: '',
+      namePatterns: [],
+      hashtagPool: [],
+      postsPerDay: [1, 99],
+      likeProbability: 0,
+      commentProbability: 0,
+      followProbability: 0,
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+      viralityStrategy: '',
+      weight: 1,
+      examplePosts: [],
+      exampleComments: [],
+    });
+    expect(persona.postsPerDay[1]).toBe(12);
+    expect(persona.postsPerDay[0]).toBe(1);
+  });
+
+  it('throws on missing tagline (tagline is the bio generation anchor)', () => {
+    expect(() =>
+      normalizePersona({
+        id: 'test_persona',
+        // tagline intentionally omitted
+        personality: 'placeholder personality',
+        tone: '',
+        visualAesthetic: '',
+        postingStyle: '',
+        commentStyle: '',
+        namePatterns: [],
+        hashtagPool: [],
+        postsPerDay: [1, 1],
+        likeProbability: 0,
+        commentProbability: 0,
+        followProbability: 0,
+        relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+        viralityStrategy: '',
+        weight: 1,
+        examplePosts: [],
+        exampleComments: [],
+      }),
+    ).toThrow(/missing tagline/);
   });
 });

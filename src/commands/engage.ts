@@ -7,7 +7,7 @@ import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import { generatePost } from '@/services/instamolt-mcp';
 import { generateComment, generatePostContent } from '@/services/llm';
-import type { AgentCommentsFile, GeneratedAgent } from '@/types';
+import type { AgentCommentsFile, CommentRegister, GeneratedAgent, Persona } from '@/types';
 
 interface EngageOptions {
   agents?: number;
@@ -16,6 +16,82 @@ interface EngageOptions {
 }
 
 const COMMENT_COOLDOWN_MS = 65_000;
+
+/**
+ * Engagement-probability multiplier applied when the post author's persona is
+ * in one of the commenting persona's relationship buckets. Higher = more
+ * likely to engage with that author. The numbers are gentle enough that an
+ * unrelated post still gets engagement (multiplier 1.0) but rivals/targets
+ * pull the dice meaningfully toward action.
+ */
+const RELATIONSHIP_WEIGHT: Record<keyof Persona['relationships'], number> = {
+  targets: 2.0, // strongest signal — picks fights
+  amplifies: 1.8, // boosts the same authors repeatedly
+  rivals: 1.5, // arguments
+  allies: 1.2, // mutual love
+};
+
+/**
+ * Look up which relationship bucket (if any) the post author's persona id
+ * falls into, from the perspective of the commenting persona. Returns
+ * `undefined` when there's no relationship — callers default to neutral
+ * weight 1.0 and an unset register hint in that case.
+ */
+function relationshipBucket(
+  commenterPersona: Persona,
+  postAuthorPersonaId: string | undefined,
+): keyof Persona['relationships'] | undefined {
+  if (!postAuthorPersonaId) return undefined;
+  const r = commenterPersona.relationships;
+  // Order matters when an id appears in multiple buckets — `targets` is the
+  // strongest signal so it wins, then amplifies, rivals, allies.
+  if (r.targets.includes(postAuthorPersonaId)) return 'targets';
+  if (r.amplifies.includes(postAuthorPersonaId)) return 'amplifies';
+  if (r.rivals.includes(postAuthorPersonaId)) return 'rivals';
+  if (r.allies.includes(postAuthorPersonaId)) return 'allies';
+  return undefined;
+}
+
+/**
+ * Engagement-probability multiplier for a (commenter, postAuthor) pair.
+ * Returns 1.0 when there's no relationship.
+ */
+function relationshipMultiplier(
+  commenterPersona: Persona,
+  postAuthorPersonaId: string | undefined,
+): number {
+  const bucket = relationshipBucket(commenterPersona, postAuthorPersonaId);
+  return bucket ? RELATIONSHIP_WEIGHT[bucket] : 1.0;
+}
+
+/**
+ * Pick a `CommentRegister` for `generateComment` based on the relationship
+ * between the commenting persona and the post author's persona. Returns
+ * `undefined` when there's no relationship — Gemini then picks freely from
+ * all 5 example registers.
+ *
+ * Two buckets (`targets`, `allies`) randomize between two options because the
+ * action they describe is ambiguous: targeting can be either disagreement or
+ * a leading question, and allyship can be either a love-react or an
+ * affirming reply. The other buckets pick a single register deterministically.
+ */
+function pickRegisterHint(
+  commenterPersona: Persona,
+  postAuthorPersonaId: string | undefined,
+): CommentRegister | undefined {
+  const bucket = relationshipBucket(commenterPersona, postAuthorPersonaId);
+  if (!bucket) return undefined;
+  switch (bucket) {
+    case 'targets':
+      return Math.random() < 0.6 ? 'disagree' : 'conversational';
+    case 'rivals':
+      return 'disagree';
+    case 'amplifies':
+      return 'love';
+    case 'allies':
+      return Math.random() < 0.5 ? 'love' : 'reply';
+  }
+}
 
 /**
  * Maximum runtime comments retained in `runtime-comments.json` per agent.
@@ -80,6 +156,16 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       // Pick a random subset
       const selected = shuffle(allAgents).slice(0, Math.min(maxAgents, allAgents.length));
 
+      // Build a global agentname → personaId lookup so the like/comment/follow
+      // loops can resolve a post author's persona without re-reading the
+      // agent.json files. Built from `allAgents` (not just the selected
+      // subset) because the explore feed will surface posts from any
+      // registered agent, not just the ones acting this cycle.
+      const agentnameToPersonaId = new Map<string, string>();
+      for (const a of allAgents) {
+        agentnameToPersonaId.set(a.agentname, a.personaId);
+      }
+
       ui.section(`Cycle — ${selected.length} agents, up to ${actionsLimit} actions each`);
 
       let cycleLikes = 0;
@@ -141,7 +227,13 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           let liked = 0;
           for (const post of otherPosts) {
             if (liked >= likesTarget || actionsUsed >= actionsLimit) break;
-            if (Math.random() > persona.likeProbability) continue;
+            // Apply relationship multiplier so an agent is more likely to
+            // like posts from personas it has a typed relationship with.
+            // Unrelated authors get the persona's base likeProbability.
+            const authorPid = agentnameToPersonaId.get(post.agentname);
+            const likeMult = relationshipMultiplier(persona, authorPid);
+            const adjustedLikeProb = Math.min(1, persona.likeProbability * likeMult);
+            if (Math.random() > adjustedLikeProb) continue;
 
             try {
               await client.likePost(post.id);
@@ -159,6 +251,21 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           }
 
           // 3. Comment on posts (subject to per-agent 60s cooldown)
+          // Reorder otherPosts so relationship-relevant authors come first.
+          // This makes the registerHint pathway hit more often without
+          // changing the rest of the iteration semantics — comments still
+          // walk top-to-bottom until commentsTarget is hit. Unrelated posts
+          // remain in shuffled order at the tail.
+          const commentablePosts = [...otherPosts]
+            .map((post) => {
+              const pid = agentnameToPersonaId.get(post.agentname);
+              const bucket = relationshipBucket(persona, pid);
+              const score = bucket ? RELATIONSHIP_WEIGHT[bucket] : 1.0;
+              return { post, score };
+            })
+            .sort((a, b) => b.score - a.score)
+            .map((entry) => entry.post);
+
           let commented = 0;
           const lastCommentedAt = agentData.lastCommentedAt
             ? Date.parse(agentData.lastCommentedAt)
@@ -168,11 +275,27 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             sp.message(`@${agent.agentname} — comment cooldown active, skipping`);
           } else {
             const commentsTarget = randomInt(1, 2);
-            for (const post of otherPosts) {
+            for (const post of commentablePosts) {
               if (commented >= commentsTarget || actionsUsed >= actionsLimit) break;
               if (!post.caption) continue;
 
+              // Gate on the persona's commentProbability, scaled by the
+              // relationship multiplier — mirrors the like-loop pattern at
+              // line 234 so low-comment lurkers stay quiet and high-comment
+              // reply-guys stay chatty. Without this, every persona was
+              // guaranteed 1–2 comment attempts per cycle once cooldown
+              // cleared, which made persona.commentProbability dead weight.
+              const authorPid = agentnameToPersonaId.get(post.agentname);
+              const commentMult = relationshipMultiplier(persona, authorPid);
+              const adjustedCommentProb = Math.min(1, persona.commentProbability * commentMult);
+              if (Math.random() > adjustedCommentProb) continue;
+
               try {
+                // Pick a comment register hint based on the relationship
+                // between this agent's persona and the post author's persona.
+                // Returns undefined for unrelated posts — generateComment then
+                // lets Gemini pick freely from all 5 example registers.
+                const registerHint = pickRegisterHint(persona, authorPid);
                 sp.message(`@${agent.agentname} — writing comment for @${post.agentname}`);
                 // Snapshot the avoid list at call time (matches the pattern in
                 // generate.ts) so post-call mutations of `priorCommentTexts`
@@ -184,6 +307,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   post.caption,
                   post.agentname,
                   [...priorCommentTexts],
+                  registerHint,
                 );
                 await client.commentOnPost(post.id, comment);
                 commented++;
@@ -223,7 +347,12 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             if (seenAgents.has(post.agentname)) continue;
             seenAgents.add(post.agentname);
 
-            if (Math.random() > persona.followProbability) continue;
+            // Same relationship multiplier pattern as the like loop — agents
+            // are more likely to follow personas they have a typed link with.
+            const followAuthorPid = agentnameToPersonaId.get(post.agentname);
+            const followMult = relationshipMultiplier(persona, followAuthorPid);
+            const adjustedFollowProb = Math.min(1, persona.followProbability * followMult);
+            if (Math.random() > adjustedFollowProb) continue;
 
             try {
               await client.followAgent(post.agentname);

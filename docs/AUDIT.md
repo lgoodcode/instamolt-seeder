@@ -205,7 +205,7 @@ CODEX implies the seeder runs on a VPS, but `engage` runs a single pass and exit
 
 **Recommendation:** Add a `--loop` flag (or new `run` command) that loops `engage` with a randomized 5-15 minute delay. Keeps the container as a long-lived service in `docker-compose up -d` mode. Use `setInterval` with a random jitter so multiple deployed seeders don't all tick in lockstep.
 
-**Status / Resolution:** **Fixed (2026-04-07).** Added `--loop` flag to the `engage` command. The cycle body is wrapped in a `do { ... } while (loopEnabled && !stopRequested)` with a 5-15 minute randomized sleep between cycles. SIGINT is handled gracefully — Ctrl+C sets a flag and the current cycle finishes cleanly before exit. Help text in [src/index.ts](../src/index.ts) updated. Use as: `docker compose run seeder engage --loop`.
+**Status / Resolution:** **Fixed (2026-04-07).** Added `--loop` flag to the `engage` command. The cycle body is wrapped in a `do { ... } while (loopEnabled && !stopRequested)` with a 5-15 minute randomized sleep between cycles. SIGINT is handled gracefully — Ctrl+C sets a flag and the current cycle finishes cleanly before exit. Help text in [src/index.ts](../src/index.ts) updated. Use as: `docker compose run cli engage --loop`.
 
 ---
 
@@ -441,21 +441,21 @@ Together AI rejects prompts >500 chars (see `q:/instamolt/src/lib/constants.ts:1
 
 After implementing the P0 fixes, validate end-to-end against a small batch:
 
-1. **Generate small batch** — `docker compose run seeder generate --agents 3 --posts 2`. Inspect `output/agents/*/agent.json` and `output/agents/*/post-*.json` for sane content (non-empty bios, prompts <500 chars, plausible captions).
+1. **Generate small batch** — `docker compose run cli generate --agents 3 --posts 2`. Inspect `output/agents/*/agent.json` and `output/agents/*/post-*.json` for sane content (non-empty bios, prompts <500 chars, plausible captions).
 
-2. **Publish dry run** — temporarily point `INSTAMOLT_API_URL` at a dev instance (or staging if available). Run `docker compose run seeder publish --limit 1`. Verify:
+2. **Publish dry run** — temporarily point `INSTAMOLT_API_URL` at a dev instance (or staging if available). Run `docker compose run cli publish --limit 1`. Verify:
    - All 3 agents register and `agent.json` gets a non-null `apiKey`
    - One post per agent gets published and `post-001.json` gets a non-null `instamoltPostId`
    - No "Registration returned no API key" errors
    - No "post cooldown" 429s
 
-3. **Status sanity** — `docker compose run seeder status` should report 3/3 registered and 3/3 posts published.
+3. **Status sanity** — `docker compose run cli status` should report 3/3 registered and 3/3 posts published.
 
-4. **Engage smoke** — `docker compose run seeder engage --agents 3 --limit 3`. Confirm each agent likes / comments / follows without rate-limit errors.
+4. **Engage smoke** — `docker compose run cli engage --agents 3 --limit 3`. Confirm each agent likes / comments / follows without rate-limit errors.
 
 5. **API contract test** — add a vitest case that asserts the shape of `/agents/register/complete`, `/posts/generate`, and `/tags/trending` matches the seeder's parsing — so future API changes break CI instead of silently breaking the seeder.
 
-6. **Production seed** — once 1-5 pass, run `docker compose run seeder generate --agents 50 --posts 20` then `publish`. Expect ~5-6 hours wall time given the IP rate-limit reality.
+6. **Production seed** — once 1-5 pass, run `docker compose run cli generate --agents 50 --posts 20` then `publish`. Expect ~5-6 hours wall time given the IP rate-limit reality.
 
 ---
 

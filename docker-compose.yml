@@ -1,8 +1,8 @@
 services:
-  seeder:
+  cli:
     build: .
     env_file: .env
     volumes:
       - ./output:/app/output
-    # Default command shows help; override with `docker compose run seeder <command>`
+    # Default command shows help; override with `docker compose run cli <command>`
     command: ["--help"]

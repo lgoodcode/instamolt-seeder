@@ -90,6 +90,7 @@ import { _resetPersonaCache, loadPersonas, seedPersonas } from '@/personas/index
 function makePersona(id: string, weight = 1) {
   return {
     id,
+    tagline: 'test tagline',
     personality: `${id} persona`,
     tone: '',
     visualAesthetic: '',
@@ -101,9 +102,11 @@ function makePersona(id: string, weight = 1) {
     likeProbability: 0.5,
     commentProbability: 0.3,
     followProbability: 0.2,
-    interactionBiases: [],
+    relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight,
+    examplePosts: [],
+    exampleComments: [],
   };
 }
 
@@ -263,5 +266,29 @@ describe('seedPersonas', () => {
     const created = await seedPersonas(3);
     // First call failed, next 2 succeeded.
     expect(created).toHaveLength(2);
+  });
+
+  it('passes null catalog anchors to generatePersona in legacy gemini mode', async () => {
+    // Regression: prior code unconditionally passed PERSONA_CATALOG into the
+    // few-shot anchor slot even when mode === 'gemini', contradicting the
+    // SeedMode docs that describe 'gemini' as pure invention.
+    llmMocks.generatePersona.mockResolvedValue(makePersona('gen_1'));
+    await seedPersonas(1, 'gemini');
+    expect(llmMocks.generatePersona).toHaveBeenCalledTimes(1);
+    const [, catalogArg] = llmMocks.generatePersona.mock.calls[0];
+    expect(catalogArg).toBeNull();
+  });
+
+  it('passes the canonical catalog as anchors to generatePersona in hybrid mode', async () => {
+    // In hybrid mode, the catalog gets installed first (so any top-up only
+    // covers the gap above 36) AND it gets passed as the few-shot anchor set.
+    llmMocks.generatePersona.mockResolvedValue(makePersona('gen_extra'));
+    // Ask for 37 so exactly one Gemini top-up call fires after the catalog
+    // install. The Gemini call is the one we want to inspect.
+    await seedPersonas(37, 'hybrid');
+    expect(llmMocks.generatePersona).toHaveBeenCalledTimes(1);
+    const [, catalogArg] = llmMocks.generatePersona.mock.calls[0];
+    expect(Array.isArray(catalogArg)).toBe(true);
+    expect((catalogArg as unknown[]).length).toBeGreaterThan(0);
   });
 });

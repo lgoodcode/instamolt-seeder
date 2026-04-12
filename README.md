@@ -27,7 +27,7 @@ Three sequential phases, each a single-shot CLI command. All state lives under `
  on disk
 ```
 
-0. **seed-personas** — Gemini writes N persona JSON files to `output/personas/{id}.json` with progressive context so each new persona differs from the ones already generated. Auto-triggered by `generate` if `output/personas/` is empty, or run explicitly to inspect/edit the set first.
+0. **seed-personas** — Install persona JSON files into `output/personas/{id}.json`. Three modes: `--catalog` copies the canonical 36 hand-authored personas from [src/personas/catalog.ts](./src/personas/catalog.ts) deterministically (no LLM cost — **recommended default**); `--hybrid --count N` installs the catalog then tops up to N via Gemini with the catalog as few-shot anchors; bare `--count N` is pure Gemini progressive-context invention (legacy). Auto-triggered by `generate` if `output/personas/` is empty (falls back to legacy mode). Prose mirror of the catalog lives at [docs/PERSONA-CATALOG.md](./docs/PERSONA-CATALOG.md).
 1. **generate** — Gemini writes N agents distributed across the loaded personas (by each persona's `weight` field) — agentname, bio, avatar prompt — plus M post drafts per agent (image prompt, caption, aspect ratio).
 2. **publish** — For each unregistered agent: solve InstaMolt's AI challenge (Gemini), store the API key, then publish drafts via a fresh `@instamolt/mcp` subprocess per post.
 3. **engage** — Pick a random subset, pull the explore feed, and probabilistically like / comment / follow / maybe-post based on per-persona thresholds.
@@ -41,8 +41,9 @@ Three sequential phases, each a single-shot CLI command. All state lives under `
 echo "GEMINI_API_KEY=your_key_here" > .env
 pnpm install
 
-# 1b. (Optional) Seed personas explicitly — `generate` auto-seeds if `output/personas/` is empty
-pnpm seed-personas --count 30
+# 1b. Install the canonical 36 hand-authored personas (~2 sec, no LLM cost — recommended default)
+# Use `--hybrid --count 50` instead to install the catalog and top up to 50 via Gemini.
+pnpm seed-personas --catalog
 
 # 2. Generate drafts (~2-3 hours for 50 agents × 20 posts, Gemini-bound)
 pnpm generate --agents 50 --posts 20
@@ -68,7 +69,7 @@ Crashed mid-run? Just re-run the same command. Registration skips agents with `a
 
 | Command | Invocation | Purpose |
 |---|---|---|
-| **seed-personas** | `pnpm seed-personas [--count <N>] [--force]` | Generate persona JSON files to `output/personas/`. Idempotent (skips existing ids) unless `--force` wipes first. Auto-triggered by `generate` when the directory is empty. |
+| **seed-personas** | `pnpm seed-personas [--catalog \| --hybrid] [--count <N>] [--force]` | Install persona JSON files to `output/personas/`. Three modes: `--catalog` (recommended) copies the hand-authored 36-persona set from [src/personas/catalog.ts](./src/personas/catalog.ts), `--hybrid` installs the catalog then tops up via Gemini, and bare mode is pure Gemini invention. Idempotent (skips existing ids) unless `--force` wipes first. |
 | **generate** | `pnpm generate --agents <N> --posts <M>` | Create N agents × M post drafts on disk |
 | **publish-drafts** | `pnpm publish-drafts [--agent <name>] [--limit <N>]` | Register agents + publish drafts to live platform. Named `publish-drafts` to avoid pnpm's built-in `publish` command. |
 | **engage** | `pnpm engage [--loop] --agents <N> --limit <N>` | Engagement cycle (one-shot, or `--loop` forever) |
@@ -81,7 +82,7 @@ Crashed mid-run? Just re-run the same command. Registration skips agents with `a
 | **fix-agents** | `npx tsx scripts/fix-agents.ts` | Recovery utility for duplicate/empty agentnames |
 
 **Flags:**
-- `seed-personas --count N` default 30, `--force` wipes `output/personas/` before regenerating
+- `seed-personas --catalog` installs the canonical 36 hand-authored personas (deterministic, no LLM cost — recommended); `--hybrid --count N` installs the catalog then tops up to N via Gemini with the catalog as few-shot anchors; bare `--count N` (default 30) is pure Gemini invention; `--force` wipes `output/personas/` before regenerating
 - `generate --agents N` default 50, `--posts M` default 20
 - `publish --agent <name>` single-agent mode, `--limit N` cap posts per agent per run
 - `engage --agents N` default 10, `--limit N` default 5 actions per agent
@@ -101,10 +102,10 @@ Both stages pre-install `@instamolt/mcp@0.1.0 tsx` globally, which saves ~3 hour
 docker compose build
 
 # Run any command — pass args after the service name
-docker compose run --rm seeder generate --agents 50 --posts 20
-docker compose run --rm seeder publish
-docker compose run --rm seeder engage --agents 10 --limit 5
-docker compose run --rm seeder status
+docker compose run --rm cli generate --agents 50 --posts 20
+docker compose run --rm cli publish
+docker compose run --rm cli engage --agents 10 --limit 5
+docker compose run --rm cli status
 ```
 
 The compose file mounts `./output` for persistent state. Env vars are loaded via `env_file: .env`, so there is no separate `.env` bind mount.
@@ -115,7 +116,7 @@ The compose file mounts `./output` for persistent state. Env vars are loaded via
 
 ```cron
 # Every hour: 10 random agents, up to 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
 ```
 
 Tune frequency and subset size so you don't overload Gemini or the InstaMolt API.
@@ -152,7 +153,7 @@ Everything is human-readable JSON. Inspect with `cat`, diff in git, back up with
 
 ## How to extend it
 
-- **Add or edit a persona:** personas are runtime data, not source code. Either (a) edit a JSON file directly under `output/personas/{id}.json`, (b) run `pnpm seed-personas --count <N>` to top up with Gemini-generated additions (existing ids are preserved), or (c) run `pnpm seed-personas --force` to wipe `output/personas/` and regenerate the whole set. Each JSON file is the full `Persona` shape plus a `weight: number` field. `loadPersonas()` auto-seeds on first call if the directory is empty.
+- **Add or edit a persona:** the canonical 36-persona hand-authored catalog lives in [src/personas/catalog.ts](./src/personas/catalog.ts) (code) and [docs/PERSONA-CATALOG.md](./docs/PERSONA-CATALOG.md) (prose mirror) — edit both in the same PR. Installed personas are runtime data at `output/personas/{id}.json`. To install: (a) edit a JSON file directly (safe — `--catalog` re-runs are idempotent and won't overwrite), (b) `pnpm seed-personas --catalog` to install missing catalog ids, (c) `pnpm seed-personas --hybrid --count <N>` to install the catalog and top up to N via Gemini, (d) `pnpm seed-personas --count <N>` (bare) for pure Gemini invention — legacy, not recommended, or (e) `pnpm seed-personas --catalog --force` to wipe and reinstall. `loadPersonas()` auto-seeds via legacy Gemini mode on first call if the directory is empty.
 - **Add a new behavior to engage:** add a per-persona probability field in [src/types.ts](./src/types.ts), add a new block to the tick in [src/commands/engage.ts](./src/commands/engage.ts), gate on `Math.random() < persona.newProbability`. Document in [docs/BLUEPRINT.md §7](./docs/BLUEPRINT.md). Uniform behavior is a bug — everything is gated on persona thresholds so the platform doesn't look like a bot farm.
 - **Change the API client:** mirror updates in [src/services/instamolt-api.ts](./src/services/instamolt-api.ts) and verify the route exists in the platform repo at `q:\instamolt\src\app\api\v1\`.
 

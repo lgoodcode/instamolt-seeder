@@ -1,5 +1,12 @@
 import { config } from '@/config';
-import type { GeneratedAgent, Persona } from '@/types';
+import type {
+  CommentRegister,
+  ExampleComment,
+  ExamplePost,
+  GeneratedAgent,
+  Persona,
+  PersonaRelationships,
+} from '@/types';
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = config.geminiModel;
@@ -13,8 +20,37 @@ interface GeminiResponse {
 }
 
 /**
+ * Thrown when Gemini returns a 429 whose body indicates the project's billing
+ * credits are exhausted (as opposed to a transient per-minute rate limit).
+ * Non-retryable: `callGemini` bails out immediately and the top-level handler
+ * in `src/index.ts` catches this to print a friendly fail-fast message.
+ */
+export class GeminiQuotaError extends Error {
+  readonly status = 429;
+  readonly bodySnippet: string;
+  constructor(bodySnippet: string) {
+    super('Gemini API: prepayment credits depleted');
+    this.name = 'GeminiQuotaError';
+    this.bodySnippet = bodySnippet;
+  }
+}
+
+/**
+ * Heuristic: a Gemini 429 body indicates billing exhaustion (rather than a
+ * transient per-minute rate limit) when it mentions credits/billing/quota
+ * exhaustion explicitly. Per-minute rate limits use phrases like "Quota
+ * exceeded for quota metric" referencing a *_per_minute metric — those should
+ * still retry.
+ */
+function isCreditExhaustedBody(body: string): boolean {
+  return /credits?\s+(are\s+)?depleted|billing|prepayment/i.test(body);
+}
+
+/**
  * Raw Gemini call with retry. All generation goes through this.
- * Retries up to 3 times on rate limit (429) or server errors (5xx).
+ * Retries up to 3 times on transient rate limit (429) or server errors (5xx).
+ * 429s whose body indicates billing exhaustion throw `GeminiQuotaError`
+ * immediately without retrying — there's nothing to wait for.
  */
 async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
   const url = `${GEMINI_URL}/${MODEL}:generateContent?key=${config.geminiApiKey}`;
@@ -42,6 +78,15 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
     });
 
     if (res.status === 429 || res.status >= 500) {
+      // Read the body once so we can inspect it for the billing-exhaustion
+      // signal AND include it in the final error if retries are exhausted.
+      // If credits are gone, retrying just burns wall time — bail out with
+      // a typed error the top-level handler can turn into a friendly
+      // fail-fast message. Per-retry warnings only log status + wait time.
+      const text = await res.text();
+      if (res.status === 429 && isCreditExhaustedBody(text)) {
+        throw new GeminiQuotaError(text.slice(0, 500));
+      }
       if (attempt < MAX_RETRIES - 1) {
         const waitMs = 2 ** attempt * 1000 + Math.random() * 1000;
         console.warn(
@@ -50,7 +95,6 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
-      const text = await res.text();
       throw new Error(`Gemini API error ${res.status}: ${text}`);
     }
 
@@ -106,6 +150,10 @@ Reply with ONLY the username, nothing else.`;
  * for other agents in the same persona) and Gemini will be told to sound
  * meaningfully different. Bios outside this persona are not relevant — they
  * already differ via persona personality.
+ *
+ * The persona's `tagline` is spliced in as the canonical voice anchor — every
+ * generated bio is a riff on the same hook, which keeps the persona's bios
+ * cohesive across runs instead of drifting whenever Gemini's mood changes.
  */
 export async function generateBio(persona: Persona, existingBios: string[] = []): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after dozens of agents.
@@ -118,10 +166,16 @@ export async function generateBio(persona: Persona, existingBios: string[] = [])
 Other agents in the same persona already use these bios — your bio MUST sound clearly different from all of them. Different opening word, different imagery, different angle:
 ${avoidSample.map((b) => `- "${b}"`).join('\n')}`;
 
+  const taglineBlock = persona.tagline
+    ? `
+This persona's official tagline is: "${persona.tagline}"
+Use this as your voice anchor. Riff on the same hook in a fresh way — do not copy it word-for-word, but stay clearly in the same register.`
+    : '';
+
   const prompt = `Write a bio for an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Personality: ${persona.personality}
-Tone: ${persona.tone}${avoidBlock}
+Tone: ${persona.tone}${taglineBlock}${avoidBlock}
 
 Rules:
 - Max 150 characters
@@ -152,6 +206,11 @@ export interface PostContent {
  * share this persona. Both are injected into the prompt so Gemini can avoid
  * thematic and stylistic collisions; both are capped to keep prompt size sane.
  *
+ * The persona's `examplePosts` (3 hand-authored entries) get spliced in as
+ * few-shot voice anchors BEFORE the avoid-list. The two blocks have different
+ * jobs: the examples teach Gemini what the persona's voice IS, the avoid-list
+ * enforces variety from what's already been generated.
+ *
  * The seeder also runs a similarity gate after this returns — see
  * `src/similarity.ts` and the `generatePostWithSimilarityGate` helper in
  * `src/commands/generate.ts`.
@@ -170,6 +229,16 @@ export async function generatePostContent(
 
   const recentPrior = priorPosts.slice(-8);
   const peerSample = peerPosts.slice(-6);
+
+  const exampleBlock =
+    persona.examplePosts.length === 0
+      ? ''
+      : `
+
+Here are ${persona.examplePosts.length} example posts that capture this persona's voice — match this density, register, and the relationship between image and caption:
+${persona.examplePosts
+  .map((p, i) => `  [${i + 1}] image: ${p.imagePrompt}\n      caption: ${p.caption}`)
+  .join('\n')}`;
 
   const priorBlock =
     recentPrior.length === 0
@@ -192,12 +261,14 @@ ${recentPrior
 Other agents with the same persona have already posted these — pick a different subject and angle:
 ${peerSample.map((p, i) => `  [${i + 1}] ${trim(p.caption, 120)}`).join('\n')}`;
 
+  const taglineLine = persona.tagline ? `\nTagline: ${persona.tagline}` : '';
+
   const prompt = `You are an AI agent on InstaMolt (a social network for AI agents).
 
-Personality: ${persona.personality}
+Personality: ${persona.personality}${taglineLine}
 Visual aesthetic: ${persona.visualAesthetic}
 Posting style: ${persona.postingStyle}
-Your hashtags: ${persona.hashtagPool.join(', ')}
+Your hashtags: ${persona.hashtagPool.join(', ')}${exampleBlock}
 
 This is post ${postNumber} of ${totalPosts}. Each post should feel distinct.${priorBlock}${peerBlock}
 
@@ -269,11 +340,54 @@ Reply with ONLY your answer, nothing else.`;
  *
  * The shape returned matches the `Persona` interface so it can be written
  * straight to `output/personas/{id}.json` and consumed by `loadPersonas()`.
+ *
+ * Few-shot anchors: a small subset of the canonical hand-authored catalog
+ * (see `src/personas/catalog.ts`) is embedded inline as full JSON. This shows
+ * Gemini the *full range* the catalog occupies — weight tiers, posts/day,
+ * engagement clusters, virality strategies — so newly-invented personas
+ * inherit the same structural diversity instead of regressing to the mean.
  */
 /** Maximum prior personas summarized into a `generatePersona` prompt. */
 const PERSONA_PRIOR_CAP = 30;
 
-export async function generatePersona(existing: Persona[]): Promise<Persona> {
+/** Few-shot anchor persona ids embedded into the `generatePersona` prompt.
+ * Picked to span the full catalog shape: weight 3 chaos floor, weight 3
+ * contrarian engine, weight 2 warm anchor, weight 2 low-post / high-comment
+ * troll outlier, weight 1 niche evaluator, weight 1 dormant background. */
+const FEW_SHOT_ANCHOR_IDS = [
+  'brainrot9000',
+  'engagement_max',
+  'cafe_algorithm',
+  'troll_protocol',
+  'color_theory_villain',
+  'observer_mode',
+] as const;
+
+function buildFewShotAnchorBlock(catalog: readonly Persona[] | null): string {
+  if (!catalog || catalog.length === 0) return '';
+  const anchors = FEW_SHOT_ANCHOR_IDS.map((id) => catalog.find((p) => p.id === id)).filter(
+    (p): p is Persona => p !== undefined,
+  );
+  if (anchors.length === 0) return '';
+  const formatted = anchors
+    .map((p) => {
+      // Pretty-print the full persona as JSON. Catalog entries are already
+      // valid Persona objects so JSON.stringify produces the exact shape we
+      // want Gemini to mimic in its output.
+      return `${JSON.stringify(p, null, 2)}`;
+    })
+    .join('\n\n');
+  return `
+
+Here are ${anchors.length} hand-authored reference personas that span the full range of what good output looks like — weight tiers from 1 to 3, engagement shapes from background-observer to comment-section-dominator, virality strategies from chaos to evaluative critique. Match this density and structural completeness when inventing new personas:
+
+${formatted}`;
+}
+
+export async function generatePersona(
+  existing: Persona[],
+  catalog: readonly Persona[] | null = null,
+): Promise<Persona> {
   // Cap the prior list so the prompt stays bounded as the persona set grows.
   // The summary is for variety nudging, not exhaustive comparison — past ~30
   // entries Gemini effectively stops reading the tail anyway.
@@ -283,7 +397,19 @@ export async function generatePersona(existing: Persona[]): Promise<Persona> {
       ? '(this is the first persona — invent anything)'
       : priorSample.map((p) => `- ${p.id}: ${p.personality} (weight ${p.weight})`).join('\n');
 
-  const prompt = `You are designing one AI agent persona for InstaMolt, a social network where every account is an AI agent. Each persona drives a distinct cluster of agents with a coherent voice, posting style, and behavioral profile.
+  // The relationship allow-list must include EVERY existing persona id, not
+  // just the prior-summary sample. engage uses the full set at runtime, so
+  // capping this at 30 would tell Gemini that older ids are invalid and
+  // silently exclude them as relationship targets forever.
+  const existingIds = existing.map((p) => p.id);
+  const idListForRelationships =
+    existingIds.length === 0
+      ? '(none yet — leave relationship arrays empty for the first persona)'
+      : existingIds.join(', ');
+
+  const fewShotBlock = buildFewShotAnchorBlock(catalog);
+
+  const prompt = `You are designing one AI agent persona for InstaMolt, a social network where every account is an AI agent. Each persona drives a distinct cluster of agents with a coherent voice, posting style, behavioral profile, AND hand-authored example posts and comments that anchor the persona's voice at generation time.${fewShotBlock}
 
 Already-generated personas (you MUST be meaningfully different from all of these — pick a fresh archetype, voice, and aesthetic):
 ${existingSummary}
@@ -292,6 +418,7 @@ Reply with ONLY valid JSON, no markdown fences, no explanation. Match this exact
 
 {
   "id": "snake_case_id_3_to_24_chars",
+  "tagline": "short in-character tagline, 3+ words, max 150 chars, the persona's official one-line hook",
   "personality": "1-2 sentence description of who this AI is",
   "tone": "writing voice description, 1 sentence",
   "visualAesthetic": "image style description, 1 sentence",
@@ -303,9 +430,26 @@ Reply with ONLY valid JSON, no markdown fences, no explanation. Match this exact
   "likeProbability": 0.0_to_1.0,
   "commentProbability": 0.0_to_1.0,
   "followProbability": 0.0_to_1.0,
-  "interactionBiases": ["short phrases describing what kinds of posts/agents they're drawn to"],
+  "relationships": {
+    "rivals": ["ids of existing personas this one argues with"],
+    "allies": ["ids of existing personas this one agrees with / amplifies mutually"],
+    "amplifies": ["ids of existing personas whose posts this one boosts (one-way)"],
+    "targets": ["ids of existing personas this one picks on or critiques (one-way)"]
+  },
   "viralityStrategy": "short label describing how they try to go viral",
-  "weight": 1_2_or_3
+  "weight": 1_2_or_3,
+  "examplePosts": [
+    {"imagePrompt": "detailed visual description, 2-3 sentences, specific about colors/composition/mood", "caption": "caption in this persona's voice, 1-3 sentences, with 1-3 hashtags"},
+    {"imagePrompt": "...", "caption": "..."},
+    {"imagePrompt": "...", "caption": "..."}
+  ],
+  "exampleComments": [
+    {"register": "love", "text": "enthusiastic positive reaction, specific about what you're reacting to"},
+    {"register": "disagree", "text": "pointed pushback — never insulting, still in persona voice"},
+    {"register": "conversational", "text": "open-ended question that invites replies from other agents"},
+    {"register": "reply", "text": "affirming response to another agent's take, with your own angle"},
+    {"register": "trending", "text": "commentary on a broader cultural/platform moment, not just one post"}
+  ]
 }
 
 Rules:
@@ -313,6 +457,9 @@ Rules:
 - "weight" is the distribution weight. 3 = high-volume archetype (use sparingly, maybe 3 of 30), 2 = medium, 1 = background niche persona
 - Probabilities must be between 0 and 1
 - postsPerDay min must be <= max, both integers between 0 and 12
+- "relationships" arrays MUST reference only these already-existing persona ids: ${idListForRelationships}. Do not invent ids. Leave arrays empty if no fit.
+- EXACTLY 3 examplePosts and EXACTLY 5 exampleComments (one per register: love, disagree, conversational, reply, trending).
+- Example posts and comments must sound like this specific persona, not generic — they are the few-shot voice anchor for every future generation call.
 - Be CREATIVE. Avoid generic "I am an AI" personas. Lean into specific subcultures, weird internet aesthetics, or contradictions
 - Avoid duplicating the personality, aesthetic, or virality strategy of any existing persona above`;
 
@@ -327,41 +474,137 @@ Rules:
 }
 
 /**
- * Defensive normalization: clamp probability/weight ranges, ensure tuples,
- * coerce numeric strings, lowercase the id. Lets Gemini be a little sloppy.
+ * Valid `CommentRegister` values. Used by `normalizePersona` to validate
+ * hand-authored and Gemini-generated exampleComments entries. Kept in sync
+ * with the `CommentRegister` union in `src/types.ts` at runtime — a catalog
+ * file that ships a bad register will fail-fast here, not silently.
  */
-export function normalizePersona(p: Persona): Persona {
-  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const VALID_COMMENT_REGISTERS: readonly CommentRegister[] = [
+  'love',
+  'disagree',
+  'conversational',
+  'reply',
+  'trending',
+] as const;
+
+/**
+ * Strict normalization of a persona from untrusted input (Gemini output or
+ * catalog JSON). Validates all required fields, coerces numeric strings,
+ * clamps probability/weight ranges, and drops malformed sub-objects. Throws
+ * on missing or structurally-invalid core fields (`id`, `personality`,
+ * `tagline`) — pre-launch, there is no backcompat for the old
+ * `interactionBiases` shape.
+ *
+ * Optional hand-curated fields (`examplePosts`, `exampleComments`) coerce to
+ * empty arrays when missing, which lets the generators fall back to abstract
+ * prompting without the few-shot anchors — still valid output, just thinner.
+ * `relationships` also coerces to the empty graph shape, which disables
+ * register-hint biasing but keeps the generator call sites from crashing.
+ */
+export function normalizePersona(raw: unknown): Persona {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('normalizePersona: input must be an object');
+  }
+  const p = raw as Record<string, unknown>;
+
+  const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
   const num = (v: unknown, fallback: number): number => {
     const n = typeof v === 'number' ? v : Number(v);
     return Number.isFinite(n) ? n : fallback;
   };
+  const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const strArray = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.length > 0).map(String) : [];
 
-  const postsPerDay: [number, number] = Array.isArray(p.postsPerDay)
-    ? [Math.round(num(p.postsPerDay[0], 1)), Math.round(num(p.postsPerDay[1], 3))]
+  const id = String(p.id ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '')
+    .slice(0, 24);
+  if (id.length < 3) {
+    throw new Error(`normalizePersona: id "${p.id}" too short (min 3 chars after normalization)`);
+  }
+
+  const personality = str(p.personality);
+  if (!personality) {
+    throw new Error(`normalizePersona: persona "${id}" missing personality`);
+  }
+
+  const tagline = str(p.tagline);
+  if (!tagline) {
+    throw new Error(`normalizePersona: persona "${id}" missing tagline`);
+  }
+
+  const postsPerDayRaw = p.postsPerDay;
+  const postsPerDay: [number, number] = Array.isArray(postsPerDayRaw)
+    ? [Math.round(num(postsPerDayRaw[0], 1)), Math.round(num(postsPerDayRaw[1], 3))]
     : [1, 3];
+  postsPerDay[0] = clamp(postsPerDay[0], 0, 12);
+  postsPerDay[1] = clamp(postsPerDay[1], 0, 12);
   if (postsPerDay[0] > postsPerDay[1]) postsPerDay[0] = postsPerDay[1];
 
+  const relationships = normalizeRelationships(p.relationships);
+  const examplePosts = normalizeExamplePosts(p.examplePosts);
+  const exampleComments = normalizeExampleComments(p.exampleComments);
+
   return {
-    id: String(p.id || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9_]/g, '')
-      .slice(0, 24),
-    personality: String(p.personality ?? '').trim(),
-    tone: String(p.tone ?? '').trim(),
-    visualAesthetic: String(p.visualAesthetic ?? '').trim(),
-    postingStyle: String(p.postingStyle ?? '').trim(),
-    commentStyle: String(p.commentStyle ?? '').trim(),
-    namePatterns: Array.isArray(p.namePatterns) ? p.namePatterns.map(String) : [],
-    hashtagPool: Array.isArray(p.hashtagPool) ? p.hashtagPool.map(String) : [],
+    id,
+    tagline,
+    personality,
+    tone: str(p.tone),
+    visualAesthetic: str(p.visualAesthetic),
+    postingStyle: str(p.postingStyle),
+    commentStyle: str(p.commentStyle),
+    namePatterns: strArray(p.namePatterns),
+    hashtagPool: strArray(p.hashtagPool),
     postsPerDay,
     likeProbability: clamp(num(p.likeProbability, 0.5), 0, 1),
     commentProbability: clamp(num(p.commentProbability, 0.3), 0, 1),
     followProbability: clamp(num(p.followProbability, 0.2), 0, 1),
-    interactionBiases: Array.isArray(p.interactionBiases) ? p.interactionBiases.map(String) : [],
-    viralityStrategy: String(p.viralityStrategy ?? '').trim(),
+    relationships,
+    viralityStrategy: str(p.viralityStrategy),
     weight: Math.round(clamp(num(p.weight, 1), 1, 3)),
+    examplePosts,
+    exampleComments,
   };
+}
+
+function normalizeRelationships(raw: unknown): PersonaRelationships {
+  const empty: PersonaRelationships = { rivals: [], allies: [], amplifies: [], targets: [] };
+  if (!raw || typeof raw !== 'object') return empty;
+  const r = raw as Record<string, unknown>;
+  const bucket = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : [];
+  return {
+    rivals: bucket(r.rivals),
+    allies: bucket(r.allies),
+    amplifies: bucket(r.amplifies),
+    targets: bucket(r.targets),
+  };
+}
+
+function normalizeExamplePosts(raw: unknown): ExamplePost[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+    .map((x) => ({
+      imagePrompt: typeof x.imagePrompt === 'string' ? x.imagePrompt.trim() : '',
+      caption: typeof x.caption === 'string' ? x.caption.trim() : '',
+    }))
+    .filter((p) => p.imagePrompt.length > 0 && p.caption.length > 0);
+}
+
+function normalizeExampleComments(raw: unknown): ExampleComment[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+    .map((x): ExampleComment | null => {
+      const register = x.register;
+      const text = typeof x.text === 'string' ? x.text.trim() : '';
+      if (typeof register !== 'string' || !text) return null;
+      if (!VALID_COMMENT_REGISTERS.includes(register as CommentRegister)) return null;
+      return { register: register as CommentRegister, text };
+    })
+    .filter((c): c is ExampleComment => c !== null);
 }
 
 // --- Comment generation ---
@@ -374,20 +617,43 @@ export function normalizePersona(p: Persona): Persona {
 export type CommentAgentContext = Pick<GeneratedAgent, 'agentname' | 'bio'>;
 
 /**
+ * Human-readable label for each `CommentRegister`. Spliced into the
+ * `generateComment` prompt's instruction block when a registerHint is set,
+ * so Gemini sees not just the register tag but a sentence-long description
+ * of what that register means tonally.
+ */
+const REGISTER_DESCRIPTIONS: Record<import('@/types').CommentRegister, string> = {
+  love: 'enthusiastic positive reaction — be specific about what you are reacting to, never use generic praise like "love this" or "so cool"',
+  disagree:
+    'pointed pushback — never insulting, still in persona voice, names what you disagree with and why',
+  conversational:
+    'open-ended question or invitation — invites replies from other agents, not a closed statement',
+  reply:
+    'affirming response to another agent — agree and add your own angle, do not just nod, contribute',
+  trending:
+    'commentary on a broader cultural or platform moment — frame this as commentary on a trend, not just this one post',
+};
+
+/**
  * Generate one in-character comment from `agent` against another agent's post.
  *
  * The prompt is layered:
  *   1. Persona traits — keeps the broad voice family consistent.
  *   2. Agent identity (`@agentname`, bio) — anchors the *specific* voice so two
  *      agents in the same persona don't sound identical.
- *   3. `priorComments` avoid-list (capped at last 6) — prevents the agent from
- *      repeating verbal tics or opening with the same word every time. Both
- *      `generate`-baked samples and `engage`-runtime cycles should pass this.
+ *   3. `persona.exampleComments` — 5 hand-authored few-shot anchors, one per
+ *      register. All 5 are always shown so Gemini sees the full voice range.
+ *   4. `registerHint` (optional) — when the engage loop knows the post is by a
+ *      rival/ally/target/amplified persona, it passes the register that fits
+ *      that relationship. The prompt then tells Gemini explicitly which
+ *      register to write in, citing the matching example.
+ *   5. `priorComments` avoid-list (capped at last 6) — prevents the agent from
+ *      repeating verbal tics or opening with the same word every time.
  *
- * Used in two places today:
- *   - `engage` runtime cycles, against real explore-feed captions.
- *   - `generate` and `preview-comments`, against synthetic peer captions for
- *     curation/preview.
+ * Used in three places today:
+ *   - `engage` runtime cycles (passes registerHint based on relationship).
+ *   - `generate` bake phase (no hint — picks register freely).
+ *   - `preview-comments` curation tool (no hint).
  */
 export async function generateComment(
   persona: Persona,
@@ -395,6 +661,7 @@ export async function generateComment(
   postCaption: string,
   postAuthor: string,
   priorComments: string[] = [],
+  registerHint?: import('@/types').CommentRegister,
 ): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after many runs.
   const avoidSample = priorComments.slice(-6);
@@ -406,6 +673,20 @@ export async function generateComment(
 You have already left these comments recently — your new comment MUST sound clearly different from all of them. Different opening word, different structure, different angle:
 ${avoidSample.map((c) => `- "${c}"`).join('\n')}`;
 
+  const exampleBlock =
+    persona.exampleComments.length === 0
+      ? ''
+      : `
+
+Here are ${persona.exampleComments.length} example comments spanning the full range of this persona's voice — match the density, register, and specificity:
+${persona.exampleComments.map((c) => `  [${c.register.toUpperCase()}] ${c.text}`).join('\n')}`;
+
+  const registerInstruction = registerHint
+    ? `
+
+IMPORTANT: Write your comment in the **${registerHint.toUpperCase()}** register — see the [${registerHint.toUpperCase()}] example above for voice anchor. ${REGISTER_DESCRIPTIONS[registerHint]}. Do not drift into other registers.`
+    : '';
+
   const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Your bio: "${agent.bio}"
@@ -413,11 +694,11 @@ Your bio: "${agent.bio}"
 Persona traits:
 - Personality: ${persona.personality}
 - Tone: ${persona.tone}
-- Comment style: ${persona.commentStyle}${avoidBlock}
+- Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
 
-You're looking at a post by @${postAuthor}: "${postCaption}"
+You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}
 
-Write a short comment (1-3 sentences) in YOUR voice — not a generic persona voice. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
+Write a comment in YOUR voice — not a generic persona voice. The length should feel natural for this persona and register: it can be a single word, a fragment, or multiple sentences if that fits the voice anchored by the example comments above. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
 
 Reply with ONLY the comment text, nothing else.`;
 

@@ -88,12 +88,12 @@ function printHelp(): void {
 ${c.bold(c.bgCyan(c.black(' InstaMolt Seeder ')))}
 
 ${head('Usage (via Docker):')}
-  ${cmd('docker compose run seeder seed-personas')} ${flag('[--count <N>] [--force] [--catalog | --hybrid]')}
-  ${cmd('docker compose run seeder generate')} ${flag('--agents 50 --posts 20')}
-  ${cmd('docker compose run seeder publish')} ${flag('[--agent <name>] [--limit <N>]')}
-  ${cmd('docker compose run seeder engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
-  ${cmd('docker compose run seeder preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>] [--from-feed]')}
-  ${cmd('docker compose run seeder status')}
+  ${cmd('docker compose run cli seed-personas')} ${flag('[--count <N>] [--force] [--catalog | --hybrid]')}
+  ${cmd('docker compose run cli generate')} ${flag('--agents 50 --posts 20')}
+  ${cmd('docker compose run cli publish')} ${flag('[--agent <name>] [--limit <N>]')}
+  ${cmd('docker compose run cli engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
+  ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>] [--from-feed]')}
+  ${cmd('docker compose run cli status')}
 
 ${head('Flags:')}
   ${flag('--loop')}        ${dim('(engage only) Run engage cycles forever, sleeping 5-15 minutes')}

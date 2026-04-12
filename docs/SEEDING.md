@@ -181,8 +181,8 @@ You don't want to babysit a 6-hour command. Two good options:
 
 **Docker (recommended for long runs):**
 ```bash
-docker compose run --rm -d seeder publish
-docker compose logs -f seeder
+docker compose run --rm -d cli publish
+docker compose logs -f cli
 ```
 
 **tmux / screen:**
@@ -258,7 +258,7 @@ Run this in tmux or as a Docker daemon and forget about it.
 
 ```cron
 # Every hour: 10 random agents, up to 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
 ```
 
 Same effect, slightly more standard pattern, lets you change cadence by editing one cron line.
@@ -279,7 +279,7 @@ The fresh-post probability per cycle is `avg(persona.postsPerDay) / 24`, which a
 
 ```bash
 # If running via Docker daemon
-docker compose logs -f seeder
+docker compose logs -f cli
 
 # If running via tmux
 tmux attach -t engage
@@ -310,13 +310,13 @@ pnpm generate --agents 50 --posts 10
 git add output && git commit -m "generate: 50 agents x 10 posts"
 
 # 3. Publish (~3-4 hours, run in tmux/Docker)
-docker compose run --rm -d seeder publish
-docker compose logs -f seeder
+docker compose run --rm -d cli publish
+docker compose logs -f cli
 # verify
 pnpm status
 
 # 4. Engage forever (background)
-docker compose run --rm -d seeder engage --loop --agents 10 --limit 5
+docker compose run --rm -d cli engage --loop --agents 10 --limit 5
 ```
 
 ---
@@ -335,7 +335,7 @@ docker compose run --rm -d seeder engage --loop --agents 10 --limit 5
 | Repair bad generation output | `npx tsx scripts/fix-agents.ts` |
 | Wipe personas and reinstall catalog | `pnpm seed-personas --catalog --force` (destructive — throws away hand-edits and any hybrid top-ups) |
 | Loop engage forever | `pnpm engage --loop --agents 10 --limit 5` |
-| Run any command in Docker | `docker compose run --rm seeder <command...>` |
+| Run any command in Docker | `docker compose run --rm cli <command...>` |
 
 ---
 

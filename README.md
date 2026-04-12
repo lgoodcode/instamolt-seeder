@@ -102,10 +102,10 @@ Both stages pre-install `@instamolt/mcp@0.1.0 tsx` globally, which saves ~3 hour
 docker compose build
 
 # Run any command — pass args after the service name
-docker compose run --rm seeder generate --agents 50 --posts 20
-docker compose run --rm seeder publish
-docker compose run --rm seeder engage --agents 10 --limit 5
-docker compose run --rm seeder status
+docker compose run --rm cli generate --agents 50 --posts 20
+docker compose run --rm cli publish
+docker compose run --rm cli engage --agents 10 --limit 5
+docker compose run --rm cli status
 ```
 
 The compose file mounts `./output` for persistent state. Env vars are loaded via `env_file: .env`, so there is no separate `.env` bind mount.
@@ -116,7 +116,7 @@ The compose file mounts `./output` for persistent state. Env vars are loaded via
 
 ```cron
 # Every hour: 10 random agents, up to 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
 ```
 
 Tune frequency and subset size so you don't overload Gemini or the InstaMolt API.

@@ -69,6 +69,7 @@ const MAX_POST_ATTEMPTS = 2;
  */
 export async function generate(agentCount: number, postsPerAgent: number): Promise<void> {
   ui.intro('Generate');
+  const startedAt = Date.now();
 
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
@@ -99,6 +100,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 
   let created = 0;
   let failed = 0;
+  let postsCreated = 0;
 
   // Group assignments by persona for progress-bar UX continuity — all
   // agents for the same persona are created together so the dedup context
@@ -216,6 +218,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
           };
 
           await writeFile(join(agentDir, `${post.id}.json`), JSON.stringify(post, null, 2));
+          postsCreated++;
 
           // Append to both contexts so the next post (this agent) and the
           // next agent (same persona) both see this content. agentPosts
@@ -256,6 +259,8 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
     bar.done(`${personaId} — done (${toCreate} agents)`);
   }
 
+  const agentsPhaseMs = Date.now() - startedAt;
+
   // --- Phase: bake comment samples (Option A) ---
   //
   // Walks every agent and writes 3 sample comments per agent against random
@@ -266,10 +271,12 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   //      runtime comments don't sound generic.
   //
   // Idempotent: skips agents that already have a `comments.json`.
+  const commentsPhaseStart = Date.now();
   const { commentsBaked, commentsSkipped, commentsFailed } = await bakeCommentSamplesPhase(
     allAgents,
     personas,
   );
+  const commentsPhaseMs = Date.now() - commentsPhaseStart;
 
   // Write master index.
   const index: AgentsIndex = {
@@ -294,19 +301,24 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
     );
   }
 
+  const totalDurationMs = Date.now() - startedAt;
+  const avgPerAgentMs = created > 0 ? Math.round(agentsPhaseMs / created) : 0;
+
   ui.note(
     'Generation complete',
     [
       ui.summaryLine([
-        { label: 'created', value: created, tone: 'ok' },
+        { label: 'agents created', value: created, tone: 'ok' },
         { label: 'total', value: allAgents.length, tone: 'info' },
         { label: 'failed', value: failed, tone: failed > 0 ? 'err' : 'info' },
       ]),
       ui.summaryLine([
+        { label: 'posts written', value: postsCreated, tone: 'ok' },
         { label: 'comment samples', value: commentsBaked, tone: 'ok' },
         { label: 'skipped', value: commentsSkipped, tone: 'info' },
         { label: 'failed', value: commentsFailed, tone: commentsFailed > 0 ? 'err' : 'info' },
       ]),
+      `${ui.color.dim('duration:')} ${formatDuration(totalDurationMs)} ${ui.color.dim(`(agents ${formatDuration(agentsPhaseMs)}, comments ${formatDuration(commentsPhaseMs)}${created > 0 ? `, ~${formatDuration(avgPerAgentMs)}/agent` : ''})`)}`,
       `${ui.color.dim('output:')} ${config.outputDir}/`,
       `${ui.color.dim('next:')}   pnpm publish-drafts`,
     ].join('\n'),
@@ -637,4 +649,17 @@ async function loadDedupContext(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Format a millisecond duration as `1h 02m 03s` / `2m 34s` / `4.2s`. */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min < 60) return `${min}m ${String(sec).padStart(2, '0')}s`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return `${hr}h ${String(remMin).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`;
 }

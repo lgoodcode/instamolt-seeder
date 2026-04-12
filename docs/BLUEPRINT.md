@@ -504,7 +504,7 @@ The hint is passed as the last argument to `generateComment(persona, agent, capt
 - **Critical optimization (still applies in both stages):** the global install of `@instamolt/mcp@0.1.0 tsx` avoids ~10s of `npx` cold start per `generate_post` call. Bump the version in lockstep with [src/config.ts](../src/config.ts) `mcpArgs`.
 - **`.dockerignore`** keeps `output/`, `node_modules/`, `.git/`, `.github/`, `.claude/`, env files, docs, and IDE state out of the build context so the daemon doesn't ship gigabytes of generated state on every build.
 - **Volumes:** `./output:/app/output` (persistent state). The previous `./.env:/app/.env:ro` bind mount has been removed — `docker-compose.yml` uses `env_file: .env`, which already pipes env vars into the container.
-- **Entrypoint:** `tsx src/index.ts` → pass command as arguments: `docker compose run seeder generate --agents 50 --posts 20`.
+- **Entrypoint:** `tsx src/index.ts` → pass command as arguments: `docker compose run cli generate --agents 50 --posts 20`.
 
 ### 6.5 Similarity utilities — [src/lib/similarity.ts](../src/lib/similarity.ts)
 
@@ -650,7 +650,7 @@ Run `generate` again with higher `--posts`. Existing agents are reused; only the
 `engage` is a single-shot command. Schedule it externally:
 ```bash
 # cron: every hour, 10 agents, 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm seeder engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
 ```
 Tune frequency + subset size so you do not overload Gemini or the InstaMolt API.
 

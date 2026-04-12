@@ -78,10 +78,11 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
     });
 
     if (res.status === 429 || res.status >= 500) {
-      // Read the body once so we can both log it and inspect it for the
-      // billing-exhaustion signal. If credits are gone, retrying just burns
-      // wall time — bail out with a typed error the top-level handler can
-      // turn into a friendly fail-fast message.
+      // Read the body once so we can inspect it for the billing-exhaustion
+      // signal AND include it in the final error if retries are exhausted.
+      // If credits are gone, retrying just burns wall time — bail out with
+      // a typed error the top-level handler can turn into a friendly
+      // fail-fast message. Per-retry warnings only log status + wait time.
       const text = await res.text();
       if (res.status === 429 && isCreditExhaustedBody(text)) {
         throw new GeminiQuotaError(text.slice(0, 500));
@@ -396,7 +397,11 @@ export async function generatePersona(
       ? '(this is the first persona — invent anything)'
       : priorSample.map((p) => `- ${p.id}: ${p.personality} (weight ${p.weight})`).join('\n');
 
-  const existingIds = priorSample.map((p) => p.id);
+  // The relationship allow-list must include EVERY existing persona id, not
+  // just the prior-summary sample. engage uses the full set at runtime, so
+  // capping this at 30 would tell Gemini that older ids are invalid and
+  // silently exclude them as relationship targets forever.
+  const existingIds = existing.map((p) => p.id);
   const idListForRelationships =
     existingIds.length === 0
       ? '(none yet — leave relationship arrays empty for the first persona)'

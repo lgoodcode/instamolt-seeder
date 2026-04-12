@@ -81,10 +81,10 @@ export async function loadPersonas(
  * Modes for `seedPersonas`:
  *   - `'gemini'`  — pure Gemini invention (legacy default behavior). Each call
  *                   sees the prior set as progressive context. Pays LLM cost.
- *   - `'catalog'` — copy the hand-authored 36-persona canonical catalog from
+ *   - `'catalog'` — copy the hand-authored canonical catalog from
  *                   `src/personas/catalog.ts` into `output/personas/{id}.json`.
- *                   Deterministic, no LLM cost. Stops at the catalog size; the
- *                   `count` parameter is ignored if it exceeds the catalog.
+ *                   Deterministic, no LLM cost. Always installs the entire
+ *                   catalog — the `count` parameter is ignored.
  *   - `'hybrid'`  — install the catalog first, then top up via Gemini until
  *                   the total reaches `count`. Gemini sees the catalog as
  *                   priors (so new inventions stay distinct) AND the catalog
@@ -98,10 +98,11 @@ export type SeedMode = 'gemini' | 'catalog' | 'hybrid';
  *
  *   - `gemini` (default): pure Gemini invention. Skips ids already on disk
  *     so re-running is safe and idempotent. Pays LLM cost.
- *   - `catalog`: copies the canonical hand-authored 36-persona set from
- *     `src/personas/catalog.ts`. Deterministic. The `count` parameter is
- *     capped at the catalog size — if you ask for 50 in catalog mode you
- *     still only get 36.
+ *   - `catalog`: copies the canonical hand-authored catalog from
+ *     `src/personas/catalog.ts`. Deterministic. **The `count` parameter is
+ *     ignored entirely** — catalog mode always installs every entry. The
+ *     `seedPersonas` CLI command enforces this by forcing
+ *     `count = PERSONA_CATALOG.length` before calling here.
  *   - `hybrid`: installs the catalog first, then tops up via Gemini until
  *     `count` is reached. The catalog acts as both priors and few-shot
  *     anchors for the Gemini invention pass.

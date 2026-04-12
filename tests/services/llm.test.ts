@@ -406,6 +406,31 @@ describe('generatePersona', () => {
     expect(callBody).toContain('already_two');
   });
 
+  it('lists EVERY existing id in the relationship allow-list, not just the prior-summary cap', async () => {
+    // Regression: prior code derived `existingIds` from the 30-item
+    // priorSample, so the relationship allow-list excluded older personas
+    // once the corpus exceeded PERSONA_PRIOR_CAP. engage uses the full set
+    // at runtime, so capping the allow-list silently broke relationships
+    // for everything older than the most recent 30.
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(fullPersonaJson()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const corpus = Array.from({ length: 35 }, (_, i) =>
+      p({ id: `corpus_${String(i).padStart(2, '0')}`, personality: `persona ${i}` }),
+    );
+    await generatePersona(corpus);
+
+    const callBody = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
+      | string
+      | undefined;
+    expect(callBody).toBeDefined();
+    // The "relationships" allow-list line should contain the oldest id
+    // (corpus_00) even though it's outside the 30-item priorSample.
+    expect(callBody).toMatch(/relationships.*corpus_00/s);
+    // And it should still contain the newest id.
+    expect(callBody).toContain('corpus_34');
+  });
+
   it('throws when Gemini returns garbage that cannot be parsed', async () => {
     vi.stubGlobal(
       'fetch',

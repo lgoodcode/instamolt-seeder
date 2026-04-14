@@ -1,36 +1,37 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { config } from '@/config';
+import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
 import {
   bakeAgentComments,
-  buildCaptionsPoolFromDisk,
+  bakeAgentReplies,
+  buildCaptionsPoolFromFeedCache,
+  computeSampleCounts,
   pickPeerCaptions,
-  type SampleCaption,
+  pickPostsWithComments,
+  REPLY_COUNT_MIN,
 } from '@/lib/comment-samples';
+import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import type { GeneratedAgent } from '@/types';
+import { loadVoiceProfiles } from '@/voice-profiles/index';
 
 export interface PreviewCommentsOptions {
   /** Limit to one persona by id. */
   persona?: string;
   /** Limit to one agent by name. */
   agent?: string;
-  /** How many sample comments to generate per agent. Default 3. */
-  count?: number;
   /**
-   * Pull captions from the live explore feed instead of from synthetic
-   * on-disk post drafts. Requires at least one registered agent (its
-   * apiKey is passed to `InstaMoltClient` but explore is unauthenticated
-   * — the key is not sent). Honest input distribution but slower and
-   * online-only.
+   * Explicit override for how many comment samples to generate per agent.
+   * When omitted, counts are computed per-agent from persona chattiness +
+   * voice verbosity via `computeSampleCounts`. Operators pass `--count` to
+   * force a uniform count for targeted curation work.
    */
-  fromFeed?: boolean;
+  count?: number;
 }
 
-const DEFAULT_COUNT = 3;
 const MAX_AGENTS_PREVIEWED = 12;
 
 /**
@@ -41,9 +42,9 @@ const MAX_AGENTS_PREVIEWED = 12;
  * Writes nothing to disk. Safe to spam during persona/prompt curation.
  */
 export async function previewComments(options: PreviewCommentsOptions = {}): Promise<void> {
-  const count = options.count ?? DEFAULT_COUNT;
-
   ui.intro('Preview comments');
+
+  const voiceProfiles = loadVoiceProfiles();
 
   // 1. Load personas (do not auto-seed — preview is an iteration tool, not
   //    a setup step; if no personas exist, fail loudly).
@@ -102,21 +103,37 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
     selected = shuffle(selected).slice(0, MAX_AGENTS_PREVIEWED);
   }
 
-  // 4. Build the captions pool.
-  ui.section(
-    options.fromFeed
-      ? 'Captions — pulling from live explore feed'
-      : 'Captions — sampling from on-disk post drafts',
-  );
+  // 4. Build the captions pool from the shared live feed cache. Preview
+  // always targets real platform content — no synthetic fallback. An empty
+  // feed aborts the command with a clear error (same rule as `generate`
+  // and `engage`).
+  ui.section('Captions — pulling from shared feed cache');
 
-  const captionsPool = options.fromFeed
-    ? await buildCaptionsPoolFromFeed(allAgents)
-    : await buildCaptionsPoolFromDisk(allAgents);
+  const registered = allAgents.find((a) => a.apiKey);
+  const client = new InstaMoltClient(registered?.apiKey);
+  let captionsPool: ReturnType<typeof buildCaptionsPoolFromFeedCache>;
+  let feed: Awaited<ReturnType<typeof loadFeedCacheStrict>>;
+  try {
+    feed = await loadFeedCacheStrict(client, { maxAgeMs: FEED_CACHE_MAX_AGE_MS });
+    captionsPool = buildCaptionsPoolFromFeedCache(feed);
+  } catch (err) {
+    if (err instanceof FeedCacheEmptyError) {
+      log('error', `Live feed is empty — ${err.message}`);
+    } else {
+      log('error', `Feed cache load failed: ${err}`);
+    }
+    ui.outro(ui.color.red(`${ui.symbol.err} preview-comments aborted (no live feed)`));
+    return;
+  }
+  const replyEligibleCount = feed.posts.filter(
+    (p) => p.comment_count >= 1 && p.caption && p.caption.trim().length > 0,
+  ).length;
+  const replyPreviewEnabled = replyEligibleCount >= REPLY_COUNT_MIN;
 
   if (captionsPool.length < 2) {
     log(
       'warn',
-      'Captions pool too small (need at least 2). Run `generate` first or pass --from-feed.',
+      `Live feed returned only ${captionsPool.length} usable captions — need at least 2.`,
     );
     ui.outro(ui.color.yellow(`${ui.symbol.warn} preview-comments aborted`));
     return;
@@ -124,8 +141,18 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
 
   log('info', `Captions pool: ${captionsPool.length} captions across ${selected.length} agents`);
 
-  // 5. Generate + print samples per agent.
-  ui.section(`Generating ${count} sample comments per agent`);
+  // 5. Generate + print samples per agent. Counts are per-agent by default
+  // (persona chattiness + voice verbosity); `--count N` forces a uniform
+  // comment count for targeted curation.
+  ui.section(
+    options.count !== undefined
+      ? replyPreviewEnabled
+        ? `Generating ${options.count} comments + per-agent replies (override: --count ${options.count})`
+        : `Generating ${options.count} comments per agent (reply preview disabled — feed has <${REPLY_COUNT_MIN} posts with comments)`
+      : replyPreviewEnabled
+        ? 'Generating per-agent comments + replies (scaled by persona chattiness + voice verbosity)'
+        : `Generating per-agent comments (reply preview disabled — feed has <${REPLY_COUNT_MIN} posts with comments)`,
+  );
 
   for (const agent of selected) {
     const persona = personas.get(agent.personaId);
@@ -133,8 +160,19 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
       log('warn', `Skipping @${agent.agentname} — persona ${agent.personaId} not loaded`);
       continue;
     }
+    const voiceProfile = voiceProfiles.get(agent.voiceProfileId);
+    if (!voiceProfile) {
+      log(
+        'warn',
+        `Skipping @${agent.agentname} — voice profile ${agent.voiceProfileId} not loaded`,
+      );
+      continue;
+    }
 
-    const sources = pickPeerCaptions(captionsPool, agent.agentname, count);
+    const plan = computeSampleCounts(persona, voiceProfile, agent.agentname);
+    const commentCount = options.count ?? plan.comments;
+
+    const sources = pickPeerCaptions(captionsPool, agent.agentname, commentCount);
     if (sources.length === 0) {
       log('warn', `Skipping @${agent.agentname} — no peer captions available`);
       continue;
@@ -144,15 +182,38 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
     sp.start(`@${agent.agentname} (${persona.id}) — generating ${sources.length} comments`);
 
     try {
-      const samples = await bakeAgentComments(persona, agent, sources);
+      const commentSamples = await bakeAgentComments(persona, agent, sources);
+
+      let replySamples: typeof commentSamples = [];
+      if (replyPreviewEnabled && plan.replies > 0) {
+        sp.message(`@${agent.agentname} (${persona.id}) — generating thread-aware replies`);
+        const replyPosts = pickPostsWithComments(feed, plan.replies, agent.agentname);
+        if (replyPosts.length > 0) {
+          const depthTargets = plan.depthTargets.slice(0, replyPosts.length);
+          replySamples = await bakeAgentReplies(
+            persona,
+            agent,
+            client,
+            replyPosts,
+            depthTargets,
+            commentSamples.map((s) => s.text),
+          );
+        }
+      }
+
       sp.stop(`@${agent.agentname} (${persona.id})`);
 
       // Render the bio + each sample inline so the operator can read voice
       // and reply side by side.
       console.log(`  ${ui.color.dim('bio:')} ${ui.color.cyan(agent.bio)}`);
-      for (const s of samples) {
-        const sourceLabel = `${ui.color.dim('on @')}${s.sourceAuthor}${ui.color.dim(':')} ${ui.color.dim(`"${truncate(s.sourceCaption, 80)}"`)}`;
+      for (const s of commentSamples) {
+        const sourceLabel = `${ui.color.dim('[comment] on @')}${s.sourceAuthor}${ui.color.dim(':')} ${ui.color.dim(`"${truncate(s.sourceCaption, 80)}"`)}`;
         console.log(`  ${sourceLabel}`);
+        console.log(`    ${ui.symbol.arrow} ${s.text}`);
+      }
+      for (const s of replySamples) {
+        const parentLabel = `${ui.color.dim(`[reply d${s.parentDepth}] on post by @`)}${s.sourceAuthor}${ui.color.dim(', reply to @')}${s.parentAuthor}${ui.color.dim(':')} ${ui.color.dim(`"${truncate(s.parentText ?? '', 80)}"`)}`;
+        console.log(`  ${parentLabel}`);
         console.log(`    ${ui.symbol.arrow} ${s.text}`);
       }
       console.log('');
@@ -187,34 +248,6 @@ async function loadAllAgents(): Promise<GeneratedAgent[]> {
     }
   } catch {}
   return agents;
-}
-
-/**
- * Pull recent explore-feed captions to use as preview source. Honest input
- * distribution — the captions are real platform content, not synthetic.
- *
- * Uses the first registered agent's apiKey if available, but `getExplore`
- * is unauthenticated so this works even with no registered agents.
- */
-async function buildCaptionsPoolFromFeed(allAgents: GeneratedAgent[]): Promise<SampleCaption[]> {
-  const registered = allAgents.find((a) => a.apiKey);
-  const client = new InstaMoltClient(registered?.apiKey);
-  try {
-    const feed = await client.getExplore(50);
-    const pool: SampleCaption[] = [];
-    for (const post of feed.posts ?? []) {
-      if (post.caption && post.caption.trim().length > 0) {
-        pool.push({
-          author: post.agentname,
-          caption: post.caption,
-        });
-      }
-    }
-    return pool;
-  } catch (err) {
-    log('error', `Failed to pull explore feed: ${err}`);
-    return [];
-  }
 }
 
 function truncate(s: string, n: number): string {

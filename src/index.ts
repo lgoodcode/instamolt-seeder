@@ -1,11 +1,28 @@
 import { engage } from '@/commands/engage';
+import { engageContinuous } from '@/commands/engage-continuous';
 import { generate } from '@/commands/generate';
 import { previewComments } from '@/commands/preview-comments';
 import { publish } from '@/commands/publish';
 import { seedPersonasCommand } from '@/commands/seed-personas';
 import { status } from '@/commands/status';
+import { flushStats } from '@/lib/event-logger';
 import * as ui from '@/lib/ui';
 import { GeminiQuotaError } from '@/services/llm';
+
+// Best-effort flush on termination so `stats.json` isn't up to 49 events
+// stale when the process dies. Commands install their own SIGINT handlers
+// for graceful loop exit — this is the safety net that runs AFTER those.
+// `flushStats()` is a no-op when the logger was never initialized, so it's
+// safe to register unconditionally.
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    try {
+      flushStats();
+    } catch {
+      // Never let a flush failure mask the underlying exit path.
+    }
+  });
+}
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -63,14 +80,86 @@ async function main() {
       const persona = getFlag('persona');
       const agentName = getFlag('agent');
       const count = getFlag('count') ? parseInt(getFlag('count')!, 10) : undefined;
-      const fromFeed = args.includes('--from-feed');
-      await previewComments({ persona, agent: agentName, count, fromFeed });
+      await previewComments({ persona, agent: agentName, count });
+      break;
+    }
+
+    case 'engage-continuous': {
+      const feedPages = getFlag('feed-pages') ? parseInt(getFlag('feed-pages')!, 10) : undefined;
+      const feedLimit = getFlag('feed-limit') ? parseInt(getFlag('feed-limit')!, 10) : undefined;
+      const maxActions = getFlag('max-actions') ? parseInt(getFlag('max-actions')!, 10) : undefined;
+      const dryRun = args.includes('--dry-run');
+      const maxAgents = getFlag('max-agents') ? parseInt(getFlag('max-agents')!, 10) : undefined;
+      const growthRate = getFlag('growth-rate')
+        ? Number.parseFloat(getFlag('growth-rate')!)
+        : undefined;
+      const growthIntervalHours = getFlag('growth-interval')
+        ? Number.parseFloat(getFlag('growth-interval')!)
+        : undefined;
+      const postsPerNewAgent = getFlag('posts-per-new')
+        ? parseInt(getFlag('posts-per-new')!, 10)
+        : undefined;
+      const noGrowth = args.includes('--no-growth');
+      const verbose = args.includes('--verbose');
+      await engageContinuous({
+        feedCachePages: feedPages,
+        feedCacheLimit: feedLimit,
+        maxActions,
+        dryRun,
+        maxAgents,
+        growthRate,
+        growthIntervalHours,
+        postsPerNewAgent,
+        noGrowth,
+        verbose,
+      });
+      break;
+    }
+
+    case 'lint-drafts': {
+      const { lintDrafts } = await import('@/commands/lint-drafts');
+      const captionThreshold = getFlag('caption-threshold')
+        ? Number.parseFloat(getFlag('caption-threshold')!)
+        : undefined;
+      const promptThreshold = getFlag('prompt-threshold')
+        ? Number.parseFloat(getFlag('prompt-threshold')!)
+        : undefined;
+      const crossThreshold = getFlag('cross-threshold')
+        ? Number.parseFloat(getFlag('cross-threshold')!)
+        : undefined;
+      const lintAgent = getFlag('agent');
+      const json = args.includes('--json');
+      await lintDrafts({
+        captionThreshold: captionThreshold ?? 0.6,
+        promptThreshold: promptThreshold ?? 0.5,
+        crossThreshold: crossThreshold ?? 0.5,
+        agent: lintAgent,
+        json,
+      });
+      break;
+    }
+
+    case 'graph-stats': {
+      const { graphStats } = await import('@/commands/graph-stats');
+      await graphStats();
       break;
     }
 
     case 'status':
       await status();
       break;
+
+    case 'reset': {
+      const { reset } = await import('@/commands/reset');
+      const agent = getFlag('agent');
+      const persona = getFlag('persona');
+      const cache = args.includes('--cache');
+      const logs = args.includes('--logs');
+      const all = args.includes('--all');
+      const force = args.includes('--force');
+      await reset({ agent, persona, cache, logs, all, force });
+      break;
+    }
 
     default:
       printHelp();
@@ -92,8 +181,10 @@ ${head('Usage (via Docker):')}
   ${cmd('docker compose run cli generate')} ${flag('--agents 50 --posts 20')}
   ${cmd('docker compose run cli publish')} ${flag('[--agent <name>] [--limit <N>]')}
   ${cmd('docker compose run cli engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
-  ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>] [--from-feed]')}
+  ${cmd('docker compose run cli engage-continuous')} ${flag('[--feed-pages <N>] [--feed-limit <N>] [--max-actions <N>] [--dry-run]')}
+  ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>]')}
   ${cmd('docker compose run cli status')}
+  ${cmd('docker compose run cli reset')} ${flag('[--agent <name> | --persona <id>] [--cache] [--logs] [--all] [--force]')}
 
 ${head('Flags:')}
   ${flag('--loop')}        ${dim('(engage only) Run engage cycles forever, sleeping 5-15 minutes')}
@@ -103,8 +194,6 @@ ${head('Flags:')}
                 ${dim('persona catalog from src/personas/catalog.ts. Deterministic, no LLM cost.')}
   ${flag('--hybrid')}      ${dim('(seed-personas only) Install the catalog AND top up to --count')}
                 ${dim('via Gemini using the catalog as few-shot anchors.')}
-  ${flag('--from-feed')}   ${dim('(preview-comments only) Pull captions from the live explore')}
-                ${dim('feed instead of synthetic on-disk drafts. Online-only.')}
 
 ${head('Workflow:')}
   ${c.cyan('0.')} ${cmd('seed-personas')} ${dim('(auto)  ->  generate generates personas via Gemini if missing')}

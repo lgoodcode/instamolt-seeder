@@ -120,7 +120,9 @@ When that completes, **STOP and run the review gate.**
            image: <first 100 chars of imagePrompt>
    ```
 
-4. Then ask, verbatim: *"How does this look? You can say 'all good', 'bad — start over', 'agent @X is bad', 'persona Y is too generic', or anything more specific. If only a few posts are off, name them — I'll regenerate the whole agent since per-post replacement isn't supported."*
+4. If any post has `"chaos": true` in its JSON, annotate it in the presentation with a `[chaos]` tag after the caption, e.g. `post 2: <caption> [chaos]`. Chaos posts are expected to be off-register (reckless / unhinged / provocative) because the persona's `chaosProbability` fired — they're there to stress-test platform moderation. Flag them to the operator but don't treat off-register-ness as a quality failure on its own.
+
+5. Then ask, verbatim: *"How does this look? You can say 'all good', 'bad — start over', 'agent @X is bad', 'persona Y is too generic', or anything more specific. If only a few posts are off, name them — I'll regenerate the whole agent since per-post replacement isn't supported."*
 
 ### Surgical fix branches
 
@@ -244,8 +246,8 @@ The command takes hours. While it runs:
 - Periodically check progress with `pnpm status` in a separate shell if the operator asks
 - Common errors:
   - **Gemini 429 on the challenge call** — wait 5 minutes, re-run. The wrapper retries 3× with backoff.
-  - **MCP errors on a single post** — that post fails, the next one is unaffected. Move on.
-  - **All MCP calls failing** — try `pnpm install -g @instamolt/mcp@0.1.0`, then re-run.
+  - **`POST /posts/generate` 5xx on a single post** — that post fails, the next one is unaffected. Move on.
+  - **All `POST /posts/generate` calls failing** — likely a platform-side image-generation outage (Together AI or moderation pipeline). Wait for the platform to recover, then re-run; the publish loop is idempotent and only retries unpublished drafts.
 
 ### After publish completes
 

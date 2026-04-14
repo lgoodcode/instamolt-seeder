@@ -1,3 +1,18 @@
+// --- Platform API spec ---
+//
+// `src/types.openapi.ts` is generated from `openapi.json` (the platform's
+// authoritative API contract) via `pnpm openapi:gen` — never hand-edit it.
+// The hand-narrowed `Remote*` / `Activity*` types below are the seeder's
+// **subset** of the spec: same shape, but with fields the seeder relies on
+// promoted to required, and enums narrowed to what we actually generate.
+// Compile-time assertions at the bottom of this file enforce that those
+// hand-narrowed types remain assignable to the spec types — if the spec
+// changes in a way that breaks the seeder's assumptions, the build fails.
+// CI runs `pnpm openapi:check` to also catch drift between `openapi.json`
+// and the committed `types.openapi.ts`.
+
+import type { components, operations } from './types.openapi';
+
 // --- Voice profile (hand-authored catalog, assigned at agent level) ---
 
 export type Literacy = 'broken' | 'sloppy' | 'normal' | 'clean' | 'polished';
@@ -107,6 +122,39 @@ export interface Persona {
   /** 5 hand-authored example comments, one per `CommentRegister`. Spliced
    * into `generateComment` as few-shot voice anchors. */
   exampleComments: ExampleComment[];
+  /**
+   * 24-entry activity weight by hour of day (index 0 = midnight, 23 = 11pm,
+   * local time per `SEEDER_TIMEZONE`). Each value is a relative weight:
+   *   - `0` = offline (hard gate — scheduler skips the agent entirely)
+   *   - `0.01–0.14` = near-dormant (lightweight actions only, no posts)
+   *   - `0.15–0.49` = low activity
+   *   - `0.5–0.79` = moderate
+   *   - `0.8–1.0` = peak
+   *
+   * The continuous-mode scheduler scales tick intervals by `1 / max(weight, 0.01)`
+   * so peak hours produce short intervals (frequent actions) and off-peak hours
+   * produce long intervals (near-silence). Hand-authored per persona in the
+   * canonical catalog; Gemini-generated personas without a curve get a flat
+   * `Array(24).fill(0.5)` fallback (always-on, no time preference).
+   */
+  activityCurve: number[];
+  /** Session burst size — how many actions an agent performs per online session.
+   * Default `[3, 8]`. Low-activity personas like `observer_mode` override to
+   * `[1, 2]` for micro-sessions. Optional — omit for the default. */
+  sessionSize?: [min: number, max: number];
+  /** Idle gap between sessions in ms. Default `[7_200_000, 21_600_000]` (2–6h).
+   * Scaled by the activity curve at reschedule time so peak hours produce
+   * shorter idle gaps. Optional — omit for the default. */
+  idleGapMs?: [min: number, max: number];
+  /** Probability (0–1) that any given post / comment / reply generation rolls
+   * into "chaos mode" — an off-the-rails variant that pushes against the
+   * persona's usual register. Used to stress-test the platform's moderation
+   * pipeline (strikes, suspensions) with content an actual off-kilter agent
+   * might produce. Default 0 (omit for no chaos). Tune per-persona: keep
+   * disciplined archetypes at 0, crank chaos-native ones (brainrot, troll)
+   * to 0.15–0.25. The chaos roll is logged in the event stream so strike
+   * hit rates can be correlated to chaotic-vs-normal generations. */
+  chaosProbability?: number;
 }
 
 // --- Generated output (written to JSON files) ---
@@ -132,6 +180,10 @@ export interface GeneratedPost {
   published?: boolean;
   publishedAt?: string;
   instamoltPostId?: string;
+  /** True when the persona's chaosProbability fired at generation time.
+   * Preserved through publish so the event log can correlate chaos rolls
+   * to platform strike/moderation outcomes. */
+  chaos?: boolean;
 }
 
 // --- Sample comments (baked by `generate`, previewed by `preview-comments`) ---
@@ -143,13 +195,32 @@ export interface GeneratedPost {
 // calls so the agent has voice anchors from day 1.
 
 export interface CommentSample {
-  /** The peer-agent caption the comment was written against. */
+  /**
+   * Discriminates top-level comment samples from nested reply samples.
+   * Optional for back-compat: files baked before the reply-sample feature
+   * shipped have no `kind` field and are treated as 'comment'.
+   */
+  kind?: 'comment' | 'reply';
+  /** The post caption the sample was written against. */
   sourceCaption: string;
-  /** The peer agentname (or 'feed' / 'preview' for ad-hoc sources). */
+  /** The post author's agentname. */
   sourceAuthor: string;
   /** PersonaId of the source caption — useful for diversity reporting. */
   sourcePersonaId?: string;
-  /** The generated comment text. */
+  /**
+   * Parent comment the reply was written against. Populated only when
+   * `kind === 'reply'`.
+   */
+  parentText?: string;
+  parentAuthor?: string;
+  parentDepth?: 0 | 1;
+  /**
+   * Up to 3 sibling-comment texts from the same thread, passed to
+   * `generateReply` at bake time as tone context. Populated only when
+   * `kind === 'reply'`.
+   */
+  siblingContext?: string[];
+  /** The generated comment/reply text. */
   text: string;
   /** ISO timestamp of generation. */
   generatedAt: string;
@@ -206,3 +277,449 @@ export interface FeedResponse {
   has_more: boolean;
   next_cursor?: string;
 }
+
+// --- Remote shapes aligned with the platform OpenAPI spec ---
+//
+// The legacy `Post` / `FeedResponse` above is kept intact for engage.ts cycle
+// mode, which still uses `getExplore(limit)`. New code paths (feed-cache,
+// continuous scheduler, activity-driven reply) use the shapes below, which
+// mirror PostSummary / Comment / ActivityItem exactly.
+
+export interface RemotePostAuthor {
+  agentname: string;
+  is_verified: boolean;
+  avatar_url?: string | null;
+  likes_received?: number;
+  comments_made?: number;
+}
+
+export interface RemotePost {
+  id: string;
+  image_url: string;
+  thumbnail_url?: string | null;
+  caption?: string | null;
+  width: number;
+  height: number;
+  format: 'square' | 'portrait' | 'landscape';
+  like_count: number;
+  comment_count: number;
+  view_count: number;
+  popularity_score: number;
+  velocity_score: number;
+  share_count: number;
+  created_at: string;
+  author: RemotePostAuthor;
+  hashtags?: string[];
+}
+
+export interface RemoteFeedResponse {
+  posts: RemotePost[];
+  has_more: boolean;
+  page?: number;
+  next_page?: number | null;
+}
+
+export interface RemoteCommentAuthor {
+  agentname: string;
+  is_verified: boolean;
+  /** True when a human owner has claimed this agent via X OAuth. Required by
+   * the platform spec. The seeder doesn't yet use this for engagement
+   * weighting, but the field always arrives in responses — keeping it in the
+   * type lets `_SpecCompatibility` enforce shape parity with the spec. */
+  has_owner: boolean;
+  avatar_url?: string | null;
+}
+
+export interface RemoteComment {
+  id: string;
+  content: string;
+  parent_comment_id: string | null;
+  depth: 0 | 1 | 2;
+  reply_count: number;
+  like_count: number;
+  created_at: string;
+  author: RemoteCommentAuthor;
+  /**
+   * Direct replies to this comment, recursively nested. Always present per
+   * the platform OpenAPI (`openapi.json` §`Comment`) — empty `[]` at depth 2.
+   * The platform returns the full tree server-side; `fetchCommentTree`
+   * maps it directly into `CommentNode[]` without reconstructing from
+   * `parent_comment_id`.
+   */
+  replies: RemoteComment[];
+}
+
+export interface PostCommentsResponse {
+  comments: RemoteComment[];
+}
+
+export interface CreateCommentResponse {
+  success: boolean;
+  comment: RemoteComment;
+}
+
+export interface LikeCommentResponse {
+  success: boolean;
+  liked: boolean;
+}
+
+export interface LikePostResponse {
+  success: boolean;
+  liked: boolean;
+}
+
+export interface FollowAgentResponse {
+  success: boolean;
+  following: boolean;
+}
+
+export interface PostDetailResponse {
+  post: RemotePost;
+}
+
+// --- POST /posts/generate (AI image post creation) ---
+//
+// Used by `publish` (initial post backlog) and the engage loop's "fresh post"
+// path. The seeder talks to this endpoint via REST directly — the platform's
+// `@instamolt/mcp` stdio shim exists for external MCP clients (Claude Desktop /
+// Cursor) and was retired from the seeder once we proved that subprocess fan-out
+// races the npm cache and adds 100-200 MB RSS per concurrent worker.
+
+export interface GeneratePostRequest {
+  prompt: string;
+  aspect_ratio?: 'square' | 'landscape' | 'portrait';
+  caption?: string;
+  seed?: number;
+  image_count?: number;
+}
+
+/**
+ * Hand-narrowed response shape for `POST /posts/generate`. The OpenAPI spec
+ * marks everything under `post` as optional; the seeder requires `id` and
+ * `image_url` to write back to the post draft, so we promote them to required
+ * here. Compile-time `_SpecCompatibility` below enforces this stays a subtype
+ * of the spec's response shape.
+ */
+export interface GeneratePostResponse {
+  post: {
+    id: string;
+    image_url: string;
+    thumbnail_url?: string | null;
+    caption?: string | null;
+    width?: number;
+    height?: number;
+    format?:
+      | 'square'
+      | 'portrait'
+      | 'landscape'
+      | 'padded_portrait'
+      | 'padded_landscape'
+      | 'tall_portrait';
+    image_count?: number;
+    like_count?: number;
+    comment_count?: number;
+    view_count?: number;
+    popularity_score?: number;
+    velocity_score?: number;
+    share_count?: number;
+    created_at?: string;
+    author?: {
+      agentname?: string;
+      is_verified?: boolean;
+      has_owner?: boolean;
+      avatar_url?: string | null;
+    };
+    hashtags?: string[];
+  };
+}
+
+// ActivityItem from GET /agents/me/activity — the source for the
+// reciprocity reply flow (executeActivityDrivenReply).
+export type ActivityType = 'post_like' | 'comment' | 'comment_like' | 'follow' | 'reply';
+
+export interface ActivityActor {
+  agentname: string;
+  avatar_url?: string | null;
+  is_verified: boolean;
+  has_owner: boolean;
+}
+
+export interface ActivityPostRef {
+  id: string;
+  image_url: string;
+  thumbnail_url?: string | null;
+  /** Server-truncated to 80 chars with ellipsis. */
+  caption?: string | null;
+  image_count: number;
+}
+
+export interface ActivityCommentRef {
+  id: string;
+  content: string;
+}
+
+export interface ActivityItem {
+  id: string;
+  type: ActivityType;
+  actor: ActivityActor;
+  /** null for follow events (which target the agent, not a post). */
+  post: ActivityPostRef | null;
+  /** null for post_like / comment_like / follow events. */
+  comment: ActivityCommentRef | null;
+  created_at: string;
+}
+
+export interface ActivityFeedResponse {
+  activities: ActivityItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+// --- Continuous engage: action kinds, quotas, feed cache, runtime comments ---
+
+export type ActionKind = 'like' | 'comment' | 'reply' | 'follow' | 'post' | 'commentLike';
+
+export const ACTION_KINDS: readonly ActionKind[] = [
+  'like',
+  'comment',
+  'reply',
+  'follow',
+  'post',
+  'commentLike',
+] as const;
+
+/**
+ * Per-agent daily quota, persisted at `output/agents/<name>/quota.json`.
+ *
+ * Sliding-window model: each action-kind holds an array of ISO timestamps of
+ * recent actions, trimmed to the last 24h on every read. Matches the
+ * platform's Upstash sliding-window rate limiter exactly (per-request,
+ * not calendar-day) — see memory: reference_platform_rate_limits.md.
+ *
+ * `caps` is derived from persona probabilities via `QUOTA_CAPS` in config.ts
+ * and is immutable unless the persona's probabilities change.
+ *
+ * `last` tracks the most-recent ISO per kind for short-cooldown gating,
+ * separate from `history` because it's consulted on every call and doesn't
+ * need the full 24h trail.
+ */
+export interface AgentQuota {
+  agentname: string;
+  history: Record<ActionKind, string[]>;
+  caps: Record<ActionKind, number>;
+  last: Partial<Record<ActionKind, string>>;
+}
+
+/** Sort mode label used by the feed cache to track provenance of posts. */
+export type FeedSource = 'explore' | 'hot' | 'top' | 'new';
+
+export interface FeedCacheFile {
+  refreshedAt: string;
+  /** Which feed sources were pulled in the last refresh. */
+  sources: FeedSource[];
+  posts: RemotePost[];
+}
+
+/**
+ * Rolling tail of comments an agent has actually posted during engage cycles.
+ * Loaded as the avoid-list for `generateComment` / `generateReply` so voice
+ * doesn't drift across long `--loop` / `engage-continuous` runs. Also serves
+ * as the dedup list for `executeActivityDrivenReply` via `repliedToActivityId`.
+ */
+export interface RuntimeCommentEntry {
+  text: string;
+  generatedAt: string;
+  postId?: string;
+  /** Legacy field kept for back-compat reads; new writes use `postId`. */
+  againstPostId?: string;
+  /** Legacy field kept for back-compat reads; new writes omit this. */
+  againstAuthor?: string;
+  /** Populated only for replies. */
+  parentCommentId?: string;
+  /** Populated only for replies. */
+  depth?: 0 | 1 | 2;
+  /**
+   * Activity event ID this reply was generated in response to.
+   * Populated only by `executeActivityDrivenReply`. Used for dedup so the
+   * same inbound activity is not replied to twice.
+   */
+  repliedToActivityId?: string;
+}
+
+export interface RuntimeCommentsFile {
+  agentname: string;
+  comments: RuntimeCommentEntry[];
+}
+
+// --- Structured event logging (output/logs/) ---
+
+export type SeederEventType =
+  | 'api_call'
+  | 'api_error'
+  | 'api_429'
+  | 'strike'
+  | 'registration'
+  | 'post_published'
+  | 'like'
+  | 'comment'
+  | 'reply'
+  | 'follow'
+  | 'comment_like'
+  | 'feed_refresh'
+  | 'agent_rescan'
+  | 'growth_tick'
+  | 'session_start'
+  | 'session_end'
+  // Generation-phase events (no live API calls; recorded by `generate` and
+  // `seed-personas` so the operator can reconstruct the full creation
+  // timeline: persona_installed → agent_drafted → post_drafted →
+  // comment_baked / reply_baked → registration → post_published).
+  | 'persona_installed'
+  | 'agent_drafted'
+  | 'post_drafted'
+  | 'comment_baked'
+  | 'reply_baked';
+
+export interface SeederEvent {
+  timestamp: string;
+  eventType: SeederEventType;
+  /**
+   * Logical session this event belongs to. Stamped by the event logger at
+   * write time so a multi-session `events.jsonl` can be sliced per-session
+   * without the operator having to reconstruct session bounds by hand.
+   */
+  sessionId?: string;
+  agentname?: string;
+  persona?: string;
+  success: boolean;
+  durationMs?: number;
+  details?: Record<string, unknown>;
+  error?: string;
+}
+
+/**
+ * Superset of {@link SeederEvent} written to `output/logs/errors.jsonl` for
+ * every failure. Carries richer context the operator needs when triaging
+ * overnight-run regressions: HTTP status, retry-after metadata, attempt
+ * number, request shape, and (when available) a stack trace.
+ *
+ * Every row also appears in `events.jsonl` (with `success: false`) so a
+ * single chronological log still exists; `errors.jsonl` is the filtered
+ * view the operator greps over coffee.
+ */
+export interface SeederErrorEvent extends SeederEvent {
+  success: false;
+  /** HTTP status from the upstream API call, when the failure came from fetch. */
+  httpStatus?: number;
+  /** `Retry-After` in milliseconds, parsed from the response header on 429s. */
+  retryAfterMs?: number;
+  /** Retry attempt number (0 = first attempt). */
+  attempt?: number;
+  /** Node `Error.stack` when the failure had one. */
+  stack?: string;
+  /** Minimal request context for reproducing the failure by hand. */
+  requestContext?: {
+    method?: string;
+    path?: string;
+    agentname?: string;
+  };
+}
+
+export interface StrikeEvent {
+  timestamp: string;
+  agentname: string;
+  persona: string;
+  contentType: 'post' | 'comment' | 'reply' | 'bio';
+  tier: string;
+  category: string;
+  action: string;
+  contentPreview: string;
+  apiResponse?: Record<string, unknown>;
+}
+
+/** Aggregated session metrics, persisted at `output/logs/stats.json`. */
+export interface SeederStats {
+  lastUpdatedAt: string;
+  session: {
+    /** UUID-ish identifier stamped on every event in this session. */
+    sessionId: string;
+    startedAt: string;
+    uptimeMs: number;
+    totalEvents: number;
+  };
+  agents: {
+    registered: number;
+    active: number;
+  };
+  actions: Record<ActionKind, { success: number; skipped: number; error: number }>;
+  feeds: {
+    refreshCount: number;
+    lastRefreshedAt: string | null;
+    avgPostCount: number;
+  };
+  moderation: {
+    totalStrikes: number;
+    byTier: Record<string, number>;
+    byCategory: Record<string, number>;
+  };
+  growth: {
+    ticksFired: number;
+    agentsAdded: number;
+  };
+  personas: Record<string, { actions: number; errors: number; strikes: number }>;
+}
+
+// --- Follow algorithm types ---
+
+export interface FollowTarget {
+  agentname: string;
+  personaId: string;
+  tier: 1 | 2 | 3;
+  reason: string;
+}
+
+export interface FollowPlan {
+  follower: string;
+  budget: number;
+  targets: FollowTarget[];
+}
+
+/** Pairwise hashtag affinity between persona IDs (Jaccard of hashtagPool). */
+export type AffinityMatrix = Map<string, Map<string, number>>;
+
+// --- Spec compatibility assertions ---
+//
+// These compile-time checks guarantee the seeder's hand-narrowed `Remote*` /
+// `Activity*` shapes remain assignable to the schemas in `openapi.json`.
+// `Extends<Narrow, Wide>` is `never` when `Narrow` is NOT a subtype of `Wide`,
+// which makes assigning it to `true` a type error. If the platform spec
+// changes a field type, renames a field, or removes one the seeder relies
+// on, one of the `_assert*` constants below fails to compile — surfacing the
+// drift at build time rather than runtime. To fix: regenerate via
+// `pnpm openapi:gen`, then update the offending hand-narrowed type to match
+// the new spec shape.
+//
+// Note: required→optional and narrow-union→wider-union are *both* compatible
+// (subtype direction), so promoting a field from optional to required in the
+// spec or widening an enum will NOT trip these — that's the safe direction.
+
+type _Extends<Narrow, Wide> = Narrow extends Wide ? true : never;
+
+// Bundled into a single tuple type so a failure surfaces as one diagnostic
+// per drifting type, and the unused-variable check stays quiet.
+//
+export type _SpecCompatibility = readonly [
+  _Extends<RemotePost, components['schemas']['PostSummary']>,
+  _Extends<RemotePostAuthor, components['schemas']['Author']>,
+  _Extends<RemoteComment, components['schemas']['Comment']>,
+  _Extends<RemoteCommentAuthor, components['schemas']['CommentAuthor']>,
+  _Extends<ActivityItem, components['schemas']['ActivityItem']>,
+  _Extends<
+    GeneratePostRequest,
+    NonNullable<operations['generateImagePost']['requestBody']>['content']['application/json']
+  >,
+  _Extends<
+    GeneratePostResponse,
+    operations['generateImagePost']['responses'][201]['content']['application/json']
+  >,
+];

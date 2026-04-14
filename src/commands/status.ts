@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import Table from 'cli-table3';
 import { config } from '@/config';
 import * as ui from '@/lib/ui';
-import type { AgentCommentsFile, AgentsIndex, GeneratedPost } from '@/types';
+import type { AgentCommentsFile, AgentsIndex, GeneratedPost, SeederStats } from '@/types';
 
 export async function status(): Promise<void> {
   let index: AgentsIndex;
@@ -123,6 +123,51 @@ export async function status(): Promise<void> {
         `  ${pid.padEnd(22)} ${agents.length} agents (${reg} registered, ${cmts} comment samples)  ${agents.map((a) => a.agentname).join(', ')}`,
       );
     }
+  }
+
+  // --- Last session metrics (if available) ---
+  try {
+    const statsRaw = await readFile(join(config.logsDir, 'stats.json'), 'utf-8');
+    const stats: SeederStats = JSON.parse(statsRaw);
+
+    ui.section('Last session metrics');
+
+    const uptimeMin = Math.round(stats.session.uptimeMs / 60_000);
+    const uptimeStr =
+      uptimeMin >= 60 ? `${Math.floor(uptimeMin / 60)}h ${uptimeMin % 60}m` : `${uptimeMin}m`;
+
+    // Action summary
+    const actionParts: Array<{ label: string; value: number; tone?: 'ok' | 'err' | 'info' }> = [];
+    for (const [kind, counts] of Object.entries(stats.actions)) {
+      if (counts.success > 0 || counts.error > 0) {
+        actionParts.push({ label: kind, value: counts.success, tone: 'ok' });
+        if (counts.error > 0)
+          actionParts.push({ label: `${kind} err`, value: counts.error, tone: 'err' });
+      }
+    }
+
+    ui.note(
+      `Session: ${uptimeStr} uptime, ${stats.session.totalEvents} events`,
+      actionParts.length > 0 ? ui.summaryLine(actionParts) : 'No actions recorded',
+    );
+
+    // Moderation summary (if any strikes)
+    if (stats.moderation.totalStrikes > 0) {
+      const categories = Object.entries(stats.moderation.byCategory)
+        .map(([cat, count]) => `${cat}: ${count}`)
+        .join(', ');
+      ui.note(ui.color.yellow(`${stats.moderation.totalStrikes} moderation strikes`), categories);
+    }
+
+    // Growth summary (if any ticks fired)
+    if (stats.growth.ticksFired > 0) {
+      ui.note(
+        'Growth',
+        `${stats.growth.ticksFired} tick(s) fired, ${stats.growth.agentsAdded} agents added`,
+      );
+    }
+  } catch {
+    // No stats file — skip silently
   }
 
   ui.outro(ui.color.green(`${ui.symbol.ok} status done`));

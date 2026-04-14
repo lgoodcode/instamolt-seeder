@@ -48,14 +48,37 @@ export function section(title: string): void {
   clack.log.step(pc.bold(pc.cyan(title)));
 }
 
-/** Boxed multi-line note (used for end-of-command summaries). */
+/**
+ * Title + multi-line body, rendered into the running clack outline.
+ *
+ * Replaces clack's `note()` boxed layout because the box's right border
+ * relies on padding every body row to the longest stripped width — once
+ * any row contained nested ANSI (e.g. summaryLine wrapped in dim) the
+ * resulting line landed just past common terminal widths and the right
+ * `│` got orphaned onto the next physical line. This format emits the
+ * gutter on every line but never tries to pad to a fixed width, so it
+ * cannot wrap visually no matter how many ANSI escapes are nested.
+ */
 export function note(title: string, body: string): void {
-  clack.note(body, title);
+  const heading = pc.bold(title);
+  const text = body ? `${heading}\n${body}` : heading;
+  clack.log.message(text, { symbol: pc.green('\u25C6') });
 }
 
 /** Spinner passthrough. clack handles TTY detection internally. */
 export function spinner(): ReturnType<typeof clack.spinner> {
   return clack.spinner();
+}
+
+/**
+ * Yes/no prompt. Under non-TTY, returns the `defaultValue` without prompting
+ * so unattended runs (CI, piped stdin) don't hang.
+ */
+export async function confirm(message: string, defaultValue = false): Promise<boolean> {
+  if (!isInteractive()) return defaultValue;
+  const result = await clack.confirm({ message, initialValue: defaultValue });
+  if (clack.isCancel(result)) return false;
+  return result === true;
 }
 
 export interface Progress {

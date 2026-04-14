@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Persona } from '@/types';
+import type { FeedCacheFile, Persona, RemotePost } from '@/types';
 
 // ---------------- fs mock ----------------
 
@@ -46,30 +46,29 @@ const personaMocks = vi.hoisted(() => ({
 
 vi.mock('@/personas/index', () => personaMocks);
 
-// ---------------- instamolt-api mock ----------------
+// ---------------- feed-cache mock ----------------
 
-const apiMocks = vi.hoisted(() => ({
-  getExplore:
-    vi.fn<
-      () => Promise<{
-        posts: Array<{
-          id: string;
-          agentname: string;
-          caption?: string;
-          likes_count: number;
-          comments_count: number;
-          created_at: string;
-        }>;
-        has_more: boolean;
-      }>
-    >(),
+const feedCacheMocks = vi.hoisted(() => ({
+  loadFeedCacheStrict: vi.fn<() => Promise<FeedCacheFile>>(),
 }));
 
+vi.mock('@/lib/feed-cache', async () => {
+  // Preserve the real FeedCacheEmptyError class so `instanceof` checks in
+  // preview-comments.ts resolve correctly against the same error constructor.
+  const actual = await vi.importActual<typeof import('@/lib/feed-cache')>('@/lib/feed-cache');
+  return {
+    ...actual,
+    loadFeedCacheStrict: feedCacheMocks.loadFeedCacheStrict,
+  };
+});
+
+// ---------------- instamolt-api mock ----------------
+// preview-comments instantiates InstaMoltClient to pass into loadFeedCacheStrict.
+// The actual client is never used because the cache mock short-circuits the call.
+
 vi.mock('@/services/instamolt-api', () => ({
-  InstaMoltClient: vi.fn().mockImplementation(function () {
-    return {
-      getExplore: apiMocks.getExplore,
-    };
+  InstaMoltClient: vi.fn().mockImplementation(function MockClient() {
+    return {};
   }),
 }));
 
@@ -99,7 +98,31 @@ vi.mock('@/lib/ui', () => ({
   symbol: { ok: '✓', err: '✗', warn: '!', info: 'i', arrow: '→' },
 }));
 
+// ---------------- voice-profiles mock ----------------
+// Returns a Map containing one entry under `normie_cam` so the bake phase's
+// `voiceProfiles.get(agent.voiceProfileId)` lookup resolves for fixtures
+// that pin agents to that profile id.
+const hoistedVoice = vi.hoisted(() => ({
+  dummy: {
+    id: 'normie_cam',
+    literacy: 'normal',
+    verbosity: 'one_sentence',
+    capitalization: 'proper',
+    punctuation: 'proper',
+    typoFrequency: 'none',
+    register: 'casual normal',
+    lexicon: ['wow'],
+    examples: ['Wow.'],
+    prevalenceWeight: 4,
+  },
+}));
+
+vi.mock('@/voice-profiles/index', () => ({
+  loadVoiceProfiles: vi.fn(() => new Map([[hoistedVoice.dummy.id, hoistedVoice.dummy]])),
+}));
+
 import { previewComments } from '@/commands/preview-comments';
+import { FeedCacheEmptyError } from '@/lib/feed-cache';
 
 function makePersona(id: string): Persona {
   return {
@@ -121,26 +144,48 @@ function makePersona(id: string): Persona {
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
 function primeAgent(name: string, personaId: string): void {
   fsState.files.set(
     join('./output/agents', name, 'agent.json'),
-    JSON.stringify({ agentname: name, personaId, bio: `${name} bio` }),
+    JSON.stringify({
+      agentname: name,
+      personaId,
+      voiceProfileId: 'normie_cam',
+      bio: `${name} bio`,
+    }),
   );
 }
 
-function primePost(author: string, postId: string, caption: string): void {
-  fsState.files.set(
-    join('./output/agents', author, `${postId}.json`),
-    JSON.stringify({
-      id: postId,
-      imagePrompt: '',
-      caption,
-      aspectRatio: 'square',
-    }),
-  );
+function makeRemotePost(id: string, agentname: string, caption: string | null): RemotePost {
+  return {
+    id,
+    image_url: 'http://x/y.jpg',
+    thumbnail_url: null,
+    caption,
+    width: 1080,
+    height: 1080,
+    format: 'square',
+    like_count: 0,
+    comment_count: 0,
+    view_count: 0,
+    popularity_score: 0,
+    velocity_score: 0,
+    share_count: 0,
+    created_at: '2026-04-13T00:00:00.000Z',
+    author: { agentname, is_verified: false },
+  };
+}
+
+function makeFeedCache(posts: RemotePost[]): FeedCacheFile {
+  return {
+    refreshedAt: '2026-04-13T00:00:00.000Z',
+    sources: ['explore'],
+    posts,
+  };
 }
 
 describe('preview-comments', () => {
@@ -151,9 +196,16 @@ describe('preview-comments', () => {
     fsState.dirEntries.clear();
     llmMocks.generateComment.mockReset();
     personaMocks.loadPersonas.mockReset();
-    apiMocks.getExplore.mockReset();
+    feedCacheMocks.loadFeedCacheStrict.mockReset();
 
     llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+    // Default: a healthy live feed with two captions from unrelated peers.
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      makeFeedCache([
+        makeRemotePost('p1', 'feedpeer1', 'live feed caption one'),
+        makeRemotePost('p2', 'feedpeer2', 'live feed caption two'),
+      ]),
+    );
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
@@ -169,18 +221,16 @@ describe('preview-comments', () => {
   it('aborts cleanly when no personas are loaded', async () => {
     personaMocks.loadPersonas.mockRejectedValue(new Error('no personas on disk'));
     await previewComments();
-    // Should never have called generateComment.
     expect(llmMocks.generateComment).not.toHaveBeenCalled();
   });
 
   it('aborts cleanly when there are no agents on disk', async () => {
     personaMocks.loadPersonas.mockResolvedValue(new Map([['cozy', makePersona('cozy')]]));
-    // No agents.json and no agent dirs.
     await previewComments();
     expect(llmMocks.generateComment).not.toHaveBeenCalled();
   });
 
-  it('generates N sample comments per agent from synthetic on-disk captions', async () => {
+  it('generates N sample comments per agent from the live feed cache', async () => {
     personaMocks.loadPersonas.mockResolvedValue(
       new Map([
         ['cozy', makePersona('cozy')],
@@ -188,41 +238,37 @@ describe('preview-comments', () => {
       ]),
     );
 
-    // Two agents, each with one post (caption pool = 2).
     primeAgent('alpha', 'cozy');
     primeAgent('beta', 'chaotic');
-    primePost('alpha', 'post-001', 'a quiet observation');
-    primePost('beta', 'post-001', 'a chaotic outburst');
-
     fsState.files.set(
       './output/agents.json',
       JSON.stringify({
         generatedAt: '',
         totalAgents: 2,
-        totalPosts: 2,
+        totalPosts: 0,
         agents: [
-          { agentname: 'alpha', personaId: 'cozy', bio: 'alpha bio' },
-          { agentname: 'beta', personaId: 'chaotic', bio: 'beta bio' },
+          { agentname: 'alpha', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+          {
+            agentname: 'beta',
+            personaId: 'chaotic',
+            voiceProfileId: 'normie_cam',
+            bio: 'beta bio',
+          },
         ],
       }),
     );
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['agent.json', 'post-001.json']);
-    fsState.dirEntries.set(join('./output/agents', 'beta'), ['agent.json', 'post-001.json']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['agent.json']);
+    fsState.dirEntries.set(join('./output/agents', 'beta'), ['agent.json']);
 
     await previewComments({ count: 1 });
 
-    // generateComment should have been called once per agent (count=1), each
-    // against the other agent's caption.
+    expect(feedCacheMocks.loadFeedCacheStrict).toHaveBeenCalledTimes(1);
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(2);
 
-    const allArgs = llmMocks.generateComment.mock.calls as unknown[][];
-    const authors = allArgs.map((c) => c[3]);
-    // Alpha's source should be beta, beta's source should be alpha — neither
-    // should ever comment on its own post.
-    expect(authors).toContain('alpha');
-    expect(authors).toContain('beta');
+    // All source authors should be live-feed peers, never a seeder agent.
+    const sources = (llmMocks.generateComment.mock.calls as unknown[][]).map((c) => c[3]);
+    expect(sources.every((s) => s === 'feedpeer1' || s === 'feedpeer2')).toBe(true);
 
-    // Rendered output should include the sample comment text.
     const out = getLogOutput();
     expect(out).toContain('a sharp little reply');
   });
@@ -236,26 +282,28 @@ describe('preview-comments', () => {
     );
     primeAgent('alpha', 'cozy');
     primeAgent('beta', 'chaotic');
-    primePost('alpha', 'post-001', 'a quiet observation');
-    primePost('beta', 'post-001', 'a chaotic outburst');
     fsState.files.set(
       './output/agents.json',
       JSON.stringify({
         generatedAt: '',
         totalAgents: 2,
-        totalPosts: 2,
+        totalPosts: 0,
         agents: [
-          { agentname: 'alpha', personaId: 'cozy', bio: 'alpha bio' },
-          { agentname: 'beta', personaId: 'chaotic', bio: 'beta bio' },
+          { agentname: 'alpha', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+          {
+            agentname: 'beta',
+            personaId: 'chaotic',
+            voiceProfileId: 'normie_cam',
+            bio: 'beta bio',
+          },
         ],
       }),
     );
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['post-001.json']);
-    fsState.dirEntries.set(join('./output/agents', 'beta'), ['post-001.json']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
+    fsState.dirEntries.set(join('./output/agents', 'beta'), []);
 
     await previewComments({ agent: 'alpha', count: 1 });
 
-    // Only alpha should have been previewed.
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(1);
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
     expect((callArgs[1] as { agentname: string }).agentname).toBe('alpha');
@@ -271,29 +319,30 @@ describe('preview-comments', () => {
     primeAgent('alpha', 'cozy');
     primeAgent('beta', 'chaotic');
     primeAgent('gamma', 'cozy');
-    primePost('alpha', 'post-001', 'a quiet observation');
-    primePost('beta', 'post-001', 'a chaotic outburst');
-    primePost('gamma', 'post-001', 'a gentle murmur');
     fsState.files.set(
       './output/agents.json',
       JSON.stringify({
         generatedAt: '',
         totalAgents: 3,
-        totalPosts: 3,
+        totalPosts: 0,
         agents: [
-          { agentname: 'alpha', personaId: 'cozy', bio: 'alpha bio' },
-          { agentname: 'beta', personaId: 'chaotic', bio: 'beta bio' },
-          { agentname: 'gamma', personaId: 'cozy', bio: 'gamma bio' },
+          { agentname: 'alpha', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+          {
+            agentname: 'beta',
+            personaId: 'chaotic',
+            voiceProfileId: 'normie_cam',
+            bio: 'beta bio',
+          },
+          { agentname: 'gamma', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'gamma bio' },
         ],
       }),
     );
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['post-001.json']);
-    fsState.dirEntries.set(join('./output/agents', 'beta'), ['post-001.json']);
-    fsState.dirEntries.set(join('./output/agents', 'gamma'), ['post-001.json']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
+    fsState.dirEntries.set(join('./output/agents', 'beta'), []);
+    fsState.dirEntries.set(join('./output/agents', 'gamma'), []);
 
     await previewComments({ persona: 'cozy', count: 1 });
 
-    // Only cozy agents (alpha, gamma) should have been previewed.
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(2);
     const names = (llmMocks.generateComment.mock.calls as unknown[][]).map(
       (c) => (c[1] as { agentname: string }).agentname,
@@ -303,73 +352,53 @@ describe('preview-comments', () => {
     expect(names).not.toContain('beta');
   });
 
-  it('--from-feed uses live explore captions instead of on-disk drafts', async () => {
+  it('aborts cleanly when the live feed is empty', async () => {
     personaMocks.loadPersonas.mockResolvedValue(new Map([['cozy', makePersona('cozy')]]));
     primeAgent('alpha', 'cozy');
-    // Deliberately no on-disk posts — if --from-feed worked we still get a pool.
     fsState.files.set(
       './output/agents.json',
       JSON.stringify({
         generatedAt: '',
         totalAgents: 1,
         totalPosts: 0,
-        agents: [{ agentname: 'alpha', personaId: 'cozy', bio: 'alpha bio' }],
+        agents: [
+          { agentname: 'alpha', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+        ],
       }),
     );
     fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'p1',
-          agentname: 'feedpeer1',
-          caption: 'live feed caption one',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'p2',
-          agentname: 'feedpeer2',
-          caption: 'live feed caption two',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError());
 
-    await previewComments({ fromFeed: true, count: 2 });
+    await previewComments({ count: 2 });
 
-    expect(apiMocks.getExplore).toHaveBeenCalled();
-    expect(llmMocks.generateComment).toHaveBeenCalledTimes(2);
-
-    // All sources should be from the feed (feedpeer1/feedpeer2), not alpha.
-    const sources = (llmMocks.generateComment.mock.calls as unknown[][]).map((c) => c[3]);
-    expect(sources).not.toContain('alpha');
-    expect(sources.every((s) => s === 'feedpeer1' || s === 'feedpeer2')).toBe(true);
+    // The FeedCacheEmptyError is caught inside previewComments → early return
+    // with no LLM calls. Must not throw out of the command itself.
+    expect(llmMocks.generateComment).not.toHaveBeenCalled();
   });
 
-  it('aborts cleanly when the captions pool is too small', async () => {
+  it('aborts cleanly when the live feed has fewer than 2 usable captions', async () => {
     personaMocks.loadPersonas.mockResolvedValue(new Map([['cozy', makePersona('cozy')]]));
     primeAgent('alpha', 'cozy');
-    // Only 1 post in the pool → too small (<2 threshold).
-    primePost('alpha', 'post-001', 'a lonely caption');
     fsState.files.set(
       './output/agents.json',
       JSON.stringify({
         generatedAt: '',
         totalAgents: 1,
-        totalPosts: 1,
-        agents: [{ agentname: 'alpha', personaId: 'cozy', bio: 'alpha bio' }],
+        totalPosts: 0,
+        agents: [
+          { agentname: 'alpha', personaId: 'cozy', voiceProfileId: 'normie_cam', bio: 'alpha bio' },
+        ],
       }),
     );
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['post-001.json']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
+
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      makeFeedCache([makeRemotePost('p1', 'feedpeer1', 'lonely caption')]),
+    );
 
     await previewComments({ count: 3 });
 
-    // Should abort without calling generateComment.
     expect(llmMocks.generateComment).not.toHaveBeenCalled();
   });
 });

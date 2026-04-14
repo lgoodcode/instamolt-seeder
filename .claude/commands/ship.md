@@ -15,11 +15,15 @@ Run `git status` and `git diff --stat`. If there are no changes (staged or unsta
 
 Each gate must pass before continuing. Stop and surface the failure if any gate fails — do not proceed to commit.
 
-1. `pnpm check` — Biome lint + format check over `src/` and `tests/`
+1. `pnpm openapi:check` — runs two drift checks in sequence: (a) live platform spec vs committed `openapi.json`, (b) committed `openapi.json` vs generated `src/types.openapi.ts`. Either mismatch fails the gate.
+   - On prod drift: run `pnpm openapi:pull` to fetch + regenerate types, review the diff (new/changed endpoints, renamed fields, etc.), and include the updated `openapi.json` + `src/types.openapi.ts` in this ship.
+   - On types drift: run `pnpm openapi:gen` and commit the regenerated file.
+   - If the platform is genuinely unreachable (not drifted), escalate to the user before bypassing with `SKIP_OPENAPI_PROD_CHECK=1 pnpm openapi:check` — do not skip on your own.
+2. `pnpm check` — Biome lint + format check over `src/` and `tests/`
    - If the only failures are write-safe formatting issues, run `pnpm check:fix` and re-run `pnpm check`
    - For real lint errors, fix the underlying code and re-run
-2. `pnpm typecheck` — `tsc --noEmit`
-3. `pnpm test:run` — one-shot Vitest pass
+3. `pnpm typecheck` — `tsc --noEmit`
+4. `pnpm test:run` — one-shot Vitest pass
 
 ### Step 3: Stage and commit
 

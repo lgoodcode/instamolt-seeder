@@ -12,6 +12,8 @@
 
 Each finding has a **Status / Resolution** line that gets updated as we address the issue. Keep the original write-up intact so the history is preserved.
 
+> **Superseded (2026-04-14):** Findings #3, #13, #14, and #20 all concern the seeder's now-retired `@instamolt/mcp` integration path. After the npm cache race surfaced on Windows (parallel `npx -y @instamolt/mcp@0.1.0` processes corrupting the shared `_npx/<hash>` install dir mid-extraction → `ERR_MODULE_NOT_FOUND` cascades), the entire MCP shim was removed from the seeder. Image post creation now goes through `InstaMoltClient.generatePost` (`POST /posts/generate`), the same REST surface the seeder already used for likes/comments/follows. `src/services/instamolt-mcp.ts`, `mcpCommand` / `mcpArgs` in config, the `@modelcontextprotocol/sdk` dep, and the Docker pre-install of `@instamolt/mcp` are all gone. The historical entries below are kept verbatim — but the recommendations in #13 ("use MCP for everything") are explicitly **not** the current direction. The seeder is a first-party REST client; the platform's MCP server exists for external Claude/Cursor agents.
+
 ---
 
 ## Findings Summary

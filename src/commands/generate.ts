@@ -1,12 +1,19 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { config } from '@/config';
+import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
 import {
   bakeAgentComments,
-  buildCaptionsPoolFromDisk,
-  COMMENT_SAMPLES_PER_AGENT,
+  bakeAgentReplies,
+  buildCaptionsPoolFromFeedCache,
+  COMMENT_COUNT_MAX,
+  COMMENT_COUNT_MIN,
+  computeSampleCounts,
   pickPeerCaptions,
+  pickPostsWithComments,
+  REPLY_COUNT_MAX,
+  REPLY_COUNT_MIN,
 } from '@/lib/comment-samples';
+import { mapWithConcurrency } from '@/lib/concurrency';
 import {
   appendAgentToIndex,
   type DedupIndex,
@@ -15,16 +22,20 @@ import {
   readDedupIndex,
   writeDedupIndex,
 } from '@/lib/dedup-index';
+import { flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
+import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import { maxSimilarity, pickDiverseAndRecent } from '@/lib/similarity';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
 import { type AgentAssignment, getAgentAssignments } from '@/personas/registry';
+import { InstaMoltClient } from '@/services/instamolt-api';
 import {
   generateAgentName,
   generateBio,
   generatePostContent,
   type PostContent,
+  rollChaos,
 } from '@/services/llm';
 import type {
   AgentCommentsFile,
@@ -70,6 +81,13 @@ const MAX_POST_ATTEMPTS = 2;
 export async function generate(agentCount: number, postsPerAgent: number): Promise<void> {
   ui.intro('Generate');
   const startedAt = Date.now();
+
+  initEventLogger();
+  logEvent({
+    eventType: 'session_start',
+    success: true,
+    details: { command: 'generate', agentCount, postsPerAgent },
+  });
 
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
@@ -215,6 +233,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
             imagePrompt: content.imagePrompt,
             caption: content.caption,
             aspectRatio: content.aspectRatio,
+            ...(content.chaos ? { chaos: true } : {}),
           };
 
           await writeFile(join(agentDir, `${post.id}.json`), JSON.stringify(post, null, 2));
@@ -227,9 +246,6 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
           priorPosts.push(content);
           peerPosts.push(content);
           agentPosts.push(post);
-
-          // Small delay to avoid Gemini rate limits.
-          await sleep(500);
         }
 
         // Persist the persona pool back into the map (handles the case where
@@ -250,9 +266,40 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         existingNames.push(agentname);
         created++;
         log('success', `@${agentname} [${spec.voiceProfile.id}] — ${bio.slice(0, 60)}...`);
+        logEvent({
+          eventType: 'agent_drafted',
+          agentname,
+          persona: persona.id,
+          success: true,
+          details: {
+            voiceProfileId: spec.voiceProfile.id,
+            postsDrafted: agentPosts.length,
+            bioPreview: bio.slice(0, 80),
+          },
+        });
+        for (const post of agentPosts) {
+          logEvent({
+            eventType: 'post_drafted',
+            agentname,
+            persona: persona.id,
+            success: true,
+            details: {
+              postId: post.id,
+              caption: post.caption.slice(0, 80),
+              aspectRatio: post.aspectRatio,
+              ...(post.chaos ? { chaos: true } : {}),
+            },
+          });
+        }
       } catch (err) {
         failed++;
         log('error', `Failed to create agent: ${err}`);
+        logEvent({
+          eventType: 'agent_drafted',
+          persona: persona.id,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -272,10 +319,8 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   //
   // Idempotent: skips agents that already have a `comments.json`.
   const commentsPhaseStart = Date.now();
-  const { commentsBaked, commentsSkipped, commentsFailed } = await bakeCommentSamplesPhase(
-    allAgents,
-    personas,
-  );
+  const { commentsBaked, commentsSkipped, commentsFailed, repliesBaked } =
+    await bakeCommentSamplesPhase(allAgents, personas);
   const commentsPhaseMs = Date.now() - commentsPhaseStart;
 
   // Write master index.
@@ -315,6 +360,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
       ui.summaryLine([
         { label: 'posts written', value: postsCreated, tone: 'ok' },
         { label: 'comment samples', value: commentsBaked, tone: 'ok' },
+        { label: 'reply samples', value: repliesBaked, tone: 'ok' },
         { label: 'skipped', value: commentsSkipped, tone: 'info' },
         { label: 'failed', value: commentsFailed, tone: commentsFailed > 0 ? 'err' : 'info' },
       ]),
@@ -323,6 +369,23 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
       `${ui.color.dim('next:')}   pnpm publish-drafts`,
     ].join('\n'),
   );
+
+  logEvent({
+    eventType: 'session_end',
+    success: true,
+    details: {
+      command: 'generate',
+      agentsCreated: created,
+      agentsFailed: failed,
+      postsCreated,
+      commentsBaked,
+      commentsSkipped,
+      commentsFailed,
+      repliesBaked,
+      totalDurationMs,
+    },
+  });
+  flushStats();
 
   ui.outro(ui.color.green(`${ui.symbol.ok} generate done`));
 }
@@ -339,73 +402,185 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 async function bakeCommentSamplesPhase(
   allAgents: GeneratedAgent[],
   personas: Map<string, Persona>,
-): Promise<{ commentsBaked: number; commentsSkipped: number; commentsFailed: number }> {
-  ui.section(`Comment samples — baking up to ${COMMENT_SAMPLES_PER_AGENT} per agent`);
+): Promise<{
+  commentsBaked: number;
+  commentsSkipped: number;
+  commentsFailed: number;
+  repliesBaked: number;
+}> {
+  ui.section(
+    `Comment samples — baking ${COMMENT_COUNT_MIN}–${COMMENT_COUNT_MAX} comments + ${REPLY_COUNT_MIN}–${REPLY_COUNT_MAX} thread-aware replies per agent (scaled by persona chattiness + voice verbosity)`,
+  );
 
-  const captionsPool = await buildCaptionsPoolFromDisk(allAgents);
+  const voiceProfiles = loadVoiceProfiles();
+
+  // Pull real live posts from the platform via the shared feed cache. The
+  // strict loader throws on empty/refresh-failure so we never bake comments
+  // against stale or synthetic content — the seeder's rule is that every
+  // baked interaction targets real content. No apiKey is needed because
+  // /feed/explore and /posts are unauthenticated.
+  const client = new InstaMoltClient();
+  const feed = await loadFeedCacheStrict(client, { maxAgeMs: FEED_CACHE_MAX_AGE_MS });
+  const captionsPool = buildCaptionsPoolFromFeedCache(feed);
 
   if (captionsPool.length < 2) {
-    log('warn', 'Captions pool too small (need at least 2) — skipping comment bake');
-    return { commentsBaked: 0, commentsSkipped: 0, commentsFailed: 0 };
+    // Live feed returned posts but none had usable captions. This is rare but
+    // still a hard abort — we refuse to fall back to synthetic content, and a
+    // captionless feed means agents would have nothing to react to.
+    throw new FeedCacheEmptyError(
+      `Live feed returned ${feed.posts.length} posts but only ${captionsPool.length} usable captions — cannot bake comments`,
+    );
+  }
+
+  log(
+    'info',
+    `Comment bake using ${captionsPool.length} live captions (feed refreshed ${feed.refreshedAt})`,
+  );
+
+  // Reply bake requires posts that have at least one existing comment — it's
+  // OK to have a smaller pool here than the comments pool (some posts have
+  // no comments yet). We log a warning and skip ONLY the reply bake if the
+  // platform is too quiet to produce thread-aware replies; the comment bake
+  // still proceeds so the run isn't a total loss on a thread-poor platform.
+  const replyEligibleCount = feed.posts.filter(
+    (p) => p.comment_count >= 1 && p.caption && p.caption.trim().length > 0,
+  ).length;
+  // Gate against the worst-case per-agent reply count. If the platform is
+  // even too quiet for `REPLY_COUNT_MAX` threaded posts, agents that compute
+  // a smaller per-agent reply count can still bake — that case is handled
+  // per-agent inside the loop by checking `replyPosts.length` against the
+  // plan.
+  const replyBakeEnabled = replyEligibleCount >= REPLY_COUNT_MIN;
+  if (!replyBakeEnabled) {
+    log(
+      'warn',
+      `Reply bake disabled — only ${replyEligibleCount} feed posts have comments (need ${REPLY_COUNT_MIN}+). Comment samples will still be baked.`,
+    );
+  } else {
+    log('info', `Reply bake: ${replyEligibleCount} feed posts with comments eligible`);
   }
 
   const bar = ui.progress(allAgents.length, 'preparing...');
   let baked = 0;
   let skipped = 0;
   let failed = 0;
+  let repliesBaked = 0;
 
-  for (const agent of allAgents) {
+  // Agents are baked in parallel because each job reads an immutable
+  // `captionsPool` and writes only to its own `comments.json` — no shared
+  // mutable state. Concurrency is bounded by Gemini's per-minute quota, not
+  // CPU, so `config.commentBakeConcurrency` is the knob to tune. Per-agent
+  // failures are caught inside the worker so one bad agent can't abort the
+  // rest; counters are updated from the main event loop after each worker
+  // returns (single-threaded, no atomicity concerns).
+  await mapWithConcurrency(allAgents, config.commentBakeConcurrency, async (agent) => {
     const commentsPath = join(config.agentsDir, agent.agentname, 'comments.json');
 
-    // Idempotency check: skip agents that already have a comments file.
-    let existing = false;
     try {
       await readFile(commentsPath, 'utf-8');
-      existing = true;
-    } catch {}
-
-    if (existing) {
       skipped++;
       bar.tick(`@${agent.agentname} — skipped (exists)`);
-      continue;
-    }
+      return;
+    } catch {}
 
     const persona = personas.get(agent.personaId);
     if (!persona) {
       skipped++;
       bar.tick(`@${agent.agentname} — skipped (missing persona)`);
-      continue;
+      return;
     }
 
-    const sources = pickPeerCaptions(captionsPool, agent.agentname, COMMENT_SAMPLES_PER_AGENT);
+    const voiceProfile = voiceProfiles.get(agent.voiceProfileId);
+    if (!voiceProfile) {
+      skipped++;
+      bar.tick(`@${agent.agentname} — skipped (missing voice profile)`);
+      return;
+    }
+
+    const plan = computeSampleCounts(persona, voiceProfile, agent.agentname);
+
+    const sources = pickPeerCaptions(captionsPool, agent.agentname, plan.comments);
     if (sources.length === 0) {
       skipped++;
       bar.tick(`@${agent.agentname} — skipped (no peer captions)`);
-      continue;
+      return;
     }
 
     try {
-      const samples = await bakeAgentComments(persona, agent, sources);
+      const commentSamples = await bakeAgentComments(persona, agent, sources);
+      const commentSamplesTagged = commentSamples.map((s) => ({
+        ...s,
+        kind: 'comment' as const,
+      }));
+
+      let replySamples: typeof commentSamples = [];
+      if (replyBakeEnabled && plan.replies > 0) {
+        const replyPosts = pickPostsWithComments(feed, plan.replies, agent.agentname);
+        if (replyPosts.length > 0) {
+          const priorTexts = commentSamples.map((s) => s.text);
+          const depthTargets = plan.depthTargets.slice(0, replyPosts.length);
+          replySamples = await bakeAgentReplies(
+            persona,
+            agent,
+            client,
+            replyPosts,
+            depthTargets,
+            priorTexts,
+          );
+        }
+      }
+
+      const allSamples = [...commentSamplesTagged, ...replySamples];
       const file: AgentCommentsFile = {
         agentname: agent.agentname,
         generatedAt: new Date().toISOString(),
-        samples,
+        samples: allSamples,
       };
       await writeFile(commentsPath, JSON.stringify(file, null, 2));
       baked++;
-      bar.tick(`@${agent.agentname} — baked ${samples.length} samples`);
+      repliesBaked += replySamples.length;
+      bar.tick(
+        `@${agent.agentname} — baked ${commentSamplesTagged.length} comments + ${replySamples.length} replies`,
+      );
+      logEvent({
+        eventType: 'comment_baked',
+        agentname: agent.agentname,
+        persona: agent.personaId,
+        success: true,
+        details: { count: commentSamplesTagged.length },
+      });
+      if (replySamples.length > 0) {
+        logEvent({
+          eventType: 'reply_baked',
+          agentname: agent.agentname,
+          persona: agent.personaId,
+          success: true,
+          details: { count: replySamples.length },
+        });
+      }
     } catch (err) {
       failed++;
       log('error', `  failed to bake comments for @${agent.agentname}: ${err}`);
       bar.tick(`@${agent.agentname} — failed`);
+      logEvent({
+        eventType: 'comment_baked',
+        agentname: agent.agentname,
+        persona: agent.personaId,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
+  });
 
-    // Same Gemini-rate-limit pacing as the post loop above.
-    await sleep(500);
-  }
-
-  bar.done(`comment samples — ${baked} baked, ${skipped} skipped, ${failed} failed`);
-  return { commentsBaked: baked, commentsSkipped: skipped, commentsFailed: failed };
+  bar.done(
+    `comment samples — ${baked} agents baked (${repliesBaked} replies), ${skipped} skipped, ${failed} failed`,
+  );
+  return {
+    commentsBaked: baked,
+    commentsSkipped: skipped,
+    commentsFailed: failed,
+    repliesBaked,
+  };
 }
 
 // --- Helpers ---
@@ -423,7 +598,23 @@ async function generatePostWithSimilarityGate(
   totalPosts: number,
   priorPosts: PostContent[],
   peerPosts: PostContent[],
-): Promise<PostContent> {
+): Promise<PostContent & { chaos: boolean }> {
+  // Roll chaos ONCE per post so retries stay in the same mode. Chaos posts
+  // bypass the similarity gate entirely — off-register content is exactly
+  // what we want, and running Jaccard against disciplined peers is noise.
+  const chaos = rollChaos(persona);
+  if (chaos) {
+    const candidate = await generatePostContent(
+      persona,
+      postNumber,
+      totalPosts,
+      priorPosts,
+      peerPosts,
+      true,
+    );
+    return { ...candidate, chaos: true };
+  }
+
   const corpus = [...priorPosts, ...peerPosts].map((p) => `${p.imagePrompt} ${p.caption}`);
 
   let best: PostContent | null = null;
@@ -436,14 +627,15 @@ async function generatePostWithSimilarityGate(
       totalPosts,
       priorPosts,
       peerPosts,
+      false,
     );
 
-    if (corpus.length === 0) return candidate;
+    if (corpus.length === 0) return { ...candidate, chaos: false };
 
     const candidateText = `${candidate.imagePrompt} ${candidate.caption}`;
     const score = maxSimilarity(candidateText, corpus);
 
-    if (score < SIMILARITY_THRESHOLD) return candidate;
+    if (score < SIMILARITY_THRESHOLD) return { ...candidate, chaos: false };
 
     if (score < bestScore) {
       best = candidate;
@@ -464,7 +656,7 @@ async function generatePostWithSimilarityGate(
   );
   // Non-null assertion safe: we always assign `best` on the first iteration
   // when corpus is non-empty (which is the only path that reaches here).
-  return best as PostContent;
+  return { ...(best as PostContent), chaos: false };
 }
 
 /**
@@ -512,6 +704,7 @@ function logCoverageSummary(
     .join(', ');
 
   ui.note(
+    'Distribution',
     [
       `Agents: ${assignments.length}`,
       `Personas: ${personas.size}/${totalPersonas} covered`,
@@ -519,7 +712,6 @@ function logCoverageSummary(
       `Top voices: ${top}`,
       `Rare voices: ${bottom}`,
     ].join('\n'),
-    'Distribution',
   );
 }
 
@@ -645,10 +837,6 @@ async function loadDedupContext(
   }
 
   return index;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Format a millisecond duration as `1h 02m 03s` / `2m 34s` / `4.2s`. */

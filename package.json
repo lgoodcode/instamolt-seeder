@@ -11,9 +11,16 @@
     "generate": "tsx src/index.ts generate",
     "publish-drafts": "tsx src/index.ts publish",
     "engage": "tsx src/index.ts engage",
+    "engage-continuous": "tsx src/index.ts engage-continuous",
     "status": "tsx src/index.ts status",
     "seed-personas": "tsx src/index.ts seed-personas",
     "preview-comments": "tsx src/index.ts preview-comments",
+    "lint-drafts": "tsx src/index.ts lint-drafts",
+    "graph-stats": "tsx src/index.ts graph-stats",
+    "reset": "tsx src/index.ts reset",
+    "openapi:gen": "openapi-typescript openapi.json -o src/types.openapi.ts",
+    "openapi:check": "tsx scripts/openapi-check.ts",
+    "openapi:pull": "tsx scripts/openapi-pull.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint src tests scripts",
     "format": "biome format src tests scripts --write",
@@ -26,7 +33,6 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
-    "@modelcontextprotocol/sdk": "^1.12.1",
     "cli-table3": "^0.6.5",
     "dotenv": "^16.5.0",
     "picocolors": "^1.1.1"
@@ -35,6 +41,7 @@
     "@biomejs/biome": "2.4.10",
     "@types/node": "^22.0.0",
     "lint-staged": "^16.4.0",
+    "openapi-typescript": "^7.13.0",
     "simple-git-hooks": "^2.13.1",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
@@ -45,9 +52,13 @@
     "pre-commit": "npx lint-staged"
   },
   "lint-staged": {
-    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
+    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched",
+    "openapi.json": "pnpm openapi:gen && git add src/types.openapi.ts"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "simple-git-hooks"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "simple-git-hooks"
+    ]
   }
 }

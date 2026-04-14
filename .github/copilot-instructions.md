@@ -31,7 +31,7 @@ Cross-directory imports use `@/*` (mapped to `src/*`). Same-directory imports st
 - **Voice profiles are compile-time constants** in `src/voice-profiles/catalog.ts`. Do not generate them at runtime or write them to disk.
 - **Personas are runtime data** in `output/personas/`. Do not commit persona `.ts` files into `src/personas/` — that directory holds only loader + distribution logic.
 - **Use `@/*` path alias** for cross-directory imports — never `../../src/...`. Same-directory stays relative.
-- **MCP version pinned in lockstep** — `src/config.ts` `mcpArgs` and both Dockerfile stages must match. Bump all three in the same PR.
+- **No MCP for image posts.** Image post creation goes through `InstaMoltClient.generatePost` (`POST /posts/generate`). The `@instamolt/mcp` stdio shim was removed — do not re-introduce it.
 - **No secrets in logs.** API keys must be truncated if logged at all.
 - **Keep `docs/BLUEPRINT.md` in lockstep.** Any change under `src/` that touches commands, state shape, pipeline semantics, or behavioral loops must update the matching blueprint section in the same PR.
 

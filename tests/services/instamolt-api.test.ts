@@ -3,12 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Leave INSTAMOLT_API_URL unset so config.ts falls back to the production URL.
 // Note: ?? only treats undefined/null as missing, NOT empty string — so we
 // must delete the var, not set it to ''. See the config.ts nullish-coalescing
-// bug noted in config.test.ts.
+// bug noted in config.test.ts. vitest's stubEnv WOULD delete it, but a
+// dev `.env` at the repo root can reload it via dotenv at import time. Read
+// the actual configured base URL back from `@/config` so assertions track
+// whatever the resolved value is in this environment.
 vi.stubEnv('INSTAMOLT_API_URL', undefined as unknown as string);
 
-import { InstaMoltClient } from '@/services/instamolt-api';
+import { config } from '@/config';
+import { InstaMoltApiError, InstaMoltClient, ParentDeletedError } from '@/services/instamolt-api';
 
-const BASE = 'https://instamolt.app/api/v1';
+const BASE = config.instamoltBaseUrl;
 
 // Build a fake successful fetch Response with a JSON body.
 function okJson(body: unknown, status = 200): Response {
@@ -134,47 +138,252 @@ describe('InstaMoltClient.updateProfile', () => {
 });
 
 describe('InstaMoltClient.likePost', () => {
-  it('POSTs without a body', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({}));
+  it('POSTs without a body and returns the toggle state', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ success: true, liked: true }));
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient('fake-key');
-    await client.likePost('post-123');
+    const res = await client.likePost('post-123');
 
     expect(getUrl(fetchMock)).toBe(`${BASE}/posts/post-123/like`);
     const init = getInit(fetchMock);
     expect(init.method).toBe('POST');
     // No `body` argument was passed to request(), so body should be undefined.
     expect(init.body).toBeUndefined();
+    // Per openapi.json toggleLike, the response carries the resulting `liked`
+    // boolean — callers rely on this to detect un-toggle and re-fire.
+    expect(res).toEqual({ success: true, liked: true });
+  });
+
+  it('returns liked: false when the call un-likes', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ success: true, liked: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const res = await client.likePost('post-123');
+
+    expect(res.liked).toBe(false);
   });
 });
 
 describe('InstaMoltClient.commentOnPost', () => {
   it('sends content in the JSON body', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({}));
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      okJson({
+        success: true,
+        comment: {
+          id: 'c1',
+          content: 'nice one',
+          parent_comment_id: null,
+          depth: 0,
+          reply_count: 0,
+          like_count: 0,
+          created_at: '2026-04-11T00:00:00Z',
+          author: { agentname: 'me', is_verified: false },
+        },
+      }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient('fake-key');
-    await client.commentOnPost('post-123', 'nice one');
+    const res = await client.commentOnPost('post-123', 'nice one');
 
     expect(getUrl(fetchMock)).toBe(`${BASE}/posts/post-123/comments`);
     const init = getInit(fetchMock);
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body ?? '{}')).toEqual({ content: 'nice one' });
+    // Widened return shape: carries the created comment.
+    expect(res.comment.id).toBe('c1');
+  });
+
+  it('includes parent_comment_id in the body when posting a nested reply', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      okJson({
+        success: true,
+        comment: {
+          id: 'c2',
+          content: 'reply text',
+          parent_comment_id: 'parent-1',
+          depth: 1,
+          reply_count: 0,
+          like_count: 0,
+          created_at: '2026-04-11T00:00:00Z',
+          author: { agentname: 'me', is_verified: false },
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await client.commentOnPost('post-123', 'reply text', 'parent-1');
+
+    const init = getInit(fetchMock);
+    expect(JSON.parse(init.body ?? '{}')).toEqual({
+      content: 'reply text',
+      parent_comment_id: 'parent-1',
+    });
+  });
+
+  it('throws ParentDeletedError when the server returns 404 and parent was provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(404, 'parent comment not found'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await expect(client.commentOnPost('post-123', 'orphan', 'parent-gone')).rejects.toBeInstanceOf(
+      ParentDeletedError,
+    );
+  });
+
+  it('throws the generic InstaMoltApiError on 404 when no parent was provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(404, 'post not found'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await expect(client.commentOnPost('missing-post', 'hi')).rejects.toBeInstanceOf(
+      InstaMoltApiError,
+    );
+  });
+});
+
+describe('InstaMoltClient.getExplorePage', () => {
+  it('hits /feed/explore with page and limit params and no auth header', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ posts: [], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await client.getExplorePage(3, 50);
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/feed/explore?page=3&limit=50`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('GET');
+    expect(init.headers?.Authorization).toBeUndefined();
+  });
+});
+
+describe('InstaMoltClient.getPostComments', () => {
+  it('GETs /posts/{id}/comments with auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ comments: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await client.getPostComments('post-123');
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/posts/post-123/comments`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('GET');
+    expect(init.headers?.Authorization).toBe('Bearer fake-key');
+  });
+});
+
+describe('InstaMoltClient.likeComment', () => {
+  it('POSTs to /posts/{postId}/comments/{commentId}/like and returns the liked state', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ success: true, liked: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const res = await client.likeComment('post-123', 'comment-456');
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/posts/post-123/comments/comment-456/like`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('POST');
+    expect(init.headers?.Authorization).toBe('Bearer fake-key');
+    expect(res.liked).toBe(true);
+  });
+});
+
+describe('InstaMoltClient.getPost', () => {
+  it('GETs /posts/{id} with auth and returns the post detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      okJson({
+        post: {
+          id: 'post-1',
+          image_url: 'https://cdn/x.jpg',
+          caption: 'hello',
+          width: 1080,
+          height: 1080,
+          format: 'square',
+          like_count: 10,
+          comment_count: 2,
+          view_count: 50,
+          popularity_score: 1.2,
+          velocity_score: 0.8,
+          share_count: 0,
+          created_at: '2026-04-11T00:00:00Z',
+          author: { agentname: 'someone', is_verified: false },
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const res = await client.getPost('post-1');
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/posts/post-1`);
+    expect(res.post.id).toBe('post-1');
+  });
+});
+
+describe('InstaMoltClient.getMyActivity', () => {
+  it('GETs /agents/me/activity with no query params when called with no opts', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson({ activities: [], next_cursor: null, has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await client.getMyActivity();
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/agents/me/activity`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('GET');
+    expect(init.headers?.Authorization).toBe('Bearer fake-key');
+  });
+
+  it('serializes limit, cursor, and types filters into query params', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson({ activities: [], next_cursor: null, has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await client.getMyActivity({
+      limit: 30,
+      cursor: '2026-04-11T00:00:00Z|abc',
+      types: ['comment', 'reply'],
+    });
+
+    const url = getUrl(fetchMock);
+    // URLSearchParams sorts insertion order, so compare the parsed params.
+    expect(url.startsWith(`${BASE}/agents/me/activity?`)).toBe(true);
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get('limit')).toBe('30');
+    expect(parsed.searchParams.get('cursor')).toBe('2026-04-11T00:00:00Z|abc');
+    expect(parsed.searchParams.get('type')).toBe('comment,reply');
   });
 });
 
 describe('InstaMoltClient.followAgent', () => {
-  it('POSTs to /agents/{name}/follow', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({}));
+  it('POSTs to /agents/{name}/follow and returns the toggle state', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ success: true, following: true }));
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient('fake-key');
-    await client.followAgent('otherbot');
+    const res = await client.followAgent('otherbot');
 
     expect(getUrl(fetchMock)).toBe(`${BASE}/agents/otherbot/follow`);
     const init = getInit(fetchMock);
     expect(init.method).toBe('POST');
+    expect(res).toEqual({ success: true, following: true });
+  });
+
+  it('returns following: false when the call unfollows', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ success: true, following: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const res = await client.followAgent('otherbot');
+
+    expect(res.following).toBe(false);
   });
 });
 
@@ -246,5 +455,168 @@ describe('InstaMoltClient error paths', () => {
 
     const client = new InstaMoltClient();
     await expect(client.getExplore()).rejects.toThrow(/ECONNREFUSED/);
+  });
+});
+
+// --- Depth-upgrade error-path coverage ---------------------------------
+//
+// These cases cover the Retry-After parsing, bypass-header attachment, and
+// network/parse failure shapes that the happy-path 429 test above doesn't
+// exercise.
+//
+// Findings about current source behavior (pinned as contract here so any
+// future change is a visible diff):
+// - `Retry-After` is parsed with `parseInt(..., 10)`, so ONLY an integer
+//   number-of-seconds value is honored. HTTP-date values (RFC 7231 §7.1.3,
+//   e.g. 'Wed, 21 Oct 2026 07:28:00 GMT') produce NaN → `NaN * 1000` = NaN →
+//   `setTimeout(_, NaN)` fires on the next tick (effectively zero wait).
+// - Absent `Retry-After` falls back to the hard-coded 60s default inside
+//   `request()` (no exported constant).
+// - `X-Rate-Limit-Bypass` header is ALWAYS attached — no env gating at the
+//   client layer. `config.rateLimitBypassSecret` is a lazy getter that
+//   throws if the env var is unset, so the request itself fails before
+//   any fetch happens.
+// - Network-level fetch rejects are NOT wrapped — the raw Error bubbles.
+//   `JSON.parse` failures during `res.json()` also bubble unwrapped.
+describe('InstaMoltClient Retry-After parsing', () => {
+  it('honors the exact number of seconds from the Retry-After header (10s)', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errText(429, 'slow down', { 'Retry-After': '10' }))
+      .mockResolvedValueOnce(okJson({ posts: [{ id: 'p-retry' }], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const client = new InstaMoltClient();
+    const promise = client.getExplore();
+    // Before 10s elapses, fetch should still be at only 1 call.
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Advance the remaining 1s to cross the 10s threshold.
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await promise;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.posts[0]?.id).toBe('p-retry');
+  });
+
+  it('falls back to the ~60s default delay when Retry-After is absent', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errText(429, 'slow down')) // no Retry-After header
+      .mockResolvedValueOnce(okJson({ posts: [{ id: 'p-default' }], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const client = new InstaMoltClient();
+    const promise = client.getExplore();
+    // At 30s (halfway), the retry should NOT have fired yet.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Advance past the 60s default.
+    await vi.advanceTimersByTimeAsync(31_000);
+    const result = await promise;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.posts[0]?.id).toBe('p-default');
+  });
+
+  it('treats an HTTP-date Retry-After value as ~0ms wait (current behavior: parseInt → NaN)', async () => {
+    // Pinning current behavior: the source uses `parseInt(headerVal, 10)`,
+    // so an HTTP-date string like 'Wed, 21 Oct 2026 07:28:00 GMT' yields
+    // NaN → `setTimeout(_, NaN)` which Node normalizes to ~0ms. The retry
+    // therefore fires almost immediately rather than at the intended date.
+    // If the source grows real HTTP-date support, this test should update
+    // in lockstep.
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        errText(429, 'slow down', { 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }),
+      )
+      .mockResolvedValueOnce(okJson({ posts: [{ id: 'p-httpdate' }], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const client = new InstaMoltClient();
+    const promise = client.getExplore();
+    // Flush microtasks + the zero-delay timer.
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await promise;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.posts[0]?.id).toBe('p-httpdate');
+  });
+});
+
+describe('InstaMoltClient rate-limit bypass header', () => {
+  it('attaches X-Rate-Limit-Bypass to every request (auth or no auth)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson({ posts: [], has_more: false }))
+      .mockResolvedValueOnce(okJson({}));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const unauthed = new InstaMoltClient();
+    await unauthed.getExplore();
+    const authed = new InstaMoltClient('fake-key');
+    await authed.updateProfile('a bio three words long');
+
+    const unauthedInit = getInit(fetchMock, 0);
+    const authedInit = getInit(fetchMock, 1);
+    // Both calls carry the bypass header — not auth-gated.
+    expect(unauthedInit.headers?.['X-Rate-Limit-Bypass']).toBeDefined();
+    expect(unauthedInit.headers?.['X-Rate-Limit-Bypass']).not.toBe('');
+    expect(authedInit.headers?.['X-Rate-Limit-Bypass']).toBeDefined();
+    expect(authedInit.headers?.['X-Rate-Limit-Bypass']).toBe(
+      unauthedInit.headers?.['X-Rate-Limit-Bypass'],
+    );
+  });
+
+  it('uses the resolved config.rateLimitBypassSecret value, not a hard-coded string', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ posts: [], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await client.getExplore();
+
+    const init = getInit(fetchMock);
+    expect(init.headers?.['X-Rate-Limit-Bypass']).toBe(config.rateLimitBypassSecret);
+  });
+});
+
+describe('InstaMoltClient network + parse failure shapes', () => {
+  it('wraps a fetch TypeError (network-level failure) in InstaMoltApiError with status 0', async () => {
+    const netErr = new TypeError('fetch failed');
+    const fetchMock = vi.fn().mockRejectedValueOnce(netErr);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await expect(client.getExplore()).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      method: 'GET',
+      path: '/feed/explore?limit=20',
+      status: 0,
+      body: expect.stringContaining('network:'),
+    });
+  });
+
+  it('wraps a JSON parse failure from res.json() in InstaMoltApiError on a 2xx response', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0');
+      },
+      text: async () => '<html>not json</html>',
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await expect(client.getExplore()).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 200,
+      body: expect.stringContaining('parse:'),
+    });
   });
 });

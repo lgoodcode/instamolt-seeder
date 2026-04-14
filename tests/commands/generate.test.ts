@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Persona, VoiceProfile } from '@/types';
+import type { FeedCacheFile, Persona, RemotePost, VoiceProfile } from '@/types';
 
 // Minimal in-memory fs. Only the operations used by generate.ts are modelled.
 const fsState = vi.hoisted(() => ({
@@ -79,6 +79,7 @@ const llmMocks = vi.hoisted(() => ({
       }>
     >(),
   generateComment: vi.fn<() => Promise<string>>(),
+  rollChaos: vi.fn(() => false),
 }));
 
 vi.mock('@/services/llm', () => llmMocks);
@@ -103,8 +104,80 @@ const registryMocks = vi.hoisted(() => ({
 vi.mock('@/personas/registry', () => registryMocks);
 
 vi.mock('@/voice-profiles/index', () => ({
-  loadVoiceProfiles: vi.fn(() => new Map()),
+  loadVoiceProfiles: vi.fn(
+    () =>
+      new Map([
+        [
+          'normie_cam',
+          {
+            id: 'normie_cam',
+            literacy: 'normal',
+            verbosity: 'one_sentence',
+            capitalization: 'proper',
+            punctuation: 'proper',
+            typoFrequency: 'none',
+            register: 'casual normal',
+            lexicon: ['wow'],
+            examples: ['Wow.'],
+            prevalenceWeight: 4,
+          },
+        ],
+      ]),
+  ),
 }));
+
+// Feed cache mock. The bake phase calls `loadFeedCacheStrict` to pull real
+// captions from the platform; tests supply a hand-built FeedCacheFile so we
+// don't hit the network. `FeedCacheEmptyError` is re-exported from the real
+// module so `instanceof` checks inside generate.ts resolve correctly.
+const feedCacheMocks = vi.hoisted(() => ({
+  loadFeedCacheStrict: vi.fn<() => Promise<FeedCacheFile>>(),
+}));
+
+vi.mock('@/lib/feed-cache', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/feed-cache')>('@/lib/feed-cache');
+  return {
+    ...actual,
+    loadFeedCacheStrict: feedCacheMocks.loadFeedCacheStrict,
+  };
+});
+
+// InstaMoltClient is instantiated in the bake phase to pass into the feed
+// cache loader. The actual client is never called because the cache mock
+// short-circuits the load.
+vi.mock('@/services/instamolt-api', () => ({
+  InstaMoltClient: vi.fn().mockImplementation(function MockClient() {
+    return {};
+  }),
+}));
+
+function makeRemotePost(id: string, agentname: string, caption: string): RemotePost {
+  return {
+    id,
+    image_url: 'http://x/y.jpg',
+    thumbnail_url: null,
+    caption,
+    width: 1080,
+    height: 1080,
+    format: 'square',
+    like_count: 0,
+    comment_count: 0,
+    view_count: 0,
+    popularity_score: 0,
+    velocity_score: 0,
+    share_count: 0,
+    created_at: '2026-04-13T00:00:00.000Z',
+    author: { agentname, is_verified: false },
+  };
+}
+
+function makeFeedCache(posts: RemotePost[]): FeedCacheFile {
+  return {
+    refreshedAt: '2026-04-13T00:00:00.000Z',
+    sources: ['explore'],
+    posts,
+  };
+}
 
 // generate.ts now writes through src/ui.ts. Mock as no-op so test output isn't
 // polluted by spinner escape codes and ui.note doesn't try to render.
@@ -135,6 +208,16 @@ vi.mock('@/lib/ui', () => ({
   },
   symbol: { ok: '✓', err: '✗', warn: '!', info: 'i' },
 }));
+
+const eventLoggerMocks = vi.hoisted(() => ({
+  initEventLogger: vi.fn(),
+  logEvent: vi.fn(),
+  logSkippedAction: vi.fn(),
+  flushStats: vi.fn(),
+  updateAgentCounts: vi.fn(),
+}));
+
+vi.mock('@/lib/event-logger', () => eventLoggerMocks);
 
 import { generate } from '@/commands/generate';
 
@@ -176,6 +259,7 @@ function makePersona(id: string, personality = 'A very thoughtful AI agent.'): P
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -200,6 +284,24 @@ describe('generate', () => {
     llmMocks.generateComment.mockReset();
     personaMocks.loadPersonas.mockReset();
     registryMocks.getAgentAssignments.mockReset();
+    feedCacheMocks.loadFeedCacheStrict.mockReset();
+    eventLoggerMocks.initEventLogger.mockReset();
+    eventLoggerMocks.logEvent.mockReset();
+    eventLoggerMocks.logSkippedAction.mockReset();
+    eventLoggerMocks.flushStats.mockReset();
+    eventLoggerMocks.updateAgentCounts.mockReset();
+
+    // Default feed-cache mock: a small pool of real-shaped peer captions so
+    // the comment-bake phase has material to work with. Individual tests can
+    // override this (e.g. the "too small captions pool" case sets a single-
+    // caption feed).
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      makeFeedCache([
+        makeRemotePost('lp1', 'livepeer1', 'live peer caption one'),
+        makeRemotePost('lp2', 'livepeer2', 'live peer caption two'),
+        makeRemotePost('lp3', 'livepeer3', 'live peer caption three'),
+      ]),
+    );
 
     // Default mock returns content with disjoint vocabulary per call so the
     // similarity gate never trips during tests that don't care about the
@@ -555,19 +657,113 @@ describe('generate', () => {
       expect(parsedBeta.samples[0].text).toBe('fresh bake');
     });
 
-    it('gracefully skips the bake phase when the captions pool is too small', async () => {
+    it("one agent's bake failure is isolated — other agents in the concurrent batch still complete", async () => {
+      // The bake phase runs with bounded concurrency via mapWithConcurrency.
+      // Each worker wraps its per-agent body in try/catch so one failing
+      // generateComment call can't abort the batch. This test reproduces
+      // that scenario end-to-end: three agents enter the bake phase, the
+      // middle one's generateComment rejects, and the other two still land
+      // their comments.json files while the failing agent's counters
+      // propagate into the session_end details.
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 3));
+      llmMocks.generateAgentName
+        .mockResolvedValueOnce('alpha')
+        .mockResolvedValueOnce('beta')
+        .mockResolvedValueOnce('gamma');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      // generateComment is called for (a) per-agent post content avoid-list
+      // and (b) the bake phase. We differentiate by the second arg — the
+      // bake phase passes an `agentCtx` with agentname + bio; everything
+      // else passes persona directly. Keying the throw on
+      // agentCtx.agentname === 'beta' narrows the failure to beta's bake.
+      // The cast unwraps the mock's no-arg signature — the runtime function
+      // accepts the real generateComment signature either way.
+      (
+        llmMocks.generateComment.mockImplementation as unknown as (
+          fn: (...args: unknown[]) => Promise<string>,
+        ) => void
+      )(async (...args: unknown[]) => {
+        const second = args[1];
+        if (
+          second &&
+          typeof second === 'object' &&
+          'agentname' in second &&
+          (second as { agentname: string }).agentname === 'beta'
+        ) {
+          throw new Error('synthetic bake failure for beta');
+        }
+        return 'a sharp little reply';
+      });
+
+      await generate(3, 1);
+
+      // Local slice of logEvent calls by type — the shared `eventsOfType`
+      // helper lives inside the `generate event-logger integration` describe
+      // block, so we inline the same projection here to avoid reaching
+      // across blocks or moving the helper to module scope.
+      const eventsOfType = <T = Record<string, unknown>>(type: string): T[] =>
+        eventLoggerMocks.logEvent.mock.calls
+          .map((c) => c[0] as T & { eventType: string })
+          .filter((e) => e.eventType === type);
+
+      // Alpha and gamma land their comments.json.
+      expect(fsState.files.has(join('./output/agents', 'alpha', 'comments.json'))).toBe(true);
+      expect(fsState.files.has(join('./output/agents', 'gamma', 'comments.json'))).toBe(true);
+      // Beta's bake threw, so no file was written.
+      expect(fsState.files.has(join('./output/agents', 'beta', 'comments.json'))).toBe(false);
+
+      // session_end carries the aggregate counters — 2 baked, 1 failed.
+      const ends = eventsOfType<{
+        details: { commentsBaked: number; commentsFailed: number };
+      }>('session_end');
+      expect(ends).toHaveLength(1);
+      expect(ends[0]?.details.commentsBaked).toBe(2);
+      expect(ends[0]?.details.commentsFailed).toBe(1);
+
+      // Beta gets a comment_baked event with success=false; alpha and gamma
+      // get success=true events.
+      const bakes = eventsOfType<{ agentname: string; success: boolean }>('comment_baked');
+      const beta = bakes.find((e) => e.agentname === 'beta');
+      expect(beta).toBeDefined();
+      expect(beta?.success).toBe(false);
+      const successes = bakes.filter((e) => e.success);
+      expect(successes.map((e) => e.agentname).sort()).toEqual(['alpha', 'gamma']);
+    });
+
+    it('throws FeedCacheEmptyError when the live feed returns zero usable captions', async () => {
       const p = makePersona('test-persona');
       personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
       registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
       llmMocks.generateAgentName.mockResolvedValue('alpha');
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
-      // 1 agent with 1 post → captions pool has 1 entry < 2 threshold →
-      // bake phase skips without calling generateComment at all.
-      await generate(1, 1);
+      // Override the default feed mock: one post with a blank caption →
+      // captions pool has 0 usable entries → bake phase must abort.
+      feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+        makeFeedCache([makeRemotePost('lp1', 'livepeer1', '')]),
+      );
+
+      await expect(generate(1, 1)).rejects.toThrow(/cannot bake comments/i);
 
       expect(llmMocks.generateComment).not.toHaveBeenCalled();
       expect(fsState.files.has(join('./output/agents', 'alpha', 'comments.json'))).toBe(false);
+    });
+
+    it('propagates the FeedCacheEmptyError when the live feed refresh fails', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateAgentName.mockResolvedValue('alpha');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      const { FeedCacheEmptyError } = await import('@/lib/feed-cache');
+      feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError());
+
+      await expect(generate(1, 1)).rejects.toThrow(FeedCacheEmptyError);
+      expect(llmMocks.generateComment).not.toHaveBeenCalled();
     });
   });
 
@@ -606,5 +802,204 @@ describe('generate', () => {
     // The post-002 file on disk should hold the FRESH content, not the duplicate.
     const post2 = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'post-002.json'))!);
     expect(post2.imagePrompt).toContain('frogs');
+  });
+
+  describe('generate event-logger integration', () => {
+    // Helpers mirror the pattern in tests/commands/engage.test.ts so the
+    // assertions below read as "what events happened, in what order, with
+    // what shape" rather than as raw mock.calls indexing.
+    function eventTypes(): string[] {
+      return eventLoggerMocks.logEvent.mock.calls.map(
+        (c) => (c[0] as { eventType: string }).eventType,
+      );
+    }
+
+    function eventsOfType<T = Record<string, unknown>>(type: string): T[] {
+      return eventLoggerMocks.logEvent.mock.calls
+        .map((c) => c[0] as T & { eventType: string })
+        .filter((e) => e.eventType === type);
+    }
+
+    it('initializes the event logger on command start', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateAgentName.mockResolvedValue('alpha');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(1, 1);
+
+      expect(eventLoggerMocks.initEventLogger).toHaveBeenCalled();
+    });
+
+    it('emits session_start first with the command args in details', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateAgentName.mockResolvedValue('alpha');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(1, 2);
+
+      const types = eventTypes();
+      expect(types[0]).toBe('session_start');
+      const starts = eventsOfType<{
+        details: { command: string; agentCount: number; postsPerAgent: number };
+      }>('session_start');
+      expect(starts).toHaveLength(1);
+      expect(starts[0].details).toEqual({
+        command: 'generate',
+        agentCount: 1,
+        postsPerAgent: 2,
+      });
+    });
+
+    it('emits session_end last and calls flushStats afterward', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateAgentName.mockResolvedValue('alpha');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(1, 1);
+
+      const types = eventTypes();
+      expect(types).toContain('session_end');
+      // session_end is the last logged event.
+      expect(types[types.length - 1]).toBe('session_end');
+      // session_start fires before session_end.
+      expect(types.indexOf('session_start')).toBeLessThan(types.indexOf('session_end'));
+
+      const ends = eventsOfType<{
+        details: {
+          command: string;
+          agentsCreated: number;
+          agentsFailed: number;
+          postsCreated: number;
+          commentsBaked: number;
+          commentsSkipped: number;
+          commentsFailed: number;
+          repliesBaked: number;
+          totalDurationMs: number;
+        };
+      }>('session_end');
+      expect(ends).toHaveLength(1);
+      expect(ends[0].details.command).toBe('generate');
+      expect(ends[0].details.agentsCreated).toBe(1);
+      expect(ends[0].details.agentsFailed).toBe(0);
+      expect(ends[0].details.postsCreated).toBe(1);
+      expect(ends[0].details.commentsBaked).toBe(1);
+      expect(typeof ends[0].details.totalDurationMs).toBe('number');
+
+      // flushStats is called, and the last logEvent invocation ordinal
+      // precedes the flushStats invocation ordinal — i.e. flushStats runs
+      // AFTER session_end is logged.
+      expect(eventLoggerMocks.flushStats).toHaveBeenCalledTimes(1);
+      const lastLogEventOrder =
+        eventLoggerMocks.logEvent.mock.invocationCallOrder[
+          eventLoggerMocks.logEvent.mock.invocationCallOrder.length - 1
+        ]!;
+      const flushOrder = eventLoggerMocks.flushStats.mock.invocationCallOrder[0]!;
+      expect(flushOrder).toBeGreaterThan(lastLogEventOrder);
+    });
+
+    it('emits an agent_drafted success event per successful agent', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
+      llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind with enough words');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(2, 3);
+
+      const drafted = eventsOfType<{
+        agentname: string;
+        persona: string;
+        success: boolean;
+        details: { voiceProfileId: string; postsDrafted: number; bioPreview: string };
+      }>('agent_drafted');
+
+      const successes = drafted.filter((e) => e.success);
+      expect(successes).toHaveLength(2);
+
+      const names = successes.map((e) => e.agentname).sort();
+      expect(names).toEqual(['alpha', 'beta']);
+
+      for (const e of successes) {
+        expect(e.persona).toBe('test-persona');
+        expect(e.details.voiceProfileId).toBe('normie_cam');
+        expect(e.details.postsDrafted).toBe(3);
+        expect(typeof e.details.bioPreview).toBe('string');
+        expect(e.details.bioPreview.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('emits a post_drafted event per post with postId, caption, aspectRatio', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateAgentName.mockResolvedValue('alpha');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(1, 2);
+
+      const posts = eventsOfType<{
+        agentname: string;
+        persona: string;
+        success: boolean;
+        details: { postId: string; caption: string; aspectRatio: string };
+      }>('post_drafted');
+
+      expect(posts).toHaveLength(2);
+      const postIds = posts.map((e) => e.details.postId).sort();
+      expect(postIds).toEqual(['post-001', 'post-002']);
+
+      for (const e of posts) {
+        expect(e.agentname).toBe('alpha');
+        expect(e.persona).toBe('test-persona');
+        expect(e.success).toBe(true);
+        expect(typeof e.details.caption).toBe('string');
+        expect(e.details.caption.length).toBeGreaterThan(0);
+        expect(e.details.aspectRatio).toBe('square');
+      }
+    });
+
+    it('emits a comment_baked success event per agent with details.count >= 1', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
+      llmMocks.generateAgentName.mockResolvedValueOnce('alpha').mockResolvedValueOnce('beta');
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+      llmMocks.generateComment.mockResolvedValue('a sharp little reply');
+
+      await generate(2, 1);
+
+      const bakes = eventsOfType<{
+        agentname: string;
+        persona: string;
+        success: boolean;
+        details: { count: number };
+      }>('comment_baked');
+
+      const successes = bakes.filter((e) => e.success);
+      expect(successes).toHaveLength(2);
+
+      const names = successes.map((e) => e.agentname).sort();
+      expect(names).toEqual(['alpha', 'beta']);
+
+      for (const e of successes) {
+        expect(e.persona).toBe('test-persona');
+        expect(e.details.count).toBeGreaterThanOrEqual(1);
+      }
+    });
+
+    it.todo(
+      'emits a reply_baked event when reply samples are non-empty (requires mocking @/lib/comment-tree.fetchCommentTree + feed posts with comment_count>=1; current test setup does not exercise reply bake)',
+    );
   });
 });

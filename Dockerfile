@@ -6,12 +6,6 @@
 #              as a build gate so a broken commit can never produce an image.
 #   runtime  — clean image with only prod deps + src/. Smaller surface area
 #              than a single-stage build, and tests/scripts never ship.
-#
-# The MCP server is installed globally in BOTH stages because the runtime
-# spawns it on every post — pinning the version + pre-installing avoids the
-# ~10s `npx -y @instamolt/mcp@0.1.0` cold-start that would otherwise happen
-# 1,000+ times per `generate` run. Bump the version here in lockstep with
-# `MCP_PACKAGE` in src/config.ts.
 
 # ---------- Stage 1: builder ----------
 FROM node:22.22.2-slim AS builder
@@ -21,8 +15,8 @@ WORKDIR /app
 # Enable pnpm via corepack (version comes from packageManager in package.json).
 RUN corepack enable
 
-# Pre-install global tooling (MCP + tsx) so the gate steps can run.
-RUN npm install -g @instamolt/mcp@0.1.0 tsx
+# Pre-install tsx globally so the gate steps can run.
+RUN npm install -g tsx
 
 # Install with the lockfile for reproducibility. Copying lock + manifest in
 # their own layer means dep changes are the only thing that bust the cache.
@@ -44,10 +38,10 @@ FROM node:22.22.2-slim AS runtime
 
 WORKDIR /app
 
-# Same global tooling as the builder so the runtime can spawn MCP and run
+# Same global tooling as the builder so the runtime can run
 # `tsx src/index.ts ...` as the entrypoint.
 RUN corepack enable
-RUN npm install -g @instamolt/mcp@0.1.0 tsx
+RUN npm install -g tsx
 
 # Install ONLY production deps in the runtime stage. tests/, scripts/,
 # vitest, biome, and friends never ship.

@@ -40,21 +40,6 @@ const llmMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/services/llm', () => llmMocks);
 
-// ---------------- mcp mock ----------------
-
-const mcpMocks = vi.hoisted(() => ({
-  generatePost:
-    vi.fn<
-      () => Promise<{
-        success: boolean;
-        postId?: string;
-        imageUrl?: string;
-        error?: string;
-      }>
-    >(),
-}));
-vi.mock('@/services/instamolt-mcp', () => mcpMocks);
-
 // ---------------- instamolt-api mock ----------------
 // Constructor mock: must be a `function` not an arrow so `new` works.
 
@@ -81,6 +66,12 @@ const apiMocks = vi.hoisted(() => ({
     >(),
   updateProfile: vi.fn<(description: string) => Promise<void>>(),
   followAgent: vi.fn<(agentname: string) => Promise<void>>(),
+  generatePost:
+    vi.fn<
+      () => Promise<{
+        post: { id: string; image_url: string };
+      }>
+    >(),
 }));
 
 vi.mock('@/services/instamolt-api', () => ({
@@ -90,6 +81,7 @@ vi.mock('@/services/instamolt-api', () => ({
       completeChallenge: apiMocks.completeChallenge,
       updateProfile: apiMocks.updateProfile,
       followAgent: apiMocks.followAgent,
+      generatePost: apiMocks.generatePost,
     };
   }),
 }));
@@ -157,6 +149,7 @@ function makePersona(id: string): Persona {
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -216,7 +209,7 @@ describe('publish', () => {
     apiMocks.updateProfile.mockReset();
     apiMocks.followAgent.mockReset();
     llmMocks.answerChallenge.mockReset();
-    mcpMocks.generatePost.mockReset();
+    apiMocks.generatePost.mockReset();
     personaMocks.loadPersonas.mockReset();
 
     personaMocks.loadPersonas.mockResolvedValue(
@@ -316,6 +309,50 @@ describe('publish', () => {
     expect(onDisk.apiKey).toBeUndefined();
   });
 
+  it('Phase A: one agent failing to register does not abort the others (concurrent worker pool)', async () => {
+    // Phase A runs agents through `mapWithConcurrency(config.registerConcurrency)`.
+    // Each worker wraps its per-agent body in try/catch, so one
+    // completeChallenge rejection should increment the error counter and
+    // leave the other agents registered. This guards the batch-level
+    // error-isolation contract that was introduced with the refactor from
+    // the sequential for-loop.
+    primeAgent('alpha');
+    primeAgent('beta');
+    primeAgent('gamma');
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    // Issue a request_id keyed by agentname so completeChallenge can look up
+    // which agent it's answering for. With worker-pool concurrency we can't
+    // rely on call ordering to match pairs.
+    apiMocks.startChallenge.mockImplementation(async (agentname: string, _desc: string) => ({
+      request_id: `req-${agentname}`,
+      challenge: 'q?',
+    }));
+    // Beta's completeChallenge rejects; alpha and gamma succeed with distinct
+    // keys so we can verify each agent's file separately.
+    apiMocks.completeChallenge.mockImplementation(async (requestId: string, _answer: string) => {
+      const agentname = requestId.replace(/^req-/, '');
+      if (agentname === 'beta') {
+        throw new Error('synthetic registration failure for beta');
+      }
+      return {
+        success: true,
+        agent: { agentname, api_key: `key-${agentname}`, is_verified: false },
+      };
+    });
+
+    await publish({ skipFollowGraph: true });
+
+    const alphaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+    const betaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('beta'))!);
+    const gammaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('gamma'))!);
+
+    // Alpha and gamma land their apiKey; beta does NOT.
+    expect(alphaOnDisk.apiKey).toBe('key-alpha');
+    expect(gammaOnDisk.apiKey).toBe('key-gamma');
+    expect(betaOnDisk.apiKey).toBeUndefined();
+  });
+
   it('treats updateProfile failure as best-effort (apiKey still persisted)', async () => {
     primeAgent('alpha');
     primeIndex(['alpha']);
@@ -333,7 +370,7 @@ describe('publish', () => {
     expect(onDisk.apiKey).toBe('key-alpha');
   });
 
-  it('publishes unpublished posts via the MCP generatePost helper', async () => {
+  it('publishes unpublished posts via the platform generatePost endpoint', async () => {
     primeAgent('alpha', { apiKey: 'key-alpha' });
     primeIndex(['alpha']);
     fsState.dirEntries.set(join('./output/agents', 'alpha'), ['agent.json', 'post-001.json']);
@@ -347,15 +384,13 @@ describe('publish', () => {
       }),
     );
 
-    mcpMocks.generatePost.mockResolvedValue({
-      success: true,
-      postId: 'server-post-1',
-      imageUrl: 'https://cdn/1.jpg',
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'server-post-1', image_url: 'https://cdn/1.jpg' },
     });
 
     await publish({ skipFollowGraph: true });
 
-    expect(mcpMocks.generatePost).toHaveBeenCalledTimes(1);
+    expect(apiMocks.generatePost).toHaveBeenCalledTimes(1);
     const updated = JSON.parse(
       fsState.files.get(join('./output/agents', 'alpha', 'post-001.json'))!,
     );
@@ -382,7 +417,7 @@ describe('publish', () => {
 
     await publish({ skipFollowGraph: true });
 
-    expect(mcpMocks.generatePost).not.toHaveBeenCalled();
+    expect(apiMocks.generatePost).not.toHaveBeenCalled();
   });
 
   it('runs Phase C follow-graph bootstrap when ≥2 registered agents exist', async () => {

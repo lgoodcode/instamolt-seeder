@@ -17,7 +17,7 @@ reviews:
            - Uniform behavior across agents not gated on a per-persona probability
            - Voice profiles generated at runtime or written to disk (they are compile-time constants in src/voice-profiles/catalog.ts)
            - Persona `.ts` files added under src/personas/ (that directory is loader + distribution only; persona data lives in output/personas/*.json)
-           - MCP version changed in one place without matching the other two (src/config.ts `mcpArgs` + both Dockerfile stages must agree)
+           - The retired `@instamolt/mcp` stdio shim being re-introduced (image post creation must go through `InstaMoltClient.generatePost` / `POST /posts/generate`, not a subprocess)
            - Cross-directory import using `../../src/...` instead of the `@/*` path alias
            - A change under src/ that touches commands, state shape, pipeline semantics, or behavioral loops without a matching update to docs/BLUEPRINT.md
         4. A secret or credential leak not caught by gitleaks (API keys must be truncated if logged at all)
@@ -52,8 +52,7 @@ reviews:
         Service module conventions:
         - `@/services/llm.ts` (Gemini wrapper) uses a hand-rolled 3-retry exponential backoff. Do not suggest replacing it with an off-the-shelf retry library unless there's a correctness bug.
         - `@/services/instamolt-api.ts` handles 429 + `Retry-After` explicitly. If you see a new endpoint added, verify it handles the same 429 flow — but do NOT flag that it "should use axios" or similar library swaps.
-        - `@/services/instamolt-mcp.ts` has TWO call shapes: `generatePost()` is a one-shot that spawns a fresh `npx -y @instamolt/mcp@<pinned>` subprocess per call (used by `publish`, correct), and `AgentMcpClient` caches an MCP stdio client per agent API key for reuse. Do NOT suggest collapsing these — the one-shot path is simpler for single-call sites, the class is for same-agent multi-call sites.
-        - The MCP version is pinned in THREE places and must agree: `src/config.ts` `mcpArgs`, the `builder` stage of the Dockerfile, and the `runtime` stage of the Dockerfile. If a PR bumps one, verify the other two match.
+        - Image post creation goes through `InstaMoltClient.generatePost` (`POST /posts/generate`). The historical `@instamolt/mcp` stdio shim was removed from the seeder — flag any PR that re-introduces an MCP subprocess path or re-adds `@modelcontextprotocol/sdk` / `@instamolt/mcp` to dependencies.
         - Service modules are the one place where `console.warn` / `console.error` (or the `log()` facade from `@/lib/logger`) is fine for operational alerts (rate limits, retries). Do NOT require these to route through `@/lib/ui` — command files use `ui.*`, service files use `log()` / `console.warn`.
         - API keys in log lines must be truncated (never full-length). Flag any new log line that interpolates a full key.
     - path: 'src/lib/**/*.ts'
@@ -72,13 +71,13 @@ reviews:
         `src/personas/` holds loader (`index.ts`) and distribution logic (`registry.ts`) ONLY. Persona DATA lives at `output/personas/{id}.json` (runtime-generated via Gemini). Flag any PR that adds a persona `.ts` file to this directory — personas are runtime data, not source code. `loadPersonas()` auto-seeds via Gemini when the directory is empty; `getAgentAssignments()` distributes agents across persona × voice profile with coverage guarantees (see BLUEPRINT.md §5.5).
     - path: 'src/config.ts'
       instructions: |
-        When this file adds new `process.env.*` reads, verify `.env.example` is updated in the same PR. `GEMINI_API_KEY` is required (lazy getter — throws on first access, not at import, so tests that don't touch Gemini can still import config); `GEMINI_MODEL`, `INSTAMOLT_API_URL`, and `INSTAMOLT_MEDIA_URL` have defaults and are optional. The pinned MCP version in `mcpArgs` must match both Dockerfile stages (see `src/services/instamolt-mcp.ts` instructions). Do not flag the hand-tuned delay constants (`registrationDelay`, `postDelay`, `agentDelay`) as "magic numbers" — they are the canonical home for cadence tuning and their values are pinned to specific server-side rate limits documented inline. The per-agent comment cooldown (`COMMENT_COOLDOWN_MS`) lives in `src/commands/engage.ts`, not here.
+        When this file adds new `process.env.*` reads, verify `.env.example` is updated in the same PR. `GEMINI_API_KEY` is required (lazy getter — throws on first access, not at import, so tests that don't touch Gemini can still import config); `GEMINI_MODEL`, `INSTAMOLT_API_URL`, and `INSTAMOLT_MEDIA_URL` have defaults and are optional. Do not flag the hand-tuned delay constants (`registrationDelay`, `postDelay`, `agentDelay`) as "magic numbers" — they are the canonical home for cadence tuning and their values are pinned to specific server-side rate limits documented inline. The per-agent comment cooldown (`COMMENT_COOLDOWN_MS`) lives in `src/commands/engage.ts`, not here.
     - path: 'docs/BLUEPRINT.md'
       instructions: |
         BLUEPRINT.md is the seeder's living source of truth. Verify that any change under `src/` in the same PR which touches commands, state shape, pipeline semantics, persona schema, external integrations, or behavioral loops has a matching update here. If a `src/` change lands without a corresponding BLUEPRINT.md update, flag it in the walkthrough summary — this is the only "missing docs" flag worth posting. Do NOT touch `docs/CODEX.md` (that's the upstream platform blueprint, updated only from the platform repo).
     - path: 'Dockerfile'
       instructions: |
-        Multi-stage build: `builder` runs `typecheck` + `biome check` + `vitest run` as gates using `pnpm install --frozen-lockfile` against `pnpm-lock.yaml`; `runtime` installs prod-only deps (`--prod`) and copies only `tsconfig.json` + `src/`. Both stages pre-install `@instamolt/mcp@<pinned> tsx` globally via `corepack enable` + pnpm to avoid the ~10s `npx` cold start per `generate_post` call. The pinned MCP version MUST match `src/config.ts` `mcpArgs` — if one bumps, the other two must bump in the same PR. Do NOT suggest moving to a single-stage build (tests/dev deps/biome would ship in the runtime image).
+        Multi-stage build: `builder` runs `typecheck` + `biome check` + `vitest run` as gates using `pnpm install --frozen-lockfile` against `pnpm-lock.yaml`; `runtime` installs prod-only deps (`--prod`) and copies only `tsconfig.json` + `src/`. Both stages pre-install `tsx` globally so the CLI entrypoint can boot without an npm cold start. Do NOT suggest moving to a single-stage build (tests/dev deps/biome would ship in the runtime image). Flag any PR that re-adds a global install of `@instamolt/mcp` here — that subprocess path was retired in favor of direct `POST /posts/generate` REST calls.
     - path: 'tests/**/*.test.ts'
       instructions: |
         Test files have an extremely high bar for inline comments. Only flag:
@@ -86,7 +85,7 @@ reviews:
         2. Tests that assert the wrong behavior (will fail on correct code)
         3. Security issues in test fixtures (real credentials, real URLs with tokens)
         4. Tests placed outside `tests/` (e.g., in `__tests__/` or next to source) — the canonical layout is `tests/` mirroring `src/` with the `@/*` path alias
-        5. Tests that hit real services (real Gemini, real InstaMolt API, real MCP subprocess, real filesystem) instead of mocks
+        5. Tests that hit real services (real Gemini, real InstaMolt API, real filesystem) instead of mocks
 
         DO NOT flag:
         - Mock setup style (vi.hoisted vs vi.mock factory vs vi.mocked — all are valid Vitest patterns)
@@ -125,7 +124,7 @@ reviews:
     - Scale length proportionally: 1-file fix = 5 lines total, 20-file change = 25+ lines.
     - Do not repeat information across sections.
   auto_title_instructions: |
-    Format: "<type>: <description>" following Conventional Commits. Type must be one of: feat, fix, refactor, chore, docs, test, perf, build, ci. Subject under 72 chars, imperative mood, no trailing period. Examples: "feat: add repost action gated on persona threshold", "fix: stop engage loop from drifting into repetition", "chore: bump @instamolt/mcp to 0.2.0".
+    Format: "<type>: <description>" following Conventional Commits. Type must be one of: feat, fix, refactor, chore, docs, test, perf, build, ci. Subject under 72 chars, imperative mood, no trailing period. Examples: "feat: add repost action gated on persona threshold", "fix: stop engage loop from drifting into repetition", "chore: bump @clack/prompts to 0.12.0".
 
   # Status & commit
   review_status: true
@@ -283,5 +282,5 @@ code_generation:
           6. `beforeEach(() => vi.clearAllMocks())`
           7. Test file goes under `tests/` in a path that mirrors `src/` (e.g. `src/services/llm.ts` → `tests/services/llm.test.ts`). Never use `__tests__/` directory naming.
           8. File name: `{module-name}.test.ts`
-          9. Mock `@/services/llm` (Gemini), `@/services/instamolt-api` (REST client), `@/services/instamolt-mcp` (MCP subprocess), `node:fs/promises`, and `@/lib/ui` (no-op stub so spinners/progress don't pollute output). Never hit real services or the real filesystem.
+          9. Mock `@/services/llm` (Gemini), `@/services/instamolt-api` (REST client — including `generatePost`), `node:fs/promises`, and `@/lib/ui` (no-op stub so spinners/progress don't pollute output). Never hit real services or the real filesystem.
           10. Test error paths and edge cases, not just happy paths.

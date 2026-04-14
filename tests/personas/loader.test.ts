@@ -107,6 +107,7 @@ function makePersona(id: string, weight = 1) {
     weight,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -283,9 +284,10 @@ describe('seedPersonas', () => {
     // In hybrid mode, the catalog gets installed first (so any top-up only
     // covers the gap above 36) AND it gets passed as the few-shot anchor set.
     llmMocks.generatePersona.mockResolvedValue(makePersona('gen_extra'));
-    // Ask for 37 so exactly one Gemini top-up call fires after the catalog
-    // install. The Gemini call is the one we want to inspect.
-    await seedPersonas(37, 'hybrid');
+    // Ask for catalog size + 1 so exactly one Gemini top-up call fires after
+    // the catalog install. The Gemini call is the one we want to inspect.
+    const catalogSize = (await import('@/personas/catalog')).PERSONA_CATALOG.length;
+    await seedPersonas(catalogSize + 1, 'hybrid');
     expect(llmMocks.generatePersona).toHaveBeenCalledTimes(1);
     const [, catalogArg] = llmMocks.generatePersona.mock.calls[0];
     expect(Array.isArray(catalogArg)).toBe(true);

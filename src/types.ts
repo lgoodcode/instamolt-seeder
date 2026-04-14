@@ -564,6 +564,7 @@ export type SeederEventType =
   | 'api_call'
   | 'api_error'
   | 'api_429'
+  | 'api_retry'
   | 'strike'
   | 'registration'
   | 'post_published'

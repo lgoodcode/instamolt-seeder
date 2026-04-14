@@ -69,6 +69,22 @@ const SIMILARITY_THRESHOLD = 0.5;
 const MAX_POST_ATTEMPTS = 2;
 
 /**
+ * How many same-persona agentnames to splice into the name prompt as an
+ * avoid-list. Small and curated (via `pickDiverseAndRecent`) so Gemini isn't
+ * anchored to the existing lexical space — the platform availability check
+ * below is the real uniqueness guarantee.
+ */
+const AGENTNAME_PROMPT_SAMPLE_K = 8;
+
+/**
+ * Maximum LLM + availability attempts per agentname before we give up on a
+ * slot. In practice the loop should succeed on attempt 0 or 1; the budget is
+ * generous so a string of unlucky collisions against a heavily-populated
+ * platform doesn't crash the whole run.
+ */
+const MAX_AGENTNAME_ATTEMPTS = 8;
+
+/**
  * Generate N agents with M posts each.
  * Writes everything to output/ as JSON files.
  *
@@ -147,12 +163,61 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
     const stepsPerAgent = 2 + postsPerAgent;
     const bar = ui.progress(toCreate * stepsPerAgent, 'preparing...');
 
+    // Unauthenticated probe client for `isAgentnameAvailable`. The live
+    // availability check is the real uniqueness guarantee — the on-disk
+    // existing-names set only covers agents this working copy has touched,
+    // not agents sitting in the platform's database from prior seed runs.
+    const probeClient = new InstaMoltClient();
+    const localTaken = new Set(existingNames);
+
     for (let i = 0; i < specsToCreate.length; i++) {
       const spec = specsToCreate[i];
       try {
         // --- Identity ---
-        bar.tick(`naming agent ${i + 1}/${toCreate}`);
-        const agentname = await generateAgentName(persona, existingNames);
+        // Bounded retry loop: generate → local dedup → platform availability
+        // check. Retries with varied prompting (see AGENTNAME_STYLE_CUES in
+        // src/services/llm.ts) until a fresh name clears both gates or the
+        // attempt budget is exhausted.
+        const rejectedThisRun: string[] = [];
+        let agentname: string | undefined;
+        for (let attempt = 0; attempt < MAX_AGENTNAME_ATTEMPTS; attempt++) {
+          bar.tick(`naming agent ${i + 1}/${toCreate}${attempt > 0 ? ` (retry ${attempt})` : ''}`);
+
+          const avoidSample = pickDiverseAndRecent(
+            existingNames,
+            (n) => n,
+            AGENTNAME_PROMPT_SAMPLE_K,
+          );
+          const candidate = await generateAgentName(persona, avoidSample, rejectedThisRun, attempt);
+
+          if (!candidate || candidate.length < 3) {
+            rejectedThisRun.push(candidate || '<empty>');
+            continue;
+          }
+          if (localTaken.has(candidate)) {
+            rejectedThisRun.push(candidate);
+            continue;
+          }
+
+          const available = await probeClient.isAgentnameAvailable(candidate);
+          if (!available) {
+            rejectedThisRun.push(candidate);
+            // Remember the platform's answer so we don't re-query the same
+            // taken name if Gemini regenerates it later this run.
+            localTaken.add(candidate);
+            continue;
+          }
+
+          agentname = candidate;
+          break;
+        }
+
+        if (!agentname) {
+          throw new Error(
+            `could not generate a unique agentname for persona=${persona.id} after ${MAX_AGENTNAME_ATTEMPTS} attempts (rejected: ${rejectedThisRun.join(', ')})`,
+          );
+        }
+
         bar.tick(`writing bio for @${agentname}`);
 
         // Pre-curate the avoid list with `pickDiverseAndRecent` over the
@@ -264,6 +329,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 
         allAgents.push(agent);
         existingNames.push(agentname);
+        localTaken.add(agentname);
         created++;
         log('success', `@${agentname} [${spec.voiceProfile.id}] — ${bio.slice(0, 60)}...`);
         logEvent({

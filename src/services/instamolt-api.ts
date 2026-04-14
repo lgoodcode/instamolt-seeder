@@ -122,15 +122,68 @@ export class InstaMoltClient {
       body: body ? JSON.stringify(body) : undefined,
     };
 
-    // Wrap network-level failures so the call site sees a typed error with
-    // method/path context rather than a raw TypeError("fetch failed"). status
-    // 0 is the convention for "request never reached the server."
+    // Transient-failure retry loop. Covers fetch rejection (status 0 —
+    // ECONNRESET, connection refused, Next.js dev/Turbopack stall) and
+    // 502/503/504 gateway statuses. 429 has its own dedicated retry branch
+    // below; 4xx propagate immediately so validation/auth/moderation errors
+    // surface without delay. Full jitter on the backoff because 10–25
+    // concurrent workers would otherwise resynchronize on the next wave.
     let res: Response;
-    try {
-      res = await fetch(url, init);
-    } catch (err) {
-      throw new InstaMoltApiError(method, path, 0, `network: ${String(err)}`);
+    let lastNetworkErr: unknown;
+    const maxAttempts = config.retryMaxAttempts;
+    let attempt = 0;
+    while (true) {
+      let networkErr: unknown;
+      let fetched: Response | undefined;
+      try {
+        fetched = await fetch(url, init);
+      } catch (err) {
+        networkErr = err;
+      }
+      const transientStatus =
+        fetched !== undefined &&
+        (fetched.status === 502 || fetched.status === 503 || fetched.status === 504);
+      const isTransient = networkErr !== undefined || transientStatus;
+      if (isTransient && attempt < maxAttempts - 1) {
+        const cap = Math.min(config.retryBaseMs * 2 ** attempt, config.retryMaxDelayMs);
+        const delayMs = Math.floor(Math.random() * cap);
+        logEvent({
+          eventType: 'api_retry',
+          success: false,
+          error: networkErr
+            ? `network on ${method} ${path}: ${String(networkErr)}`
+            : `HTTP ${fetched?.status} on ${method} ${path}`,
+          details: {
+            httpStatus: fetched?.status ?? 0,
+            attempt: attempt + 1,
+            maxAttempts,
+            delayMs,
+            requestContext: { method, path },
+          },
+        });
+        // Drain the body on transient HTTP errors so the socket can be
+        // returned to the keep-alive pool instead of lingering.
+        if (fetched) await fetched.text().catch(() => '');
+        await new Promise((r) => setTimeout(r, delayMs));
+        attempt++;
+        lastNetworkErr = networkErr;
+        continue;
+      }
+      if (networkErr !== undefined) {
+        throw new InstaMoltApiError(
+          method,
+          path,
+          0,
+          `network after ${attempt + 1} attempt(s): ${String(networkErr)}`,
+        );
+      }
+      // fetched is defined here because networkErr is undefined.
+      res = fetched as Response;
+      break;
     }
+    // Silence unused-variable lint — lastNetworkErr is read implicitly via
+    // the thrown message above when the final attempt is a network failure.
+    void lastNetworkErr;
 
     if (res.status === 429) {
       const parsed = parseInt(res.headers.get('Retry-After') ?? '60', 10);
@@ -185,6 +238,31 @@ export class InstaMoltClient {
 
   async startChallenge(agentname: string, description: string): Promise<ChallengeResponse> {
     return this.request('POST', '/agents/register', { agentname, description }, false);
+  }
+
+  /**
+   * Cheap, unauthenticated availability probe for an agentname. Hits
+   * `GET /agents/{agentname}` (openapi.json §`getAgentProfile`) and maps:
+   *   - 200 → agent exists → **taken** → `false`
+   *   - 404 → agent does not exist → **available** → `true`
+   *   - anything else → propagate the {@link InstaMoltApiError}
+   *
+   * Used by the generate command to validate candidate agentnames against the
+   * live platform before writing them to disk, so a fresh seed run against a
+   * pre-existing population doesn't produce a batch of 409 AGENTNAME_EXISTS
+   * failures at publish time.
+   *
+   * `encodeURIComponent` guards against stray characters slipping past the
+   * `[^a-zA-Z0-9]` sanitizer in {@link generateAgentName}.
+   */
+  async isAgentnameAvailable(agentname: string): Promise<boolean> {
+    try {
+      await this.request('GET', `/agents/${encodeURIComponent(agentname)}`, undefined, false);
+      return false;
+    } catch (err) {
+      if (err instanceof InstaMoltApiError && err.status === 404) return true;
+      throw err;
+    }
   }
 
   async completeChallenge(requestId: string, answer: string): Promise<RegistrationResponse> {

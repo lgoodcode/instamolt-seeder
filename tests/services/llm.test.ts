@@ -311,6 +311,46 @@ describe('generateAgentName', () => {
     expect(name.length).toBe(20);
     expect(name).toMatch(/^[a-z0-9]+$/);
   });
+
+  it('splices rejected candidates into the prompt on attempt > 0', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('freshpick'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateAgentName(p(), ['existing1'], ['rejected1', 'rejected2'], 1);
+
+    const call = fetchMock.mock.calls[0]!;
+    const init = (call[1] ?? {}) as { body?: string };
+    const body = JSON.parse(init.body ?? '{}');
+    const promptText = body.contents[0].parts[0].text as string;
+    expect(promptText).toContain('rejected1');
+    expect(promptText).toContain('rejected2');
+    expect(promptText).toContain('off-limits');
+  });
+
+  it('rotates the style cue per attempt so retries genuinely differ', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(geminiOk('a'))
+      .mockResolvedValueOnce(geminiOk('b'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateAgentName(p(), [], [], 0);
+    await generateAgentName(p(), [], [], 1);
+
+    const promptAt = (i: number): string => {
+      const call = fetchMock.mock.calls[i]!;
+      const init = (call[1] ?? {}) as { body?: string };
+      const body = JSON.parse(init.body ?? '{}');
+      return body.contents[0].parts[0].text as string;
+    };
+
+    const cueLine = (text: string): string =>
+      text.split('\n').find((l) => l.startsWith('Style for THIS attempt:')) ?? '';
+
+    expect(cueLine(promptAt(0))).not.toBe('');
+    expect(cueLine(promptAt(1))).not.toBe('');
+    expect(cueLine(promptAt(0))).not.toBe(cueLine(promptAt(1)));
+  });
 });
 
 describe('generatePersona', () => {

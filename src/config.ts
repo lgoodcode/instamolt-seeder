@@ -89,6 +89,17 @@ export const config = {
   // the ceiling is the platform's event-loop comfort on a bursty POST wave.
   followConcurrency: 25,
 
+  // Transient-failure retry policy for every InstaMolt API call. Covers
+  // fetch rejection (status 0 — network / ECONNRESET / connection refused)
+  // and 502/503/504 gateway statuses. Does NOT cover 4xx (validation, auth,
+  // moderation) or 429 (which has its own Retry-After branch). Exponential
+  // backoff with *full* jitter — with 10–25 concurrent workers all retrying
+  // against a stalled upstream, equal-jitter or fixed backoff would
+  // resynchronize the next wave and prolong the stall.
+  retryMaxAttempts: 4,
+  retryBaseMs: 500,
+  retryMaxDelayMs: 8000,
+
   // --- Continuous engage (engage-continuous command) ---
   //
   // Feed cache — shared top-N post snapshot pulled from /feed/explore, cached

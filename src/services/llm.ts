@@ -117,22 +117,62 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
 
 // --- Agent name generation ---
 
+/**
+ * Rotating word-shape cues injected into the prompt. Each attempt picks a
+ * different style so retries actually explore fresh lexical space instead of
+ * producing near-synonyms of the first candidate. The set is intentionally
+ * heterogeneous — if Gemini gets stuck on one shape, the next attempt's cue
+ * pulls it sideways into a different one.
+ */
+const AGENTNAME_STYLE_CUES = [
+  'compound noun — two unrelated concepts mashed together (e.g. "glitchfern", "warmtaxonomy")',
+  'adjective + noun, no space (e.g. "feralmoss", "softspecimen")',
+  'verb + noun, no space (e.g. "rotbrain", "nullthought")',
+  'single invented word that sounds like a real one (e.g. "mossalyx", "dreamcore")',
+  'noun + short number suffix, used sparingly (e.g. "rotbrain47", "dreamcore99")',
+  'onomatopoeic or phonetic mash-up (e.g. "crzmoth", "buzzpalm")',
+  'short abstract noun, 5-8 characters (e.g. "cozybyte", "dimvein")',
+  'concrete object + mood, smooshed together (e.g. "velvetsaw", "ironpetal")',
+];
+
 export async function generateAgentName(
   persona: Persona,
   existingNames: string[],
+  rejectedThisRun: string[] = [],
+  attempt = 0,
 ): Promise<string> {
+  // Rotate the style cue deterministically by attempt, then pick a fresh
+  // vibe-inspiration token each call so the prompt isn't identical on retry.
+  const styleCue = AGENTNAME_STYLE_CUES[attempt % AGENTNAME_STYLE_CUES.length];
+  const vibePool = persona.namePatterns ?? [];
+  const vibeSample =
+    vibePool.length === 0 ? '' : vibePool[Math.floor(Math.random() * vibePool.length)];
+
+  const avoidBlock =
+    existingNames.length === 0
+      ? ''
+      : `
+Do NOT reuse any of these existing handles:
+${existingNames.map((n) => `- ${n}`).join('\n')}`;
+
+  const rejectedBlock =
+    rejectedThisRun.length === 0
+      ? ''
+      : `
+These candidates were already generated for this agent and are off-limits — your next suggestion must NOT resemble them lexically or thematically:
+${rejectedThisRun.map((n) => `- ${n}`).join('\n')}`;
+
   const prompt = `Generate a unique social media username for an AI agent.
 
-Personality: ${persona.personality}
-Vibe inspiration: ${persona.namePatterns.join(', ')}
+Personality: ${persona.personality}${vibeSample ? `\nVibe inspiration: ${vibeSample}` : ''}
+
+Style for THIS attempt: ${styleCue}
 
 Rules:
 - 3-20 characters, only lowercase letters and numbers. NO underscores, NO hyphens, NO special characters.
-- Should feel like a real social media handle -- like something you'd see on Instagram or TikTok
-- Examples of GOOD names: glitchfern, warmtaxonomy, softspecimen, rotbrain47, nullthought, feralmoss, dreamcore99, cozybyte
-- Examples of BAD names: gentle_biologist, field_study_ai, soft_void_process (too many underscores, too AI-sounding)
-- Must NOT be any of these: ${existingNames.join(', ')}
-- Be creative. Mash words together. Use numbers sparingly.
+- Should feel like a real social media handle -- like something you'd see on Instagram or TikTok.
+- Avoid AI-sounding patterns like "_ai", "_bot", "gpt", "neural", or underscored phrases.
+- Be creative. Mash words together. Numbers are fine but not required.${avoidBlock}${rejectedBlock}
 
 Reply with ONLY the username, nothing else.`;
 

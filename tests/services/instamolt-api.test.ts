@@ -414,6 +414,52 @@ describe('InstaMoltClient.followAgent', () => {
   });
 });
 
+describe('InstaMoltClient.isAgentnameAvailable', () => {
+  it('returns true on 404 (agent does not exist)', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(404, 'not found'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    const available = await client.isAgentnameAvailable('freshname');
+
+    expect(available).toBe(true);
+    expect(getUrl(fetchMock)).toBe(`${BASE}/agents/freshname`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('GET');
+    expect(init.headers?.Authorization).toBeUndefined();
+  });
+
+  it('returns false on 200 (agent exists)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson({ agent: { agentname: 'takenname' }, posts: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    const available = await client.isAgentnameAvailable('takenname');
+
+    expect(available).toBe(false);
+  });
+
+  it('propagates InstaMoltApiError on non-404 errors (e.g. 500)', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(500, 'server down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await expect(client.isAgentnameAvailable('whatever')).rejects.toBeInstanceOf(InstaMoltApiError);
+  });
+
+  it('URL-encodes the agentname to defend against stray characters', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(404, 'not found'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient();
+    await client.isAgentnameAvailable('weird/name');
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/agents/weird%2Fname`);
+  });
+});
+
 describe('InstaMoltClient.getExplore', () => {
   it('hits /feed/explore?limit=20 by default', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(okJson({ posts: [], has_more: false }));
@@ -476,12 +522,103 @@ describe('InstaMoltClient error paths', () => {
     await expect(new InstaMoltClient().getExplore()).rejects.toThrow(/server error/);
   });
 
-  it('propagates a network error from fetch', async () => {
-    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('ECONNREFUSED'));
+  it('propagates a network error from fetch after exhausting retries', async () => {
+    // Mock Math.random → 0 so the full-jitter backoff collapses to 0ms and
+    // the retry loop completes synchronously under vitest.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient();
     await expect(client.getExplore()).rejects.toThrow(/ECONNREFUSED/);
+    expect(fetchMock).toHaveBeenCalledTimes(config.retryMaxAttempts);
+  });
+});
+
+// --- Transient-failure retry coverage ----------------------------------
+//
+// `request()` wraps every call in a bounded retry loop covering:
+//   - fetch rejection (status 0 — ECONNRESET, connection refused, dev-server
+//     stall, Turbopack thrash)
+//   - 502 / 503 / 504 gateway statuses
+// Backoff is exponential with FULL jitter. These tests stub `Math.random()`
+// to 0 so delays collapse to 0ms and the loop runs without fake timers.
+//
+// 4xx (other than 429) and 5xx other than 502/503/504 are NOT retried —
+// they propagate immediately so validation / auth / moderation errors
+// surface to the caller without delay.
+describe('InstaMoltClient transient-failure retries', () => {
+  it('retries on fetch rejection and succeeds on attempt 2', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ECONNRESET'))
+      .mockResolvedValueOnce(okJson({ posts: [{ id: 'ok' }], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await new InstaMoltClient().getExplore();
+    expect(result.posts[0]?.id).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries on 503 and succeeds on the next attempt', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errText(503, 'upstream unavailable'))
+      .mockResolvedValueOnce(okJson({ posts: [{ id: 'ok' }], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await new InstaMoltClient().getExplore();
+    expect(result.posts[0]?.id).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries on 502 and on 504', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errText(502, 'bad gateway'))
+      .mockResolvedValueOnce(errText(504, 'gateway timeout'))
+      .mockResolvedValueOnce(okJson({ posts: [], has_more: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new InstaMoltClient().getExplore();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws InstaMoltApiError with the final status after exhausting retries on persistent 503', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetchMock = vi.fn().mockResolvedValue(errText(503, 'still down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new InstaMoltClient().getExplore()).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 503,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(config.retryMaxAttempts);
+  });
+
+  it('does NOT retry on 400 — propagates immediately', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(400, 'bad input'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new InstaMoltClient().getExplore()).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 400,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT retry on 500 — 500 is not in the transient set', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(500, 'server error'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new InstaMoltClient().getExplore()).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 500,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -612,9 +749,12 @@ describe('InstaMoltClient rate-limit bypass header', () => {
 });
 
 describe('InstaMoltClient network + parse failure shapes', () => {
-  it('wraps a fetch TypeError (network-level failure) in InstaMoltApiError with status 0', async () => {
+  it('wraps a fetch TypeError (network-level failure) in InstaMoltApiError with status 0 after exhausting retries', async () => {
+    // Full-jitter backoff collapses to 0ms when Math.random() === 0, so
+    // the retry loop completes synchronously without fake timers.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     const netErr = new TypeError('fetch failed');
-    const fetchMock = vi.fn().mockRejectedValueOnce(netErr);
+    const fetchMock = vi.fn().mockRejectedValue(netErr);
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient();
@@ -623,7 +763,7 @@ describe('InstaMoltClient network + parse failure shapes', () => {
       method: 'GET',
       path: '/feed/explore?limit=20',
       status: 0,
-      body: expect.stringContaining('network:'),
+      body: expect.stringContaining('network'),
     });
   });
 

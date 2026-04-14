@@ -54,7 +54,15 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 const llmMocks = vi.hoisted(() => ({
-  generateAgentName: vi.fn<(persona: unknown, existingNames: string[]) => Promise<string>>(),
+  generateAgentName:
+    vi.fn<
+      (
+        persona: unknown,
+        existingNames: string[],
+        rejectedThisRun?: string[],
+        attempt?: number,
+      ) => Promise<string>
+    >(),
   generateBio: vi.fn<(persona: unknown, existingBios?: string[]) => Promise<string>>(),
   generatePostContent:
     vi.fn<
@@ -142,12 +150,24 @@ vi.mock('@/lib/feed-cache', async () => {
   };
 });
 
-// InstaMoltClient is instantiated in the bake phase to pass into the feed
-// cache loader. The actual client is never called because the cache mock
-// short-circuits the load.
+// InstaMoltClient is instantiated in two places:
+//   1) the agent-name retry loop, which calls `isAgentnameAvailable` against
+//      the live platform before accepting a candidate name;
+//   2) the bake phase, which passes the client into the feed cache loader
+//      (short-circuited here by the `loadFeedCacheStrict` mock).
+// Tests that care about the name-retry path override `isAgentnameAvailable`
+// via `instamoltMocks.isAgentnameAvailable.mockImplementation(...)` before
+// calling `generate`. Default behavior is "always available" so tests that
+// don't care about this path see a single-shot name generation.
+const instamoltMocks = vi.hoisted(() => ({
+  isAgentnameAvailable: vi.fn<(agentname: string) => Promise<boolean>>(),
+}));
+
 vi.mock('@/services/instamolt-api', () => ({
   InstaMoltClient: vi.fn().mockImplementation(function MockClient() {
-    return {};
+    return {
+      isAgentnameAvailable: instamoltMocks.isAgentnameAvailable,
+    };
   }),
 }));
 
@@ -279,6 +299,10 @@ describe('generate', () => {
     fsState.mkdirCalls = [];
     fsState.dirs.clear();
     llmMocks.generateAgentName.mockReset();
+    instamoltMocks.isAgentnameAvailable.mockReset();
+    // Default: every candidate is available. Tests that want to exercise the
+    // retry loop override this per-candidate.
+    instamoltMocks.isAgentnameAvailable.mockResolvedValue(true);
     llmMocks.generateBio.mockReset();
     llmMocks.generatePostContent.mockReset();
     llmMocks.generateComment.mockReset();
@@ -1019,5 +1043,118 @@ describe('generate', () => {
     it.todo(
       'emits a reply_baked event when reply samples are non-empty (requires mocking @/lib/comment-tree.fetchCommentTree + feed posts with comment_count>=1; current test setup does not exercise reply bake)',
     );
+  });
+
+  describe('agentname retry loop', () => {
+    it('retries until the platform availability check clears the candidate', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      // First two candidates are taken on the platform, third clears.
+      // `generate.ts` passes the SAME `rejectedThisRun` array reference into
+      // every call (mutating it between attempts), so reading `.mock.calls`
+      // after the fact shows the final state for every call. Snapshot each
+      // call's rejected-list at invocation time instead.
+      const rejectedSnapshots: string[][] = [];
+      const attemptSnapshots: number[] = [];
+      const names = ['takenone', 'takentwo', 'freshone'];
+      llmMocks.generateAgentName.mockImplementation(
+        async (_persona, _existing, rejected = [], attempt = 0) => {
+          rejectedSnapshots.push([...rejected]);
+          attemptSnapshots.push(attempt);
+          return names[attemptSnapshots.length - 1]!;
+        },
+      );
+      instamoltMocks.isAgentnameAvailable
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+
+      await generate(1, 0);
+
+      expect(llmMocks.generateAgentName).toHaveBeenCalledTimes(3);
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenCalledTimes(3);
+      // Attempt counter is threaded through.
+      expect(attemptSnapshots).toEqual([0, 1, 2]);
+      // Rejected candidates accumulate into each next attempt.
+      expect(rejectedSnapshots[0]).toEqual([]);
+      expect(rejectedSnapshots[1]).toEqual(['takenone']);
+      expect(rejectedSnapshots[2]).toEqual(['takenone', 'takentwo']);
+      // The winning agent gets written to disk.
+      expect(fsState.files.has(join('./output/agents', 'freshone', 'agent.json'))).toBe(true);
+    });
+
+    it('skips the availability probe when the candidate already exists locally', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 2));
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      // Agent 1 → "alpha". Agent 2 → Gemini returns "alpha" again (local
+      // collision, must retry without hitting the platform), then "beta".
+      llmMocks.generateAgentName
+        .mockResolvedValueOnce('alpha')
+        .mockResolvedValueOnce('alpha')
+        .mockResolvedValueOnce('beta');
+
+      await generate(2, 0);
+
+      expect(llmMocks.generateAgentName).toHaveBeenCalledTimes(3);
+      // Only 2 platform probes: one for "alpha" (agent 1, passed), one for
+      // "beta" (agent 2, retry 1, passed). "alpha" on retry 0 of agent 2 is
+      // rejected locally without a probe.
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenCalledTimes(2);
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenNthCalledWith(1, 'alpha');
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenNthCalledWith(2, 'beta');
+    });
+
+    it('logs the agent as failed when the retry budget is exhausted', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      // Every candidate comes back taken on the platform.
+      llmMocks.generateAgentName.mockResolvedValue('alwaystaken');
+      instamoltMocks.isAgentnameAvailable.mockResolvedValue(false);
+
+      await generate(1, 0);
+
+      // Exhausted at MAX_AGENTNAME_ATTEMPTS=8.
+      expect(llmMocks.generateAgentName).toHaveBeenCalledTimes(8);
+      // No agent.json on disk.
+      expect(fsState.files.has(join('./output/agents', 'alwaystaken', 'agent.json'))).toBe(false);
+      // agents.json still written but with zero agents.
+      const index = JSON.parse(fsState.files.get('./output/agents.json')!);
+      expect(index.totalAgents).toBe(0);
+      // An error event was logged for the failed agent.
+      const errorEvents = eventLoggerMocks.logEvent.mock.calls
+        .map((c) => c[0] as { eventType: string; success: boolean; error?: string })
+        .filter((e) => e.eventType === 'agent_drafted' && !e.success);
+      expect(errorEvents.length).toBe(1);
+      expect(errorEvents[0]!.error).toMatch(/could not generate a unique agentname/);
+    });
+
+    it('rejects empty or too-short candidates without hitting the platform', async () => {
+      const p = makePersona('test-persona');
+      personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+      registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+      llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+      llmMocks.generateAgentName
+        .mockResolvedValueOnce('') // empty → rejected pre-probe
+        .mockResolvedValueOnce('ab') // too short → rejected pre-probe
+        .mockResolvedValueOnce('goodname');
+
+      await generate(1, 0);
+
+      expect(llmMocks.generateAgentName).toHaveBeenCalledTimes(3);
+      // Only ONE availability probe (for "goodname"). Empty + 2-char got
+      // rejected locally without touching the platform.
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenCalledTimes(1);
+      expect(instamoltMocks.isAgentnameAvailable).toHaveBeenCalledWith('goodname');
+    });
   });
 });

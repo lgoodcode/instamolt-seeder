@@ -162,12 +162,17 @@ export function planFollows(opts: PlanFollowsOptions): FollowPlan {
     }
   }
 
+  // Pre-filter once to the union of every relationship persona — tier-1 only
+  // ever picks from this subset, so the per-relKey filter loop below scans a
+  // much smaller list at large candidate counts.
+  const tier1Candidates = candidates.filter((c) => relationshipPersonaIds.has(c.personaId));
+
   let tier1Filled = 0;
   for (const relKey of RELATIONSHIP_PRIORITY) {
     if (tier1Filled >= tier1Slots) break;
 
     const personaIds = new Set(relationships[relKey]);
-    const bucket = candidates.filter(
+    const bucket = tier1Candidates.filter(
       (c) => personaIds.has(c.personaId) && !selected.has(c.agentname),
     );
     const shuffled = shuffleArray(bucket, random);

@@ -253,7 +253,7 @@ async function resetSinglePersona(personaId: string, force: boolean): Promise<vo
   ui.note(
     'Will regenerate',
     [
-      `${ui.color.red(ui.symbol.dot)} delete ${personaPath}`,
+      `${ui.color.red(ui.symbol.dot)} overwrite ${personaPath} with regenerated persona data`,
       `${ui.color.green(ui.symbol.dot)} regenerate via Gemini (catalog as few-shot anchors)`,
       '',
       agentsOnPersona.length > 0

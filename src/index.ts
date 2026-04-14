@@ -10,21 +10,37 @@ import * as ui from '@/lib/ui';
 import { GeminiQuotaError } from '@/services/llm';
 
 // Best-effort flush on termination so `stats.json` isn't up to 49 events
-// stale when the process dies. This handler is registered at module-init
-// time, so it runs BEFORE any handlers that commands attach later during
-// their own setup — but Node fires every registered signal listener on the
-// same tick, so the ordering doesn't affect correctness: each handler runs
-// independently and flushStats() is idempotent/best-effort.
-// `flushStats()` is a no-op when the logger was never initialized, so it's
-// safe to register unconditionally.
+// stale when the process dies. Node fires every registered signal listener
+// on the same tick; flushStats() is idempotent and a no-op when the logger
+// was never initialized, so this is safe to register unconditionally.
+//
+// Adding a SIGINT/SIGTERM listener disables Node's default termination, so
+// after flushing we re-emit the signal to self (with our listener removed)
+// when no command-specific handler is installed. Commands that own their
+// own stop flow (e.g. engage --loop) register their own listener, which we
+// detect via listenerCount > 1 and defer to.
+const terminationHandlers: Record<'SIGINT' | 'SIGTERM', () => void> = {
+  SIGINT: () => {},
+  SIGTERM: () => {},
+};
+
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
+  terminationHandlers[sig] = () => {
     try {
       flushStats();
     } catch {
       // Never let a flush failure mask the underlying exit path.
     }
-  });
+
+    if (process.listenerCount(sig) > 1) {
+      return;
+    }
+
+    process.removeListener(sig, terminationHandlers[sig]);
+    process.kill(process.pid, sig);
+  };
+
+  process.on(sig, terminationHandlers[sig]);
 }
 
 const args = process.argv.slice(2);

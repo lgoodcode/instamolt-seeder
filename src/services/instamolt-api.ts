@@ -110,7 +110,10 @@ export class InstaMoltClient {
     }
 
     if (res.status === 429) {
-      const retryAfterSec = parseInt(res.headers.get('Retry-After') ?? '60', 10);
+      const parsed = parseInt(res.headers.get('Retry-After') ?? '60', 10);
+      // Retry-After can be missing, non-numeric, or 0/negative — fall back
+      // to 60s in those cases so we don't busy-loop or schedule with NaN.
+      const retryAfterSec = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
       const retryAfterMs = retryAfterSec * 1000;
       console.warn(`\u23F3 Rate limited on ${path}, waiting ${retryAfterSec}s`);
       // Surface the 429 to the event stream even when the retry succeeds —

@@ -525,13 +525,11 @@ describe('InstaMoltClient Retry-After parsing', () => {
     expect(result.posts[0]?.id).toBe('p-default');
   });
 
-  it('treats an HTTP-date Retry-After value as ~0ms wait (current behavior: parseInt → NaN)', async () => {
-    // Pinning current behavior: the source uses `parseInt(headerVal, 10)`,
-    // so an HTTP-date string like 'Wed, 21 Oct 2026 07:28:00 GMT' yields
-    // NaN → `setTimeout(_, NaN)` which Node normalizes to ~0ms. The retry
-    // therefore fires almost immediately rather than at the intended date.
-    // If the source grows real HTTP-date support, this test should update
-    // in lockstep.
+  it('falls back to the 60s default when Retry-After is non-numeric (HTTP-date)', async () => {
+    // `parseInt('Wed, 21 Oct 2026 07:28:00 GMT', 10)` is NaN, which would
+    // otherwise schedule `setTimeout(_, NaN)` (≈ immediate retry, defeating
+    // backoff). The client guards parseInt with Number.isFinite + > 0 and
+    // falls back to 60s, matching the behavior when the header is absent.
     vi.useFakeTimers();
     const fetchMock = vi
       .fn()
@@ -544,8 +542,10 @@ describe('InstaMoltClient Retry-After parsing', () => {
 
     const client = new InstaMoltClient();
     const promise = client.getExplore();
-    // Flush microtasks + the zero-delay timer.
-    await vi.advanceTimersByTimeAsync(10);
+    // Halfway through the 60s default — retry must NOT have fired yet.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(31_000);
     const result = await promise;
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.posts[0]?.id).toBe('p-httpdate');

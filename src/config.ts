@@ -179,18 +179,20 @@ export const QUOTA_EXHAUSTED_REQUEUE_MS = 30 * 60_000;
 // is America/New_York (Eastern US) — the target audience's clock.
 export const SEEDER_TIMEZONE = process.env.SEEDER_TIMEZONE || 'America/New_York';
 
+// Hoisted at module init — Intl.DateTimeFormat construction is non-trivial
+// and getCurrentHour() is called on every continuous-engage scheduler tick.
+const seederHourFormatter = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  hour12: false,
+  timeZone: SEEDER_TIMEZONE,
+});
+
 /**
  * Get the current hour (0-23) in the configured seeder timezone.
  * Used by the action scheduler to look up activity curve weights.
  */
 export function getCurrentHour(): number {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    hour12: false,
-    timeZone: SEEDER_TIMEZONE,
-  });
-  return Number.parseInt(formatter.format(now), 10);
+  return Number.parseInt(seederHourFormatter.format(new Date()), 10);
 }
 
 // --- Reply behavior ---

@@ -276,17 +276,22 @@ describe('flushStats', () => {
 });
 
 describe('auto-flush after STATS_FLUSH_THRESHOLD events', () => {
-  it('flushes stats.json after 50 events', () => {
+  it('flushes stats.json after 50 events', async () => {
     initEventLogger();
 
     for (let i = 0; i < 49; i++) {
       logEvent({ eventType: 'like', success: true });
     }
     // stats.json should NOT exist yet (49 < 50)
+    await drainWrites();
     expect(fsState.files.has(STATS_PATH)).toBe(false);
 
-    // The 50th event triggers the flush
+    // The 50th event triggers the flush, chained behind the events.jsonl
+    // append via queueStatsFlush — drain twice so the Promise.allSettled
+    // continuation runs after the pending appends settle.
     logEvent({ eventType: 'like', success: true });
+    await drainWrites();
+    await drainWrites();
     expect(fsState.files.has(STATS_PATH)).toBe(true);
 
     const parsed = JSON.parse(fsState.files.get(STATS_PATH)!);

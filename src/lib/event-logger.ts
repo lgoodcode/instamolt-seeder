@@ -50,6 +50,13 @@ function enqueueAppend(path: string, line: string): void {
       // Best-effort: disk full / permissions must not crash a long-running loop.
     });
   writeQueues.set(path, next);
+  // Drop the entry once it settles, but only if no newer append has chained
+  // on top of it. Without this, per-agent activity.jsonl paths accumulate
+  // a Map entry per distinct agentname ever logged — unbounded on a
+  // long-running loop with a rotating agent set.
+  next.finally(() => {
+    if (writeQueues.get(path) === next) writeQueues.delete(path);
+  });
 }
 
 /**
@@ -61,6 +68,23 @@ function enqueueAppend(path: string, line: string): void {
 export async function drainWrites(): Promise<void> {
   const pending = [...writeQueues.values()];
   if (pending.length > 0) await Promise.all(pending);
+}
+
+/**
+ * Schedule a stats.json flush to run after pending events.jsonl / errors.jsonl
+ * appends settle. Prevents stats.json from claiming events that haven't hit
+ * disk yet — a crash between a sync `writeFileSync(stats)` and a pending
+ * `appendFile(events)` would otherwise leave stats.json ahead of the JSONL
+ * logs. Fire-and-forget: the flush itself is sync (`writeFileSync`) so the
+ * gap is only the microtask hop between the appends settling and the sync
+ * write, not a second window of I/O.
+ */
+function queueStatsFlush(): void {
+  const evPrev = writeQueues.get(eventsPath) ?? Promise.resolve();
+  const errPrev = writeQueues.get(errorsPath) ?? Promise.resolve();
+  Promise.allSettled([evPrev, errPrev]).then(() => {
+    flushStats();
+  });
 }
 
 function emptyActionStats(): { success: number; skipped: number; error: number } {
@@ -267,10 +291,14 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     console.log(`${icon} ${pc.dim(event.eventType)} ${agent} ${event.error ?? ''}`);
   }
 
-  // Auto-flush every N events
+  // Auto-flush every N events. Chain the stats write behind the pending
+  // events.jsonl / errors.jsonl appends so stats.json can never claim events
+  // that haven't hit disk yet. SIGINT / end-of-run paths still call
+  // flushStats() directly (sync) — the drainWrites() call at the async exit
+  // points covers ordering there.
   if (eventCount >= STATS_FLUSH_THRESHOLD) {
-    flushStats();
     eventCount = 0;
+    queueStatsFlush();
   }
 }
 

@@ -749,10 +749,13 @@ Append-only structured logging for observability. See §4.7 for the on-disk shap
 - **`logEvent(event)`** — appends a `SeederEvent` line to `events.jsonl`, updates in-memory stats (per-action success/skip/error, per-persona counters, feed refresh running average, growth ticks), auto-flushes `stats.json` every `STATS_FLUSH_THRESHOLD = 50` events.
 - **`logSkippedAction(kind, agentname, persona, reason)`** — convenience wrapper that increments the `skipped` counter for the action kind and logs an event with `{ skipped: true, reason }`.
 - **`logStrike(event)`** — writes a `StrikeEvent` to `strikes.jsonl`, updates moderation stats (`totalStrikes`, `byTier`, `byCategory`, per-persona strikes), and cross-posts to `events.jsonl` via `logEvent`.
-- **`flushStats()`** — writes `stats.json` to disk. Called automatically every 50 events, on SIGINT, and at session end.
+- **`flushStats()`** — writes `stats.json` to disk (sync `writeFileSync`). Called automatically every 50 events (chained behind pending appends via `queueStatsFlush` so stats can't claim events that haven't hit disk yet), on SIGINT/SIGTERM (sync — can't await from a signal handler), and at session end (preceded by `await drainWrites()`).
+- **`drainWrites()`** — awaits all in-flight `appendFile` promises. Async command entry points (`engage`, `engage-continuous`, `generate`, `publish`, `seed-personas`, top-level `main()` catch) call `await drainWrites(); flushStats();` at their natural exit so trailing events land on disk before the process ends. Sync SIGINT handlers cannot drain — any appends still queued when Ctrl-C fires are dropped. Acceptable for best-effort logging.
 - **`updateAgentCounts(registered, active)`** — updates the `agents` counters in the in-memory stats.
 - **`getStats()`** — returns the current in-memory `SeederStats` (read-only).
 - **Verbose mode:** when `verbose` is true (set via `--verbose` on `engage-continuous`), each event is also printed to stdout with colored success/error icons.
+
+**Async write pipeline.** Per-event appends (`events.jsonl`, `errors.jsonl`, `strikes.jsonl`, per-agent `activity.jsonl`) go through a per-file promise-chain queue (`Map<string, Promise<void>>`). Each `enqueueAppend` swaps in a new chained promise synchronously and attaches a `.finally()` that removes the entry once it settles — so the map stays proportional to in-flight writes, not to the total number of distinct agent paths seen over the life of the process. Ordering within a single file is preserved (each link chains off the previous one); ordering between files is not guaranteed. `appendFile` rejections (disk full, permissions) are swallowed so a transient fs failure can't crash the engage loop. `mkdirSync` / `readFileSync` / `writeFileSync` for the logs dir, session resume, and `stats.json` stay sync — they're one-time or low-frequency and must work from sync signal handlers.
 
 ### 6.9 Feed cache — [src/lib/feed-cache.ts](../src/lib/feed-cache.ts)
 

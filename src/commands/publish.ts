@@ -2,7 +2,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/config';
 import { mapWithConcurrency } from '@/lib/concurrency';
-import { flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
+import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
 import { computeAffinityMatrix, planFollows } from '@/lib/follow-algorithm';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
@@ -479,6 +479,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     ]),
   );
 
+  await drainWrites();
   flushStats();
 
   ui.outro(

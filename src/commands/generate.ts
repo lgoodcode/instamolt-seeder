@@ -22,7 +22,7 @@ import {
   readDedupIndex,
   writeDedupIndex,
 } from '@/lib/dedup-index';
-import { flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
+import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
 import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import { maxSimilarity, pickDiverseAndRecent } from '@/lib/similarity';
@@ -461,6 +461,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
       totalDurationMs,
     },
   });
+  await drainWrites();
   flushStats();
 
   ui.outro(ui.color.green(`${ui.symbol.ok} generate done`));

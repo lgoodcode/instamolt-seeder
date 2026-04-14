@@ -5,7 +5,7 @@ import { previewComments } from '@/commands/preview-comments';
 import { publish } from '@/commands/publish';
 import { seedPersonasCommand } from '@/commands/seed-personas';
 import { status } from '@/commands/status';
-import { flushStats } from '@/lib/event-logger';
+import { drainWrites, flushStats } from '@/lib/event-logger';
 import * as ui from '@/lib/ui';
 import { GeminiQuotaError } from '@/services/llm';
 
@@ -234,11 +234,12 @@ ${head('Environment:')}
 `);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   // The SIGINT/SIGTERM handlers above only fire on signals; an unhandled
   // rejection from main() goes straight to process.exit() below and would
   // otherwise drop the in-memory stats this PR is trying to preserve.
   try {
+    await drainWrites();
     flushStats();
   } catch {
     // best-effort only — never let a flush failure mask the underlying error

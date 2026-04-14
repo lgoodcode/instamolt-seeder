@@ -39,7 +39,13 @@ import {
 } from '@/config';
 import { ActionScheduler } from '@/lib/action-scheduler';
 import { dispatchAction, type EngageContext } from '@/lib/engage-actions';
-import { flushStats, initEventLogger, logEvent, updateAgentCounts } from '@/lib/event-logger';
+import {
+  drainWrites,
+  flushStats,
+  initEventLogger,
+  logEvent,
+  updateAgentCounts,
+} from '@/lib/event-logger';
 import {
   createLiveFeedCache,
   evictStale,
@@ -575,6 +581,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         errors: cycleErrors,
       },
     });
+    await drainWrites();
     flushStats();
 
     ui.note(

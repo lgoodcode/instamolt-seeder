@@ -1,6 +1,6 @@
 import { rm } from 'node:fs/promises';
 import { config } from '@/config';
-import { flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
+import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
 import { _resetPersonaCache, PERSONA_CATALOG, type SeedMode, seedPersonas } from '@/personas/index';
@@ -70,6 +70,7 @@ export async function seedPersonasCommand(options: SeedPersonasOptions = {}): Pr
       error: err instanceof Error ? err.message : String(err),
       details: { command: 'seed-personas', mode },
     });
+    await drainWrites();
     flushStats();
     throw err;
   }
@@ -96,6 +97,7 @@ export async function seedPersonasCommand(options: SeedPersonasOptions = {}): Pr
     success: true,
     details: { command: 'seed-personas', mode, installed: created.length },
   });
+  await drainWrites();
   flushStats();
 
   ui.outro(ui.color.green(`${ui.symbol.ok} seed-personas done`));

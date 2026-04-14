@@ -2,6 +2,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
 import {
+  drainWrites,
   flushStats,
   initEventLogger,
   logEvent,
@@ -612,6 +613,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           errors: cycleErrors,
         },
       });
+      await drainWrites();
       flushStats();
 
       if (loopEnabled && !stopRequested) {

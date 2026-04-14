@@ -93,6 +93,7 @@ const eventLoggerMocks = vi.hoisted(() => ({
   logEvent: vi.fn(),
   flushStats: vi.fn(),
   updateAgentCounts: vi.fn(),
+  drainWrites: vi.fn(async () => {}),
 }));
 vi.mock('@/lib/event-logger', () => eventLoggerMocks);
 

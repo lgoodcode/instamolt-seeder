@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pc from 'picocolors';
 import { config } from '@/config';
@@ -35,6 +36,56 @@ let eventCount = 0;
 let verbose = false;
 let stats: SeederStats | undefined;
 let sessionId = '';
+
+// Per-file promise chain. Keeping one chain per path preserves JSONL ordering
+// under concurrent logEvent calls without holding a lock — each enqueue is a
+// synchronous pointer swap; the actual append runs on the microtask queue.
+const writeQueues: Map<string, Promise<void>> = new Map();
+
+function enqueueAppend(path: string, line: string): void {
+  const prev = writeQueues.get(path) ?? Promise.resolve();
+  const next = prev
+    .then(() => appendFile(path, line))
+    .catch(() => {
+      // Best-effort: disk full / permissions must not crash a long-running loop.
+    });
+  writeQueues.set(path, next);
+  // Drop the entry once it settles, but only if no newer append has chained
+  // on top of it. Without this, per-agent activity.jsonl paths accumulate
+  // a Map entry per distinct agentname ever logged — unbounded on a
+  // long-running loop with a rotating agent set.
+  next.finally(() => {
+    if (writeQueues.get(path) === next) writeQueues.delete(path);
+  });
+}
+
+/**
+ * Await all in-flight appends. Async callers should drain before end-of-run
+ * so trailing events hit disk before the process exits. Sync SIGINT handlers
+ * cannot drain — trailing appends are dropped on Ctrl-C, which is acceptable
+ * for best-effort logging.
+ */
+export async function drainWrites(): Promise<void> {
+  const pending = [...writeQueues.values()];
+  if (pending.length > 0) await Promise.all(pending);
+}
+
+/**
+ * Schedule a stats.json flush to run after pending events.jsonl / errors.jsonl
+ * appends settle. Prevents stats.json from claiming events that haven't hit
+ * disk yet — a crash between a sync `writeFileSync(stats)` and a pending
+ * `appendFile(events)` would otherwise leave stats.json ahead of the JSONL
+ * logs. Fire-and-forget: the flush itself is sync (`writeFileSync`) so the
+ * gap is only the microtask hop between the appends settling and the sync
+ * write, not a second window of I/O.
+ */
+function queueStatsFlush(): void {
+  const evPrev = writeQueues.get(eventsPath) ?? Promise.resolve();
+  const errPrev = writeQueues.get(errorsPath) ?? Promise.resolve();
+  Promise.allSettled([evPrev, errPrev]).then(() => {
+    flushStats();
+  });
+}
 
 function emptyActionStats(): { success: number; skipped: number; error: number } {
   return { success: 0, skipped: 0, error: 0 };
@@ -142,14 +193,15 @@ const EVENT_TO_ACTION: Partial<Record<SeederEventType, ActionKind>> = {
  * population-wide `events.jsonl`. Best-effort — never throws.
  */
 function teeToAgent(agentname: string, line: string): void {
+  const agentDir = join(config.agentsDir, agentname);
   try {
-    const agentDir = join(config.agentsDir, agentname);
     mkdirSync(agentDir, { recursive: true });
-    appendFileSync(join(agentDir, 'activity.jsonl'), line);
   } catch {
     // Missing directory or file-system error — don't let a tee failure
     // interrupt the main logging path.
+    return;
   }
+  enqueueAppend(join(agentDir, 'activity.jsonl'), line);
 }
 
 export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): void {
@@ -161,12 +213,7 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     timestamp: new Date().toISOString(),
   };
   const line = `${JSON.stringify(full)}\n`;
-  try {
-    appendFileSync(eventsPath, line);
-  } catch {
-    // Best-effort: a filesystem failure (disk full, permissions) must not
-    // crash a long-running engage-continuous loop. Drop the event silently.
-  }
+  enqueueAppend(eventsPath, line);
 
   // Per-agent tee so operators can watch one agent's live timeline.
   if (event.agentname) teeToAgent(event.agentname, line);
@@ -195,11 +242,7 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
           ? (d.requestContext as SeederErrorEvent['requestContext'])
           : undefined,
     };
-    try {
-      appendFileSync(errorsPath, `${JSON.stringify(errorEvent)}\n`);
-    } catch {
-      // Don't let an errors.jsonl append failure cascade.
-    }
+    enqueueAppend(errorsPath, `${JSON.stringify(errorEvent)}\n`);
   }
 
   // Update in-memory stats
@@ -248,10 +291,14 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     console.log(`${icon} ${pc.dim(event.eventType)} ${agent} ${event.error ?? ''}`);
   }
 
-  // Auto-flush every N events
+  // Auto-flush every N events. Chain the stats write behind the pending
+  // events.jsonl / errors.jsonl appends so stats.json can never claim events
+  // that haven't hit disk yet. SIGINT / end-of-run paths still call
+  // flushStats() directly (sync) — the drainWrites() call at the async exit
+  // points covers ordering there.
   if (eventCount >= STATS_FLUSH_THRESHOLD) {
-    flushStats();
     eventCount = 0;
+    queueStatsFlush();
   }
 }
 
@@ -278,12 +325,7 @@ export function logStrike(event: Omit<StrikeEvent, 'timestamp'>): void {
   if (!initialized || !stats) return;
 
   const full: StrikeEvent = { ...event, timestamp: new Date().toISOString() };
-  try {
-    appendFileSync(strikesPath, `${JSON.stringify(full)}\n`);
-  } catch {
-    // Best-effort: losing a strike row must not crash engage-continuous.
-    // In-memory stats below still update so the session counters stay consistent.
-  }
+  enqueueAppend(strikesPath, `${JSON.stringify(full)}\n`);
 
   // Update moderation stats
   stats.moderation.totalStrikes++;
@@ -348,4 +390,5 @@ export function _resetForTest(): void {
   eventCount = 0;
   verbose = false;
   sessionId = '';
+  writeQueues.clear();
 }

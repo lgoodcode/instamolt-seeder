@@ -9,10 +9,6 @@ const fsState = vi.hoisted(() => ({
 }));
 
 vi.mock('node:fs', () => ({
-  appendFileSync: vi.fn((path: string, data: string) => {
-    const existing = fsState.files.get(path) ?? '';
-    fsState.files.set(path, existing + data);
-  }),
   writeFileSync: vi.fn((path: string, data: string) => {
     fsState.files.set(path, data);
   }),
@@ -27,6 +23,13 @@ vi.mock('node:fs', () => ({
   }),
   mkdirSync: vi.fn((_path: string) => {
     fsState.dirs.add(_path);
+  }),
+}));
+
+vi.mock('node:fs/promises', () => ({
+  appendFile: vi.fn(async (path: string, data: string) => {
+    const existing = fsState.files.get(path) ?? '';
+    fsState.files.set(path, existing + data);
   }),
 }));
 
@@ -49,6 +52,7 @@ vi.mock('picocolors', () => ({
 
 import {
   _resetForTest,
+  drainWrites,
   flushStats,
   getStats,
   initEventLogger,
@@ -66,7 +70,11 @@ const STRIKES_PATH = join(LOGS_DIR, 'strikes.jsonl');
 const STATS_PATH = join(LOGS_DIR, 'stats.json');
 const SESSIONS_DIR = join(LOGS_DIR, 'sessions');
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Flush any still-pending async appends from the previous test before
+  // wiping the in-memory fs — otherwise a microtask from the prior test
+  // can re-populate fsState.files mid-beforeEach.
+  await drainWrites();
   fsState.files.clear();
   fsState.dirs.clear();
   _resetForTest();
@@ -89,9 +97,10 @@ describe('initEventLogger', () => {
 });
 
 describe('logEvent', () => {
-  it('appends a valid JSONL line to events.jsonl', () => {
+  it('appends a valid JSONL line to events.jsonl', async () => {
     initEventLogger();
     logEvent({ eventType: 'like', agentname: 'testbot', persona: 'meme_lord', success: true });
+    await drainWrites();
 
     const content = fsState.files.get(EVENTS_PATH);
     expect(content).toBeDefined();
@@ -177,7 +186,7 @@ describe('logEvent', () => {
 });
 
 describe('logStrike', () => {
-  it('writes to both strikes.jsonl and events.jsonl', () => {
+  it('writes to both strikes.jsonl and events.jsonl', async () => {
     initEventLogger();
     logStrike({
       agentname: 'badbot',
@@ -188,6 +197,7 @@ describe('logStrike', () => {
       action: 'flagged',
       contentPreview: 'some offensive text',
     });
+    await drainWrites();
 
     // strikes.jsonl
     const strikesContent = fsState.files.get(STRIKES_PATH);
@@ -266,17 +276,22 @@ describe('flushStats', () => {
 });
 
 describe('auto-flush after STATS_FLUSH_THRESHOLD events', () => {
-  it('flushes stats.json after 50 events', () => {
+  it('flushes stats.json after 50 events', async () => {
     initEventLogger();
 
     for (let i = 0; i < 49; i++) {
       logEvent({ eventType: 'like', success: true });
     }
     // stats.json should NOT exist yet (49 < 50)
+    await drainWrites();
     expect(fsState.files.has(STATS_PATH)).toBe(false);
 
-    // The 50th event triggers the flush
+    // The 50th event triggers the flush, chained behind the events.jsonl
+    // append via queueStatsFlush — drain twice so the Promise.allSettled
+    // continuation runs after the pending appends settle.
     logEvent({ eventType: 'like', success: true });
+    await drainWrites();
+    await drainWrites();
     expect(fsState.files.has(STATS_PATH)).toBe(true);
 
     const parsed = JSON.parse(fsState.files.get(STATS_PATH)!);
@@ -341,9 +356,10 @@ describe('logSkippedAction', () => {
     expect(stats.session.totalEvents).toBe(1);
   });
 
-  it('maps commentLike to comment_like event type', () => {
+  it('maps commentLike to comment_like event type', async () => {
     initEventLogger();
     logSkippedAction('commentLike', 'bot1', 'persona1', 'cooldown');
+    await drainWrites();
 
     const content = fsState.files.get(EVENTS_PATH)!;
     const parsed = JSON.parse(content.trim().split('\n')[0]);
@@ -377,16 +393,18 @@ describe('logSkippedAction', () => {
 });
 
 describe('events.jsonl append resilience', () => {
-  it('drops the event silently when appendFileSync throws (no crash)', async () => {
-    const fsMock = await import('node:fs');
-    const originalAppend = fsMock.appendFileSync as unknown as ReturnType<typeof vi.fn>;
-    originalAppend.mockImplementationOnce(() => {
+  it('drops the event silently when appendFile rejects (no crash)', async () => {
+    const fspMock = await import('node:fs/promises');
+    const appendMock = fspMock.appendFile as unknown as ReturnType<typeof vi.fn>;
+    appendMock.mockImplementationOnce(async () => {
       throw new Error('EACCES: permission denied');
     });
 
     initEventLogger();
-    // Must not throw.
+    // Must not throw synchronously.
     expect(() => logEvent({ eventType: 'like', agentname: 'bot', success: true })).not.toThrow();
+    // Draining must not surface the rejection either.
+    await expect(drainWrites()).resolves.toBeUndefined();
 
     // In-memory stats still updated (best-effort drop, not full rollback).
     expect(getStats()!.session.totalEvents).toBe(1);
@@ -394,7 +412,7 @@ describe('events.jsonl append resilience', () => {
 });
 
 describe('errors.jsonl', () => {
-  it('writes failures to errors.jsonl in addition to events.jsonl', () => {
+  it('writes failures to errors.jsonl in addition to events.jsonl', async () => {
     initEventLogger();
     logEvent({
       eventType: 'like',
@@ -403,6 +421,7 @@ describe('errors.jsonl', () => {
       success: false,
       error: 'boom',
     });
+    await drainWrites();
 
     const events = fsState.files.get(EVENTS_PATH)!;
     const errors = fsState.files.get(ERRORS_PATH)!;
@@ -414,13 +433,14 @@ describe('errors.jsonl', () => {
     expect(errLine.eventType).toBe('like');
   });
 
-  it('does NOT write successes to errors.jsonl', () => {
+  it('does NOT write successes to errors.jsonl', async () => {
     initEventLogger();
     logEvent({ eventType: 'like', success: true });
+    await drainWrites();
     expect(fsState.files.has(ERRORS_PATH)).toBe(false);
   });
 
-  it('carries httpStatus / retryAfterMs / requestContext when present in details', () => {
+  it('carries httpStatus / retryAfterMs / requestContext when present in details', async () => {
     initEventLogger();
     logEvent({
       eventType: 'api_429',
@@ -432,6 +452,7 @@ describe('errors.jsonl', () => {
         requestContext: { method: 'POST', path: '/posts/abc/like' },
       },
     });
+    await drainWrites();
 
     const err = JSON.parse(fsState.files.get(ERRORS_PATH)!.trim());
     expect(err.httpStatus).toBe(429);
@@ -441,9 +462,10 @@ describe('errors.jsonl', () => {
 });
 
 describe('per-agent activity.jsonl tee', () => {
-  it('tees event rows with an agentname to output/agents/<name>/activity.jsonl', () => {
+  it('tees event rows with an agentname to output/agents/<name>/activity.jsonl', async () => {
     initEventLogger();
     logEvent({ eventType: 'like', agentname: 'alicebot', persona: 'p1', success: true });
+    await drainWrites();
 
     const activityPath = join(AGENTS_DIR, 'alicebot', 'activity.jsonl');
     const content = fsState.files.get(activityPath);
@@ -453,9 +475,10 @@ describe('per-agent activity.jsonl tee', () => {
     expect(parsed.agentname).toBe('alicebot');
   });
 
-  it('does not tee events that have no agentname', () => {
+  it('does not tee events that have no agentname', async () => {
     initEventLogger();
     logEvent({ eventType: 'feed_refresh', success: true, details: { postCount: 10 } });
+    await drainWrites();
 
     // No agent dir created — only logs dir mkdirs happened.
     const anyAgentTee = [...fsState.files.keys()].some(
@@ -466,9 +489,10 @@ describe('per-agent activity.jsonl tee', () => {
 });
 
 describe('sessionId stamping', () => {
-  it('stamps a sessionId on every event', () => {
+  it('stamps a sessionId on every event', async () => {
     initEventLogger();
     logEvent({ eventType: 'like', success: true });
+    await drainWrites();
     const parsed = JSON.parse(fsState.files.get(EVENTS_PATH)!.trim());
     expect(parsed.sessionId).toMatch(/^sess-/);
     expect(parsed.sessionId).toBe(getStats()!.session.sessionId);

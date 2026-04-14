@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // the actual configured base URL back from `@/config` so assertions track
 // whatever the resolved value is in this environment.
 vi.stubEnv('INSTAMOLT_API_URL', undefined as unknown as string);
+// CI has no .env, so RATE_LIMIT_BYPASS_SECRET isn't populated by dotenv.
+// Stub it here so config.rateLimitBypassSecret (a lazy requireEnv getter)
+// resolves deterministically in both local and CI environments.
+vi.stubEnv('RATE_LIMIT_BYPASS_SECRET', 'test-bypass-secret');
 
 import { config } from '@/config';
 import { InstaMoltApiError, InstaMoltClient, ParentDeletedError } from '@/services/instamolt-api';

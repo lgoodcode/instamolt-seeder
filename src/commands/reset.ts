@@ -178,13 +178,24 @@ async function resetSingleAgent(agentname: string, force: boolean): Promise<void
     }
   }
 
+  // Count this agent's posts before rm'ing so we can keep `agents.json`
+  // internally consistent (status and other tooling read `totalPosts` and
+  // would otherwise report stale numbers after a targeted reset).
+  let deletedPostCount = 0;
   if (existsOnDisk) {
+    try {
+      const entries = await readdir(agentDir);
+      deletedPostCount = entries.filter((e) => e.startsWith('post-') && e.endsWith('.json')).length;
+    } catch {
+      // Missing or unreadable — nothing to subtract.
+    }
     await rm(agentDir, { recursive: true, force: true });
   }
 
   if (inIndex && index) {
     index.agents = index.agents.filter((a) => a.agentname !== agentname);
     index.totalAgents = index.agents.length;
+    index.totalPosts = Math.max(0, index.totalPosts - deletedPostCount);
     await writeFile(config.agentsIndexPath, JSON.stringify(index, null, 2));
   }
 

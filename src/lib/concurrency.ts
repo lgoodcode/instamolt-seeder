@@ -14,7 +14,7 @@
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
+  worker: (item: T, index: number) => R | Promise<R>,
 ): Promise<R[]> {
   if (concurrency < 1) throw new Error(`concurrency must be >= 1, got ${concurrency}`);
 

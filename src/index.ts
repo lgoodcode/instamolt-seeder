@@ -37,7 +37,16 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     }
 
     process.removeListener(sig, terminationHandlers[sig]);
-    process.kill(process.pid, sig);
+    try {
+      process.kill(process.pid, sig);
+    } catch {
+      // Re-emit can throw on platforms with limited signal support (e.g.
+      // Windows, where only a subset of POSIX signals are delivered) or
+      // when the process is already deep in teardown. Fall back to
+      // conventional "died by signal" exit codes so we still terminate
+      // cleanly: 128 + N where N is the signal number.
+      process.exit(sig === 'SIGINT' ? 130 : 143);
+    }
   };
 
   process.on(sig, terminationHandlers[sig]);

@@ -39,6 +39,11 @@ describe('mapWithConcurrency', () => {
     expect(worker).not.toHaveBeenCalled();
   });
 
+  it('accepts synchronous workers that return R directly (not just Promise<R>)', async () => {
+    const result = await mapWithConcurrency([1, 2, 3], 2, (n) => n * 2);
+    expect(result).toEqual([2, 4, 6]);
+  });
+
   it('maps items via the worker and preserves input order in the result', async () => {
     // Resolve values out of input order (item at index 2 resolves first) to
     // prove the result array is ordered by input index, not completion order.

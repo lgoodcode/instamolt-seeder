@@ -170,8 +170,18 @@ describe('SessionManager', () => {
     randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.0);
     mgr.computeNextDelay('a', persona, 1.0);
     const state = mgr.getState('a');
-    // With sessionSize [1,2] and random=0 → actionsRemaining = 1.
-    expect(state.actionsRemaining).toBe(1);
+    // With sessionSize [1,2] and random=0 → randomInt picks 1; the idle→session
+    // transition treats the tick that triggered it as the first session
+    // action, so actionsRemaining is stored as N-1 = 0. One total action fires.
+    expect(state.actionsRemaining).toBe(0);
+
+    // With random=0.999 → randomInt picks 2, so one additional action
+    // remains after the triggering tick.
+    randomSpy.mockReturnValue(0.999);
+    const s2 = mgr.getState('b');
+    s2.status = 'idle';
+    mgr.computeNextDelay('b', persona, 1.0);
+    expect(mgr.getState('b').actionsRemaining).toBe(1);
   });
 
   it('honors persona.idleGapMs override — idle gap shifts to the override range', () => {

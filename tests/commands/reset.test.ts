@@ -180,13 +180,19 @@ describe('reset', () => {
     it('removes agent from disk, agents.json, and dedup-index when --force is passed', async () => {
       const agentname = 'alpha';
       const agentDir = join(config.agentsDir, agentname);
-      fsState.dirEntries.set(agentDir, ['agent.json']);
+      // Plant 3 post files so the `totalPosts` decrement is exercised.
+      fsState.dirEntries.set(agentDir, [
+        'agent.json',
+        'post-001.json',
+        'post-002.json',
+        'post-003.json',
+      ]);
       fsState.files.set(
         config.agentsIndexPath,
         JSON.stringify({
           generatedAt: '2026-04-07T00:00:00Z',
           totalAgents: 2,
-          totalPosts: 0,
+          totalPosts: 6,
           agents: [
             { agentname: 'alpha', personaId: 'p1', bio: 'bio' },
             { agentname: 'beta', personaId: 'p2', bio: 'bio' },
@@ -218,11 +224,15 @@ describe('reset', () => {
       expect(indexWrite).toBeDefined();
       const parsed = JSON.parse(indexWrite!.data) as {
         totalAgents: number;
+        totalPosts: number;
         agents: Array<{ agentname: string }>;
       };
       expect(parsed.agents).toHaveLength(1);
       expect(parsed.agents[0]?.agentname).toBe('beta');
       expect(parsed.totalAgents).toBe(1);
+      // totalPosts recomputed by subtracting the deleted agent's posts
+      // (3) from the prior total (6).
+      expect(parsed.totalPosts).toBe(3);
 
       // dedup index rewritten with alpha stripped from persona bucket
       expect(dedupState.writeCalls).toHaveLength(1);

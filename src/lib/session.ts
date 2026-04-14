@@ -110,11 +110,14 @@ export class SessionManager {
     // Probability = curveWeight: peak hours (1.0) almost always start,
     // off-peak (0.1) rarely start, offline (0) never start.
     if (Math.random() < curveWeight) {
-      // Start a new session.
+      // Start a new session. `computeNextDelay()` runs after an action tick,
+      // so the tick that just completed already counts as the first session
+      // action — initialize `actionsRemaining` to the remaining count so
+      // the session fires exactly [sizeMin, sizeMax] actions total.
       s.status = 'in_session';
-      s.actionsRemaining = randomInt(sizeMin, sizeMax);
+      s.actionsRemaining = Math.max(0, randomInt(sizeMin, sizeMax) - 1);
       s.sessionStartedAt = Date.now();
-      // First action in the session fires quickly (5–30s).
+      // Next action in the session fires quickly (5–30s).
       return randomBetween(5_000, 30_000);
     }
 

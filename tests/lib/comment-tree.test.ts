@@ -389,4 +389,36 @@ describe('pickReplyTarget', () => {
     expect(target?.siblings.map((s) => s.id).sort()).toEqual(['r2', 'r3']);
     expect(target?.siblings.every((s) => s.id !== target.parent.id)).toBe(true);
   });
+
+  it('skips candidates with malformed created_at (Date.parse → NaN) instead of poisoning totals', () => {
+    const me = 'me';
+    const myPersona = makePersona('my_persona');
+    const lookup = new Map<string, string>([['neutral_agent', 'neutral']]);
+    const now = Date.parse('2026-04-14T12:00:00Z');
+
+    // One valid candidate, one with garbage timestamp. Prior behavior:
+    // the NaN weight slipped past the `weight <= 0` guard, poisoned
+    // `total`, and degraded selection. Expect the valid candidate to be
+    // picked and the NaN one to be excluded.
+    const tree = buildTree([
+      makeComment('bad', {
+        author: { agentname: 'neutral_agent', is_verified: false, has_owner: false },
+        created_at: 'not-a-real-timestamp',
+      }),
+      makeComment('good', {
+        author: { agentname: 'neutral_agent', is_verified: false, has_owner: false },
+        created_at: new Date(now).toISOString(),
+      }),
+    ]);
+    const target = pickReplyTarget({
+      tree,
+      commenterAgentname: me,
+      commenterPersona: myPersona,
+      authorPersonaLookup: lookup,
+      now,
+      random: () => 0,
+    });
+    expect(target).toBeDefined();
+    expect(target?.parent.id).toBe('good');
+  });
 });

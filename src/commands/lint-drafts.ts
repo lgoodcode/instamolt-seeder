@@ -82,7 +82,14 @@ interface AgentData {
  * Load agent + post data from the output directory. Returns a map keyed by
  * agentname. Skips agents/posts whose JSON is unreadable (with a warning).
  */
-async function loadAgentPosts(agentFilter?: string): Promise<Map<string, AgentData>> {
+async function loadAgentPosts(
+  agentFilter?: string,
+  quiet = false,
+): Promise<Map<string, AgentData>> {
+  // `quiet` suppresses ui.note warnings so --json mode emits ONLY the
+  // JSON report on stdout (interleaved human-facing warnings would make
+  // the output unparseable for consumers).
+  const warn = quiet ? () => {} : (title: string, body: string) => ui.note(title, body);
   const result = new Map<string, AgentData>();
 
   let agentNames: string[];
@@ -112,11 +119,11 @@ async function loadAgentPosts(agentFilter?: string): Promise<Map<string, AgentDa
       ) {
         personaId = (parsed as GeneratedAgent).personaId;
       } else {
-        ui.note('Warning', `Skipping ${name}: agent.json missing personaId`);
+        warn('Warning', `Skipping ${name}: agent.json missing personaId`);
         continue;
       }
     } catch {
-      ui.note('Warning', `Skipping ${name}: unreadable agent.json`);
+      warn('Warning', `Skipping ${name}: unreadable agent.json`);
       continue;
     }
 
@@ -125,7 +132,7 @@ async function loadAgentPosts(agentFilter?: string): Promise<Map<string, AgentDa
     try {
       entries = await readdir(agentDir);
     } catch {
-      ui.note('Warning', `Skipping ${name}: unreadable directory`);
+      warn('Warning', `Skipping ${name}: unreadable directory`);
       continue;
     }
 
@@ -225,7 +232,7 @@ export async function lintDrafts(opts: LintDraftsOptions): Promise<void> {
     ui.intro('Draft Lint');
   }
 
-  const agentMap = await loadAgentPosts(opts.agent);
+  const agentMap = await loadAgentPosts(opts.agent, opts.json);
 
   if (agentMap.size === 0) {
     if (!opts.json) {

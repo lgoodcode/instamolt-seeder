@@ -161,16 +161,27 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     timestamp: new Date().toISOString(),
   };
   const line = `${JSON.stringify(full)}\n`;
-  appendFileSync(eventsPath, line);
+  try {
+    appendFileSync(eventsPath, line);
+  } catch {
+    // Best-effort: a filesystem failure (disk full, permissions) must not
+    // crash a long-running engage-continuous loop. Drop the event silently.
+  }
 
   // Per-agent tee so operators can watch one agent's live timeline.
   if (event.agentname) teeToAgent(event.agentname, line);
 
-  // Every failure also lands in the dedicated errors log. We build a
-  // SeederErrorEvent view here so the row carries the richer shape
+  // A skipped action (intent-to-engage that aborted before the API call —
+  // cooldown, self-target, dedup, quota) is logged with success:false for
+  // the event stream, but it is NOT a functional error: don't inflate
+  // error counters and don't write it to errors.jsonl.
+  const isSkipped = event.details?.skipped === true;
+
+  // Every *real* failure also lands in the dedicated errors log. We build
+  // a SeederErrorEvent view here so the row carries the richer shape
   // callers attached via `details` (httpStatus, retryAfterMs, attempt,
   // requestContext, stack).
-  if (!event.success) {
+  if (!event.success && !isSkipped) {
     const d = event.details ?? {};
     const errorEvent: SeederErrorEvent = {
       ...full,
@@ -199,16 +210,18 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
   if (actionKind) {
     const bucket = stats.actions[actionKind];
     if (event.success) bucket.success++;
+    else if (isSkipped) bucket.skipped++;
     else bucket.error++;
   }
 
-  // Per-persona tracking
+  // Per-persona tracking. Skipped actions count toward actions but not
+  // errors (same rationale as the per-action bucket above).
   if (event.persona) {
     if (!stats.personas[event.persona]) {
       stats.personas[event.persona] = { actions: 0, errors: 0, strikes: 0 };
     }
     stats.personas[event.persona].actions++;
-    if (!event.success) stats.personas[event.persona].errors++;
+    if (!event.success && !isSkipped) stats.personas[event.persona].errors++;
   }
 
   // Feed refresh tracking
@@ -250,8 +263,8 @@ export function logSkippedAction(
 ): void {
   if (!initialized || !stats) return;
 
-  stats.actions[kind].skipped++;
-
+  // Bucket increment is handled by logEvent via the `details.skipped` flag
+  // so skipped counts, error counts, and errors.jsonl stay consistent.
   logEvent({
     eventType: kind === 'commentLike' ? 'comment_like' : (kind as SeederEventType),
     agentname,

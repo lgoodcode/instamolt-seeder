@@ -399,6 +399,31 @@ describe('lintDrafts', () => {
     consoleSpy.mockRestore();
   });
 
+  it('suppresses ui.note warnings in --json mode so stdout stays parseable', async () => {
+    // Plant a broken agent: dir entry exists but agent.json is unreadable.
+    // In non-json mode this emits a ui.note('Warning', ...); in --json mode
+    // it must stay silent so consumers can `JSON.parse(stdout)`.
+    const agentsDirEntries = fsState.dirs.get('./output/agents') ?? [];
+    agentsDirEntries.push('broken_agent');
+    fsState.dirs.set('./output/agents', agentsDirEntries);
+    // No agent.json → loadAgentPosts hits the unreadable-agent.json branch.
+
+    // Also add one valid agent so lintDrafts doesn't short-circuit on empty.
+    addAgent('agent1', 'persona-a', [
+      { id: 'post-001', caption: 'Valid caption', imagePrompt: 'prompt' },
+    ]);
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await lintDrafts(defaultOpts({ json: true }));
+
+    expect(uiMod.note).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const output = consoleSpy.mock.calls[0]?.[0] as string;
+    expect(() => JSON.parse(output)).not.toThrow();
+
+    consoleSpy.mockRestore();
+  });
+
   // 9. Empty directory
   it('exits cleanly when no agents exist', async () => {
     await lintDrafts(defaultOpts());

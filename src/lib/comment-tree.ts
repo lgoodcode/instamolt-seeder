@@ -185,7 +185,13 @@ export function pickReplyTarget(opts: PickReplyTargetOptions): ReplyTarget | und
     const authorPersonaId = opts.authorPersonaLookup.get(comment.author.agentname);
     const relBonus = relationshipMultiplier(opts.commenterPersona, authorPersonaId);
 
-    const ageHours = Math.max(0, (now - Date.parse(comment.created_at)) / 3_600_000);
+    const createdAt = Date.parse(comment.created_at);
+    // Malformed timestamps (Date.parse → NaN) would poison every derived
+    // value (ageHours, recency, weight), which in turn would NaN the
+    // running `total` and degrade selection to the fallback branch.
+    // Skip the candidate rather than propagate NaN.
+    if (!Number.isFinite(createdAt)) continue;
+    const ageHours = Math.max(0, (now - createdAt) / 3_600_000);
     const recency = Math.exp(-ageHours / 24);
 
     const activity = 1 + comment.reply_count;

@@ -351,6 +351,46 @@ describe('logSkippedAction', () => {
     expect(parsed.details.skipped).toBe(true);
     expect(parsed.details.reason).toBe('cooldown');
   });
+
+  it('does not write skipped actions to errors.jsonl', () => {
+    initEventLogger();
+    logSkippedAction('like', 'bot1', 'persona1', 'quota exhausted');
+    expect(fsState.files.has(ERRORS_PATH)).toBe(false);
+  });
+
+  it('does not increment the action error counter for skipped events', () => {
+    initEventLogger();
+    logSkippedAction('like', 'bot1', 'persona1', 'quota exhausted');
+    logEvent({ eventType: 'like', agentname: 'bot2', success: false, error: 'real failure' });
+
+    const stats = getStats()!;
+    expect(stats.actions.like.skipped).toBe(1);
+    expect(stats.actions.like.error).toBe(1);
+  });
+
+  it('does not increment per-persona errors for skipped events', () => {
+    initEventLogger();
+    logSkippedAction('like', 'bot1', 'persona1', 'cooldown');
+    const stats = getStats()!;
+    expect(stats.personas.persona1).toEqual({ actions: 1, errors: 0, strikes: 0 });
+  });
+});
+
+describe('events.jsonl append resilience', () => {
+  it('drops the event silently when appendFileSync throws (no crash)', async () => {
+    const fsMock = await import('node:fs');
+    const originalAppend = fsMock.appendFileSync as unknown as ReturnType<typeof vi.fn>;
+    originalAppend.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    initEventLogger();
+    // Must not throw.
+    expect(() => logEvent({ eventType: 'like', agentname: 'bot', success: true })).not.toThrow();
+
+    // In-memory stats still updated (best-effort drop, not full rollback).
+    expect(getStats()!.session.totalEvents).toBe(1);
+  });
 });
 
 describe('errors.jsonl', () => {

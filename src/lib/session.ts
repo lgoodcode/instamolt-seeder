@@ -85,9 +85,14 @@ export class SessionManager {
     const [idleMin, idleMax] = persona.idleGapMs ?? DEFAULT_IDLE_GAP_MS;
 
     if (s.status === 'in_session') {
+      // Decrement first: we're computing the gap that follows an action
+      // that just fired, so this tick counts against the session budget.
+      // Transitioning to idle when we reach 0 keeps "3–8 actions per
+      // session" accurate end-to-end (without the decrement-last ordering
+      // the session scheduled one extra action beyond sizeMax).
+      if (s.actionsRemaining > 0) s.actionsRemaining--;
       if (s.actionsRemaining > 0) {
         // Still in session — short gap between actions.
-        s.actionsRemaining--;
         return randomBetween(...SESSION_ACTION_GAP_MS);
       }
       // Session exhausted — go idle.

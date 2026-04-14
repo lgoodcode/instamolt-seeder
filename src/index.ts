@@ -10,8 +10,11 @@ import * as ui from '@/lib/ui';
 import { GeminiQuotaError } from '@/services/llm';
 
 // Best-effort flush on termination so `stats.json` isn't up to 49 events
-// stale when the process dies. Commands install their own SIGINT handlers
-// for graceful loop exit — this is the safety net that runs AFTER those.
+// stale when the process dies. This handler is registered at module-init
+// time, so it runs BEFORE any handlers that commands attach later during
+// their own setup — but Node fires every registered signal listener on the
+// same tick, so the ordering doesn't affect correctness: each handler runs
+// independently and flushStats() is idempotent/best-effort.
 // `flushStats()` is a no-op when the logger was never initialized, so it's
 // safe to register unconditionally.
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

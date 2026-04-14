@@ -308,22 +308,17 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 
   const agentsPhaseMs = Date.now() - startedAt;
 
-  // --- Phase: bake comment samples (Option A) ---
+  // Write master index + dedup index BEFORE the bake phase. The bake phase
+  // can throw (e.g. `FeedCacheEmptyError` when the live feed is empty), and
+  // if we deferred the index writes until after bake, a throw would leave
+  // orphaned agent/post JSON on disk with no `agents.json` entry — the
+  // resumability fast path in `loadExistingAgents` reads `agents.json`, so
+  // those agents would be invisible to subsequent runs and re-generated.
   //
-  // Walks every agent and writes 3 sample comments per agent against random
-  // peer captions drawn from the pool. The samples are persisted to
-  // `output/agents/<name>/comments.json` and become both:
-  //   1. an audit artifact the operator can eyeball during curation, and
-  //   2. the day-1 voice anchor that `engage` loads as `priorComments` so
-  //      runtime comments don't sound generic.
-  //
-  // Idempotent: skips agents that already have a `comments.json`.
-  const commentsPhaseStart = Date.now();
-  const { commentsBaked, commentsSkipped, commentsFailed, repliesBaked } =
-    await bakeCommentSamplesPhase(allAgents, personas);
-  const commentsPhaseMs = Date.now() - commentsPhaseStart;
-
-  // Write master index.
+  // Baking only writes per-agent `comments.json` files, which are naturally
+  // idempotent (the bake phase already skips agents that have one), so
+  // persisting agents.json + dedup-index.json up-front costs nothing and
+  // makes a bake-phase failure non-destructive.
   const index: AgentsIndex = {
     generatedAt: new Date().toISOString(),
     totalAgents: allAgents.length,
@@ -345,6 +340,21 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
       `Failed to write dedup index (${err instanceof Error ? err.message : String(err)}), next run will rebuild from walk`,
     );
   }
+
+  // --- Phase: bake comment samples (Option A) ---
+  //
+  // Walks every agent and writes 3 sample comments per agent against random
+  // peer captions drawn from the pool. The samples are persisted to
+  // `output/agents/<name>/comments.json` and become both:
+  //   1. an audit artifact the operator can eyeball during curation, and
+  //   2. the day-1 voice anchor that `engage` loads as `priorComments` so
+  //      runtime comments don't sound generic.
+  //
+  // Idempotent: skips agents that already have a `comments.json`.
+  const commentsPhaseStart = Date.now();
+  const { commentsBaked, commentsSkipped, commentsFailed, repliesBaked } =
+    await bakeCommentSamplesPhase(allAgents, personas);
+  const commentsPhaseMs = Date.now() - commentsPhaseStart;
 
   const totalDurationMs = Date.now() - startedAt;
   const avgPerAgentMs = created > 0 ? Math.round(agentsPhaseMs / created) : 0;

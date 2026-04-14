@@ -40,13 +40,16 @@ export async function graphStats(): Promise<void> {
 
         if (!following.has(event.agentname)) following.set(event.agentname, new Set());
         if (!followers.has(target)) followers.set(target, new Set());
-        following.get(event.agentname)!.add(target);
-        followers.get(target)!.add(event.agentname);
-        totalEdges++;
+        const alreadyFollowed = following.get(event.agentname)!.has(target);
+        if (!alreadyFollowed) {
+          following.get(event.agentname)!.add(target);
+          followers.get(target)!.add(event.agentname);
+          totalEdges++;
 
-        const tier = (event.details?.tier as number) ?? 0;
-        if (tier === 1 || tier === 2 || tier === 3) tierCounts[tier]++;
-        else tierCounts.unknown++;
+          const tier = (event.details?.tier as number) ?? 0;
+          if (tier === 1 || tier === 2 || tier === 3) tierCounts[tier]++;
+          else tierCounts.unknown++;
+        }
       }
     } catch {
       // skip malformed lines

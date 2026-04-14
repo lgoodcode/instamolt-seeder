@@ -431,6 +431,39 @@ describe('lintDrafts', () => {
     expect(uiMod.outro).toHaveBeenCalledWith('No agents found');
   });
 
+  it('emits a valid empty JSON report when no agents exist in --json mode', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await lintDrafts(defaultOpts({ json: true }));
+
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const output = consoleSpy.mock.calls[0]?.[0] as string;
+    const report = JSON.parse(output) as {
+      captionFlags: unknown[];
+      promptFlags: unknown[];
+      crossAgentFlags: unknown[];
+      summary: {
+        agentsScanned: number;
+        postsScanned: number;
+        captionFlagged: number;
+        promptFlagged: number;
+        crossPersonaFlagged: number;
+      };
+    };
+    expect(report.captionFlags).toEqual([]);
+    expect(report.promptFlags).toEqual([]);
+    expect(report.crossAgentFlags).toEqual([]);
+    expect(report.summary).toEqual({
+      agentsScanned: 0,
+      postsScanned: 0,
+      captionFlagged: 0,
+      promptFlagged: 0,
+      crossPersonaFlagged: 0,
+    });
+    expect(uiMod.outro).not.toHaveBeenCalled();
+
+    consoleSpy.mockRestore();
+  });
+
   // 10. Missing imagePrompt gracefully handled
   it('handles posts without imagePrompt in Pass 2 without crashing', async () => {
     addAgent('agent1', 'persona-a', [

@@ -553,7 +553,7 @@ describe('executeReply (feed-driven)', () => {
     expect(quota.history.reply).toHaveLength(0);
   });
 
-  it('falls back to executeComment when no eligible parent exists', async () => {
+  it('falls back to a top-level comment when no eligible parent exists, consuming reply quota on the same post', async () => {
     const client = {
       // Empty tree — no candidates for pickReplyTarget
       getPostComments: vi.fn().mockResolvedValue({ comments: [] }),
@@ -572,11 +572,17 @@ describe('executeReply (feed-driven)', () => {
     const quota = makeFreshQuota('alice', persona);
 
     const res = await executeReply(ctx, makeAgent('alice'), persona, quota);
-    // The fallback returns a 'comment' kind result, not 'reply'
+    // The fallback now reports as the original action kind ('reply') and
+    // consumes reply quota — the comment is just the physical shape of
+    // the action, not a re-classification of the budget.
     expect(res.status).toBe('ok');
-    if (res.status === 'ok') expect(res.kind).toBe('comment');
-    expect(quota.history.comment).toHaveLength(1);
-    expect(quota.history.reply).toHaveLength(0);
+    if (res.status === 'ok') expect(res.kind).toBe('reply');
+    expect(quota.history.reply).toHaveLength(1);
+    expect(quota.history.comment).toHaveLength(0);
+    // The comment is posted on the SAME post the reply executor picked,
+    // WITHOUT a parent_comment_id (top-level, not a threaded reply).
+    expect(client.commentOnPost).toHaveBeenCalledTimes(1);
+    expect(client.commentOnPost).toHaveBeenCalledWith('p1', expect.any(String));
   });
 
   it('dry-run: does not call commentOnPost and does not consume quota', async () => {

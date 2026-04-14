@@ -124,9 +124,13 @@ export class ActionScheduler {
     }
     // Schedule for the start of the next active hour with a small jitter
     // (0-15 min) so agents with the same curve don't all fire at :00.
-    const msToNextHour = skip * 60 * 60 * 1000;
+    // Anchor on the next hour boundary, not on `now`, so a 10:55 tick with
+    // skip=1 lands ~11:00 instead of ~11:55 (losing the active hour).
+    const nextTick = new Date();
+    nextTick.setMinutes(0, 0, 0);
+    nextTick.setHours(nextTick.getHours() + skip);
     const jitter = Math.random() * 15 * 60 * 1000;
-    this.pushForAgent(agent.agentname, Date.now() + msToNextHour + jitter);
+    this.pushForAgent(agent.agentname, nextTick.getTime() + jitter);
     return skip;
   }
 

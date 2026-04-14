@@ -138,8 +138,15 @@ export interface PlanFollowsOptions {
 export function planFollows(opts: PlanFollowsOptions): FollowPlan {
   const { follower, followerPersona, candidates, affinityMatrix, random = Math.random } = opts;
 
-  // Budget: 5–20 based on followProbability
-  const rawBudget = Math.max(5, Math.floor(followerPersona.followProbability * 20));
+  // Budget: 5–20 based on followProbability. The Math.max(5, ...) floor only
+  // applies once the persona is actually allowed to follow — a 0/near-zero
+  // followProbability returns an empty plan so the per-persona gating
+  // contract (CLAUDE.md: every action gated on a per-persona threshold)
+  // isn't bypassed by the floor.
+  const rawBudget =
+    followerPersona.followProbability <= 0
+      ? 0
+      : Math.max(5, Math.floor(followerPersona.followProbability * 20));
   const budget = Math.min(rawBudget, candidates.length);
 
   if (budget === 0) {

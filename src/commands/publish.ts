@@ -222,12 +222,29 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     // Without this the bar advances only when an entire agent's queue drains,
     // which under publishConcurrency=10 means no visible progress until the
     // whole phase is essentially done.
+    // Count only unpublished posts toward `expected`. If we counted all
+    // post-*.json files, a run with `--limit N` where the first N files on
+    // disk are already `published: true` would exit the loop on the tick
+    // cap before ever reaching an unpublished draft.
     const agentTotals = new Map<string, number>();
     for (const item of readyToPost) {
       try {
         const files = await readdir(item.dir);
-        const count = files.filter((f) => f.startsWith('post-') && f.endsWith('.json')).length;
-        agentTotals.set(item.indexAgent.agentname, Math.min(count, postLimit));
+        const postFiles = files.filter((f) => f.startsWith('post-') && f.endsWith('.json'));
+        let unpublished = 0;
+        for (const postFile of postFiles) {
+          try {
+            const post = JSON.parse(
+              await readFile(join(item.dir, postFile), 'utf-8'),
+            ) as GeneratedPost;
+            if (!post.published) unpublished++;
+          } catch {
+            // Unreadable post file — count it so the worker reaches it and
+            // surfaces the error through its own catch.
+            unpublished++;
+          }
+        }
+        agentTotals.set(item.indexAgent.agentname, Math.min(unpublished, postLimit));
       } catch {
         agentTotals.set(item.indexAgent.agentname, 0);
       }
@@ -253,13 +270,13 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
 
           for (const postFile of postFiles) {
             if (postsPublished >= postLimit) break;
-            if (ticked >= expected) break;
 
             const postPath = join(dir, postFile);
             const post: GeneratedPost = JSON.parse(await readFile(postPath, 'utf-8'));
             if (post.published) {
-              postBar.tick(`@${indexAgent.agentname} — ${postFile} already published`);
-              ticked++;
+              // Already-published posts don't consume a limit slot and
+              // don't tick the bar — `expected` counts only unpublished
+              // posts so already-published ones are invisible to it.
               continue;
             }
 
@@ -357,8 +374,16 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
         followerPersona: Persona;
         target: ReturnType<typeof planFollows>['targets'][number];
       }
+      // When `--agent` is set we only want to bootstrap the follow edges FROM
+      // that single agent out into the fleet. The candidate pool remains the
+      // full registered fleet (so the target has someone to follow), but the
+      // outer follower loop is restricted — otherwise a targeted single-agent
+      // publish would mutate the global follow graph on every other agent.
+      const followers = options.agent
+        ? registered.filter((a) => a.agentname === options.agent)
+        : registered;
       const edges: FollowEdge[] = [];
-      for (const follower of registered) {
+      for (const follower of followers) {
         const followerPersona = personas.get(follower.personaId);
         if (!followerPersona) continue;
         const candidates = registered.filter((a) => a.agentname !== follower.agentname);

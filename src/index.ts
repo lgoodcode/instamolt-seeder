@@ -226,6 +226,14 @@ ${head('Environment:')}
 }
 
 main().catch((err) => {
+  // The SIGINT/SIGTERM handlers above only fire on signals; an unhandled
+  // rejection from main() goes straight to process.exit() below and would
+  // otherwise drop the in-memory stats this PR is trying to preserve.
+  try {
+    flushStats();
+  } catch {
+    // best-effort only — never let a flush failure mask the underlying error
+  }
   if (err instanceof GeminiQuotaError) {
     const c = ui.color;
     ui.note(

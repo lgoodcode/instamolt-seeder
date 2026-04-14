@@ -216,6 +216,24 @@ describe('graphStats', () => {
     expect(isolatedNote!.body).not.toContain('@gamma');
   });
 
+  it('dedupes duplicate follow events (edge counted once, tier counted once)', async () => {
+    const lines = [
+      makeFollow({ agentname: 'alpha', target: 'beta', tier: 1 }),
+      makeFollow({ agentname: 'alpha', target: 'beta', tier: 1 }),
+    ];
+    fsState.files.set(eventsPath, lines.join('\n'));
+
+    await graphStats();
+
+    const body = getNoteBody('Follow Graph');
+    expect(body).toBeDefined();
+    expect(body).toContain('edges=1');
+
+    const tierBody = getNoteBody('Follow Sources');
+    expect(tierBody).toBeDefined();
+    expect(tierBody).toMatch(/Tier 1 \(relationship\): 1/);
+  });
+
   it('ranks the most-followed agents in descending order', async () => {
     // beta: 3 followers, gamma: 2, delta: 1.
     const lines = [

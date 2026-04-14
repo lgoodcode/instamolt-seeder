@@ -143,7 +143,11 @@ function makePersona(id: string): Persona {
     postsPerDay: [1, 2],
     likeProbability: 0,
     commentProbability: 0,
-    followProbability: 0,
+    // Non-zero so planFollows returns edges in Phase C tests. With the
+    // follow-algorithm update that floors budget at 5 only when
+    // followProbability > 0, a zero here would silently return an empty
+    // plan and break every Phase C assertion.
+    followProbability: 0.5,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
@@ -418,6 +422,100 @@ describe('publish', () => {
     await publish({ skipFollowGraph: true });
 
     expect(apiMocks.generatePost).not.toHaveBeenCalled();
+  });
+
+  it('--limit N still publishes unpublished drafts when the first N post files are already published', async () => {
+    // Regression: --limit was previously derived from total post-*.json count,
+    // so if the first N files on disk were already `published: true`, the
+    // worker would exit on the tick cap before ever reaching an unpublished
+    // draft. With the fix, `expected` counts only unpublished posts.
+    primeAgent('alpha', { apiKey: 'key-alpha' });
+    primeIndex(['alpha']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), [
+      'agent.json',
+      'post-001.json',
+      'post-002.json',
+      'post-003.json',
+    ]);
+    // First two already published, third is an unpublished draft.
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-001.json'),
+      JSON.stringify({
+        id: 'post-001',
+        imagePrompt: 'a',
+        caption: 'a',
+        aspectRatio: 'square',
+        published: true,
+        publishedAt: '2026-04-01T00:00:00Z',
+        instamoltPostId: 'pub-1',
+      }),
+    );
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-002.json'),
+      JSON.stringify({
+        id: 'post-002',
+        imagePrompt: 'b',
+        caption: 'b',
+        aspectRatio: 'square',
+        published: true,
+        publishedAt: '2026-04-01T00:00:00Z',
+        instamoltPostId: 'pub-2',
+      }),
+    );
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-003.json'),
+      JSON.stringify({
+        id: 'post-003',
+        imagePrompt: 'c',
+        caption: 'c',
+        aspectRatio: 'square',
+      }),
+    );
+
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'server-post-3', image_url: 'https://cdn/3.jpg' },
+    });
+
+    await publish({ skipFollowGraph: true, limit: 2 });
+
+    // post-003 should have been published despite --limit 2 and 2 prior
+    // published files ahead of it.
+    expect(apiMocks.generatePost).toHaveBeenCalledTimes(1);
+    const third = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'post-003.json'))!);
+    expect(third.published).toBe(true);
+    expect(third.instamoltPostId).toBe('server-post-3');
+  });
+
+  it('--agent foo only creates follow edges FROM foo (does not mutate graph for other agents)', async () => {
+    // Regression: Phase C previously iterated the full registered fleet as
+    // followers even when options.agent was set, so a targeted single-agent
+    // publish would silently create follow edges on every other agent too.
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      primeAgent(name, { apiKey: `key-${name}` });
+    }
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    // Track which apiKey each InstaMoltClient was constructed with so we can
+    // assert Phase C only used alpha's key as the follower.
+    const { InstaMoltClient } = await import('@/services/instamolt-api');
+    const ctor = InstaMoltClient as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    await publish({ agent: 'alpha' });
+
+    const followerKeys = ctor.mock.calls
+      .map((args: unknown[]) => args[0])
+      .filter((k: unknown): k is string => typeof k === 'string' && k.startsWith('key-'));
+    // All authed clients constructed during Phase A/B/C for the follower
+    // position must be alpha's. Beta/gamma keys should never appear as
+    // followers (they might appear as *targets* in the candidate pool, but
+    // the candidate pool doesn't construct a client).
+    for (const k of followerKeys) {
+      expect(k).toBe('key-alpha');
+    }
+    // Phase C should have run (alpha has candidates), so followAgent is called
+    // at least once.
+    expect(apiMocks.followAgent).toHaveBeenCalled();
   });
 
   it('runs Phase C follow-graph bootstrap when ≥2 registered agents exist', async () => {

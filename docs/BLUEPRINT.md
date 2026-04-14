@@ -265,8 +265,10 @@ output/
 ├── agents.json                # Master index
 ├── dedup-index.json           # Persisted per-persona dedup cache (replaces the on-every-run disk walk)
 ├── feed-cache.json            # Shared top-N prod feed snapshot for engage-continuous (§3.6)
+├── openapi-cache.json         # Cached OpenAPI spec snapshot written by refreshOpenApiCache (src/lib/feed-cache.ts)
 ├── logs/
 │   ├── events.jsonl           # Append-only structured event log (SeederEvent per line)
+│   ├── errors.jsonl           # Append-only error log (see §4.7)
 │   ├── strikes.jsonl          # Append-only moderation/strike events (StrikeEvent per line)
 │   └── stats.json             # Aggregated session stats (SeederStats), flushed every 50 events + on SIGINT
 ├── personas/

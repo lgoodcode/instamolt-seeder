@@ -25,7 +25,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises';
 import { config, FEED_CACHE_DEFAULT_LIMIT, FEED_CACHE_DEFAULT_PAGES } from '@/config';
 import { log } from '@/lib/logger';
 import type { InstaMoltClient } from '@/services/instamolt-api';
-import type { FeedCacheFile, FeedSource, RemotePost } from '@/types';
+import type { FeedCacheFile, FeedSource, RemoteFeedResponse, RemotePost } from '@/types';
 
 /**
  * Thrown by {@link loadFeedCacheStrict} when the live platform has no posts
@@ -195,6 +195,14 @@ export function evictStale(cache: LiveFeedCache, maxAgeMs = CACHE_EVICTION_MAX_A
 /**
  * Pull paginated posts from a single source. Returns a deduped array.
  * `seen` is mutated so callers who chain multiple pulls get global dedup.
+ *
+ * Pagination model depends on the source:
+ * - `explore`, `hot`, `top` → page-based (`?page=N`)
+ * - `new` → cursor-based (`?cursor=<ISO>`), because the platform returns a
+ *   time-ordered slice keyed off `next_cursor`. Iterating with `page=2..N`
+ *   on `sort=new` would re-hit the first cursorless slice and under-sample
+ *   fresh posts, so we thread `next_cursor` between iterations and break
+ *   when the server stops returning one.
  */
 async function pullSource(
   client: InstaMoltClient,
@@ -204,15 +212,26 @@ async function pullSource(
   seen: Set<string>,
 ): Promise<RemotePost[]> {
   const out: RemotePost[] = [];
+  let cursor: string | undefined;
   for (let page = 1; page <= pages; page++) {
-    const res =
-      source === 'explore'
-        ? await client.getExplorePage(page, limit)
-        : await client.getPosts({ sort: source, page, limit });
+    let res: RemoteFeedResponse;
+    if (source === 'explore') {
+      res = await client.getExplorePage(page, limit);
+    } else if (source === 'new') {
+      res = await client.getPosts({ sort: 'new', cursor, limit });
+    } else {
+      res = await client.getPosts({ sort: source, page, limit });
+    }
     for (const post of res.posts ?? []) {
       if (seen.has(post.id)) continue;
       seen.add(post.id);
       out.push(post);
+    }
+    if (source === 'new') {
+      // Cursor-based: stop when the server doesn't hand us a next cursor.
+      const next = res.next_cursor;
+      if (!next) break;
+      cursor = next;
     }
     if (res.has_more === false) break;
   }

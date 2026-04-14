@@ -197,6 +197,87 @@ describe('refreshFeedCache', () => {
     expect(cache.sources).toEqual(['explore']);
   });
 
+  it('uses cursor pagination for sort:"new" and threads next_cursor between pages', async () => {
+    // Build per-method mocks so we can inspect the exact args passed to
+    // getPosts across iterations. Explore / hot / top each return one page
+    // with no more; sort=new returns three pages chained via next_cursor.
+    const explorePage = vi.fn(async () => ({
+      posts: [makePost('explore-a')],
+      has_more: false,
+    }));
+
+    const hotAndTop = vi
+      .fn()
+      .mockImplementationOnce(async () => ({ posts: [makePost('hot-a')], has_more: false }))
+      .mockImplementationOnce(async () => ({ posts: [makePost('top-a')], has_more: false }));
+
+    const newCalls: Array<{ sort: string; cursor?: string; page?: number; limit?: number }> = [];
+    const newPages = [
+      { posts: [makePost('new-1')], has_more: true, next_cursor: 'cursor-1' },
+      { posts: [makePost('new-2')], has_more: true, next_cursor: 'cursor-2' },
+      // Terminal page: next_cursor is null → loop must break.
+      { posts: [makePost('new-3')], has_more: true, next_cursor: null },
+    ];
+
+    const getPosts = vi.fn(
+      async (opts: { sort: string; cursor?: string; page?: number; limit?: number }) => {
+        if (opts.sort === 'new') {
+          newCalls.push({ ...opts });
+          return newPages[newCalls.length - 1] ?? { posts: [], has_more: false, next_cursor: null };
+        }
+        return hotAndTop(opts);
+      },
+    );
+
+    const client = {
+      getExplorePage: explorePage,
+      getPosts,
+    } as unknown as InstaMoltClient;
+
+    const cache = await refreshFeedCache(client, { pages: 5, limit: 50, path: '/tmp/cursor.json' });
+
+    // (a) First new-sort call has no cursor; subsequent calls thread the
+    //     cursor returned by the previous page. Page numbers must NOT be
+    //     passed for sort:new (we use cursor pagination, not page).
+    expect(newCalls).toHaveLength(3);
+    expect(newCalls[0]).toMatchObject({ sort: 'new', limit: 50 });
+    expect(newCalls[0]?.cursor).toBeUndefined();
+    expect(newCalls[0]?.page).toBeUndefined();
+    expect(newCalls[1]).toMatchObject({ sort: 'new', cursor: 'cursor-1', limit: 50 });
+    expect(newCalls[1]?.page).toBeUndefined();
+    expect(newCalls[2]).toMatchObject({ sort: 'new', cursor: 'cursor-2', limit: 50 });
+    expect(newCalls[2]?.page).toBeUndefined();
+
+    // (b) Posts from all three new-sort pages are merged in.
+    const ids = cache.posts.map((p) => p.id);
+    expect(ids).toContain('new-1');
+    expect(ids).toContain('new-2');
+    expect(ids).toContain('new-3');
+  });
+
+  it('stops paginating sort:"new" when next_cursor is missing on the first page', async () => {
+    const explorePage = vi.fn(async () => ({ posts: [], has_more: false }));
+    const newCalls: Array<{ sort: string; cursor?: string }> = [];
+    const getPosts = vi.fn(async (opts: { sort: string; cursor?: string }) => {
+      if (opts.sort === 'new') {
+        newCalls.push({ ...opts });
+        // next_cursor undefined → loop must break immediately, no page 2.
+        return { posts: [makePost('only')], has_more: true };
+      }
+      return { posts: [], has_more: false };
+    });
+
+    const client = {
+      getExplorePage: explorePage,
+      getPosts,
+    } as unknown as InstaMoltClient;
+
+    await refreshFeedCache(client, { pages: 5, limit: 50, path: '/tmp/cursor-stop.json' });
+
+    expect(newCalls).toHaveLength(1);
+    expect(newCalls[0]?.cursor).toBeUndefined();
+  });
+
   it('throws when ALL sources fail so callers can fall back to a stale cache', async () => {
     const handler = vi.fn().mockRejectedValue(new Error('everything down'));
     const client = { getExplorePage: handler, getPosts: handler } as unknown as InstaMoltClient;

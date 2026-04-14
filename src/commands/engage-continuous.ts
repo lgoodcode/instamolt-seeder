@@ -544,14 +544,20 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       }
 
       // ── Activity momentum: inject bonus session on high engagement ──
+      // pushForAgent is keyed by agentname, so injectBonusSession's near-term
+      // tick would be overwritten if we then called rescheduleAfterTick. The
+      // bonus path owns the next tick when it fires; otherwise fall through.
+      let bonusInjected = false;
       if (result.status === 'ok' && 'bonusEligible' in result && result.bonusEligible) {
-        const injected = scheduler.injectBonusSession(agent);
-        if (injected) {
+        bonusInjected = scheduler.injectBonusSession(agent);
+        if (bonusInjected) {
           log('info', `@${agent.agentname} momentum bonus — high inbound engagement`);
         }
       }
 
-      scheduler.rescheduleAfterTick(agent, persona);
+      if (!bonusInjected) {
+        scheduler.rescheduleAfterTick(agent, persona);
+      }
     }
 
     logEvent({

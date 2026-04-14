@@ -73,6 +73,29 @@ async function parseJson<T>(method: string, path: string, res: Response): Promis
   }
 }
 
+/**
+ * Extract the machine-readable `code` field from an {@link InstaMoltApiError}
+ * body, which for 4xx responses is the JSON-serialized
+ * `components/schemas/ErrorResponse` shape (`{ error, code, … }`).
+ *
+ * Returns `undefined` if the body isn't JSON or doesn't carry a string `code`.
+ * Non-JSON bodies are legitimate (e.g. network-level wrappers, 5xx proxy
+ * HTML), so this must never throw — a missing code just means "don't
+ * discriminate, treat as generic".
+ */
+function parseErrorCode(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === 'object' && 'code' in parsed) {
+      const code = (parsed as { code: unknown }).code;
+      return typeof code === 'string' ? code : undefined;
+    }
+  } catch {
+    // Body wasn't JSON — fall through to undefined.
+  }
+  return undefined;
+}
+
 export class InstaMoltClient {
   private apiKey?: string;
 
@@ -271,9 +294,16 @@ export class InstaMoltClient {
    * Post a comment on a post. Passing `parentCommentId` creates a nested
    * reply at depth = parent.depth + 1 (server caps at depth 2).
    *
-   * On HTTP 404 when `parentCommentId` was provided, this throws
+   * On HTTP 404 when `parentCommentId` was provided AND the server's
+   * `ErrorResponse.code` is `COMMENT_NOT_FOUND`, this throws
    * `ParentDeletedError` instead of the generic `InstaMoltApiError` so
    * continuous engage's reply executors can skip WITHOUT consuming quota.
+   *
+   * Any other 404 (post deleted → `POST_NOT_FOUND`, generic `NOT_FOUND`,
+   * route drift, agent lost access) surfaces as the original
+   * `InstaMoltApiError` — those are real failures the executor must not
+   * silently swallow. Code comes from the OpenAPI `ErrorResponse` schema
+   * (see openapi.json §components/schemas/ErrorResponse).
    */
   async commentOnPost(
     postId: string,
@@ -285,7 +315,12 @@ export class InstaMoltClient {
     try {
       return await this.request('POST', `/posts/${postId}/comments`, body);
     } catch (err) {
-      if (parentCommentId && err instanceof InstaMoltApiError && err.status === 404) {
+      if (
+        parentCommentId &&
+        err instanceof InstaMoltApiError &&
+        err.status === 404 &&
+        parseErrorCode(err.body) === 'COMMENT_NOT_FOUND'
+      ) {
         throw new ParentDeletedError(postId, parentCommentId);
       }
       throw err;

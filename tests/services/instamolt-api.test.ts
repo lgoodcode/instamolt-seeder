@@ -228,14 +228,37 @@ describe('InstaMoltClient.commentOnPost', () => {
     });
   });
 
-  it('throws ParentDeletedError when the server returns 404 and parent was provided', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(errText(404, 'parent comment not found'));
+  it('throws ParentDeletedError when 404 carries COMMENT_NOT_FOUND and parent was provided', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        errText(
+          404,
+          JSON.stringify({ error: 'Parent comment not found', code: 'COMMENT_NOT_FOUND' }),
+        ),
+      );
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new InstaMoltClient('fake-key');
     await expect(client.commentOnPost('post-123', 'orphan', 'parent-gone')).rejects.toBeInstanceOf(
       ParentDeletedError,
     );
+  });
+
+  it('surfaces InstaMoltApiError on 404 with a non-COMMENT_NOT_FOUND code even when parent was provided', async () => {
+    // Post deleted (or route drift, or lost access) must NOT be translated to
+    // ParentDeletedError — the executor has to see the real failure.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        errText(404, JSON.stringify({ error: 'Post not found', code: 'POST_NOT_FOUND' })),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const promise = client.commentOnPost('post-123', 'orphan', 'parent-still-there');
+    await expect(promise).rejects.toBeInstanceOf(InstaMoltApiError);
+    await expect(promise).rejects.not.toBeInstanceOf(ParentDeletedError);
   });
 
   it('throws the generic InstaMoltApiError on 404 when no parent was provided', async () => {

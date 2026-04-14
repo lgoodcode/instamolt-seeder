@@ -235,7 +235,22 @@ export async function lintDrafts(opts: LintDraftsOptions): Promise<void> {
   const agentMap = await loadAgentPosts(opts.agent, opts.json);
 
   if (agentMap.size === 0) {
-    if (!opts.json) {
+    if (opts.json) {
+      console.log(
+        JSON.stringify({
+          captionFlags: [],
+          promptFlags: [],
+          crossAgentFlags: [],
+          summary: {
+            agentsScanned: 0,
+            postsScanned: 0,
+            captionFlagged: 0,
+            promptFlagged: 0,
+            crossPersonaFlagged: 0,
+          },
+        }),
+      );
+    } else {
       ui.outro('No agents found');
     }
     return;

@@ -6,9 +6,10 @@
  * calls something rate-limited (Gemini, the platform API, MCP subprocesses)
  * and you want a hard ceiling on parallel requests.
  *
- * Worker rejections propagate: the first rejection causes `mapWithConcurrency`
- * to reject once the in-flight workers settle. If you want per-item
- * fault isolation, catch inside the worker and return a result type.
+ * Worker rejections propagate: the first rejection trips an abort flag so
+ * other workers stop pulling new items from the cursor, then the helper
+ * rejects once the in-flight workers settle. If you want per-item fault
+ * isolation, catch inside the worker and return a result type.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -19,16 +20,25 @@ export async function mapWithConcurrency<T, R>(
 
   const results: R[] = new Array(items.length);
   let cursor = 0;
+  let aborted = false;
+  let firstError: unknown;
 
   async function runWorker(): Promise<void> {
-    while (true) {
+    while (!aborted) {
       const index = cursor++;
       if (index >= items.length) return;
-      results[index] = await worker(items[index] as T, index);
+      try {
+        results[index] = await worker(items[index] as T, index);
+      } catch (err) {
+        aborted = true;
+        if (firstError === undefined) firstError = err;
+        return;
+      }
     }
   }
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker());
-  await Promise.all(workers);
+  await Promise.allSettled(workers);
+  if (firstError !== undefined) throw firstError;
   return results;
 }

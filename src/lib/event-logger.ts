@@ -278,7 +278,12 @@ export function logStrike(event: Omit<StrikeEvent, 'timestamp'>): void {
   if (!initialized || !stats) return;
 
   const full: StrikeEvent = { ...event, timestamp: new Date().toISOString() };
-  appendFileSync(strikesPath, `${JSON.stringify(full)}\n`);
+  try {
+    appendFileSync(strikesPath, `${JSON.stringify(full)}\n`);
+  } catch {
+    // Best-effort: losing a strike row must not crash engage-continuous.
+    // In-memory stats below still update so the session counters stay consistent.
+  }
 
   // Update moderation stats
   stats.moderation.totalStrikes++;
@@ -314,7 +319,11 @@ export function flushStats(): void {
   if (!initialized || !stats) return;
   stats.lastUpdatedAt = new Date().toISOString();
   stats.session.uptimeMs = Date.now() - Date.parse(stats.session.startedAt);
-  writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+  try {
+    writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+  } catch {
+    // Best-effort: keep the process alive even if stats can't be flushed.
+  }
 }
 
 export function updateAgentCounts(registered: number, active: number): void {

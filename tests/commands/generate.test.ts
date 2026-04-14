@@ -750,6 +750,15 @@ describe('generate', () => {
 
       expect(llmMocks.generateComment).not.toHaveBeenCalled();
       expect(fsState.files.has(join('./output/agents', 'alpha', 'comments.json'))).toBe(false);
+
+      // When bake throws, agents.json + dedup-index.json MUST already be on
+      // disk so the next run's resumability fast path sees the orphaned agent
+      // and doesn't re-generate it. See generate.ts: writes happen BEFORE bake.
+      expect(fsState.files.has('./output/agents.json')).toBe(true);
+      const index = JSON.parse(fsState.files.get('./output/agents.json')!);
+      expect(index.totalAgents).toBe(1);
+      expect(index.agents[0].agentname).toBe('alpha');
+      expect(fsState.files.has('./output/dedup-index.json')).toBe(true);
     });
 
     it('propagates the FeedCacheEmptyError when the live feed refresh fails', async () => {
@@ -764,6 +773,15 @@ describe('generate', () => {
 
       await expect(generate(1, 1)).rejects.toThrow(FeedCacheEmptyError);
       expect(llmMocks.generateComment).not.toHaveBeenCalled();
+
+      // Same invariant: even when the feed cache itself fails (thrown from
+      // inside bakeCommentSamplesPhase before any per-agent work), the master
+      // index + dedup index must already be persisted.
+      expect(fsState.files.has('./output/agents.json')).toBe(true);
+      const index = JSON.parse(fsState.files.get('./output/agents.json')!);
+      expect(index.totalAgents).toBe(1);
+      expect(index.agents[0].agentname).toBe('alpha');
+      expect(fsState.files.has('./output/dedup-index.json')).toBe(true);
     });
   });
 

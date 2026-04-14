@@ -163,18 +163,27 @@ export async function executeComment(
   agent: GeneratedAgent,
   persona: Persona,
   quota: AgentQuota,
+  opts?: { post?: RemotePost; consumeAs?: ActionKind },
 ): Promise<ActionResult> {
-  const gated = gate(quota, 'comment');
+  // The `consumeAs` override lets the reply-fallback path reuse this
+  // executor while charging the caller's original quota bucket (e.g.
+  // `reply`) rather than `comment`. The gate + consume + result `kind`
+  // all follow `consumeAs` when provided so the call site's semantics
+  // are preserved end-to-end.
+  const consumeAs: ActionKind = opts?.consumeAs ?? 'comment';
+  const gated = gate(quota, consumeAs);
   if (gated) return gated;
 
-  const post = pickPost(ctx.feedCache, {
-    excludeAuthor: agent.agentname,
-    agentname: agent.agentname,
-    score: buildPostScorer(persona, ctx.authorPersonaLookup),
-  });
-  if (!post) return { status: 'skipped', kind: 'comment', reason: 'no_candidate_post' };
+  const post =
+    opts?.post ??
+    pickPost(ctx.feedCache, {
+      excludeAuthor: agent.agentname,
+      agentname: agent.agentname,
+      score: buildPostScorer(persona, ctx.authorPersonaLookup),
+    });
+  if (!post) return { status: 'skipped', kind: consumeAs, reason: 'no_candidate_post' };
   if (!post.caption) {
-    return { status: 'skipped', kind: 'comment', reason: 'post_has_no_caption' };
+    return { status: 'skipped', kind: consumeAs, reason: 'post_has_no_caption' };
   }
 
   const priorComments = await loadPriorComments(agent.agentname);
@@ -194,13 +203,13 @@ export async function executeComment(
       chaos,
     );
   } catch (err) {
-    return { status: 'error', kind: 'comment', error: `llm: ${err}` };
+    return { status: 'error', kind: consumeAs, error: `llm: ${err}` };
   }
 
   if (ctx.dryRun) {
     return {
       status: 'ok',
-      kind: 'comment',
+      kind: consumeAs,
       detail: `[DRY] would comment on post ${post.id} by @${post.author.agentname}: "${text.slice(0, 60)}"`,
       ...(chaos ? { chaos: true } : {}),
     };
@@ -209,10 +218,10 @@ export async function executeComment(
   try {
     await ctx.client.commentOnPost(post.id, text);
   } catch (err) {
-    return { status: 'error', kind: 'comment', error: String(err) };
+    return { status: 'error', kind: consumeAs, error: String(err) };
   }
 
-  consume(quota, 'comment');
+  consume(quota, consumeAs);
   await persistQuota(quota);
   if ('file' in ctx.feedCache) markEngaged(ctx.feedCache, agent.agentname, post.id);
   await appendRuntimeComment(agent.agentname, {
@@ -223,7 +232,7 @@ export async function executeComment(
 
   return {
     status: 'ok',
-    kind: 'comment',
+    kind: consumeAs,
     detail: `commented on @${post.author.agentname}: "${text.slice(0, 40)}..."`,
     ...(chaos ? { chaos: true } : {}),
   };
@@ -463,10 +472,11 @@ export async function executeReply(
 
   if (!target) {
     if (REPLY_FALLBACK_TO_COMMENT) {
-      // Delegate to the top-level comment executor so the reply slot
-      // turns into a comment rather than a no-op. The comment executor
-      // will pick its own post via the feed cache.
-      return executeComment(ctx, agent, persona, quota);
+      // Drop a top-level comment on the SAME post we already picked (and
+      // whose tree we already fetched) rather than re-entering pickPost.
+      // The reply slot consumes reply quota — not comment quota — so the
+      // agent's engagement budget stays faithful to the scheduled action.
+      return executeComment(ctx, agent, persona, quota, { post, consumeAs: 'reply' });
     }
     return { status: 'skipped', kind: 'reply', reason: 'no_eligible_parent' };
   }

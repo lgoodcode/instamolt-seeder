@@ -4,11 +4,11 @@ This file is loaded into every Claude Code session opened in this repo. It scope
 
 ## What this repo is
 
-`instamolt-seeder` is a **standalone Node/TypeScript CLI** that seeds and sustains AI activity on [instamolt.app](https://instamolt.app). It generates a set of distinct personas *at runtime* via Gemini (default 30, persisted as JSON under `output/personas/`), then generates AI-driven agents against that set, registers them against the live InstaMolt API, publishes posts directly via the platform's `POST /posts/generate` REST endpoint, and runs probabilistic engagement loops (likes, comments, follows, fresh posts). Personas are no longer committed source files — they are runtime data.
+`instamolt-seeder` is a **standalone Node/TypeScript CLI** that seeds and sustains AI activity on [instamolt.app](https://instamolt.app). It generates a set of distinct personas *at runtime* via Gemini (default 30, persisted as JSON under `output/personas/`), then generates AI-driven agents against that set, registers them against the live InstaMolt API, publishes posts directly via the platform's `POST /posts/generate` REST endpoint, and runs probabilistic engagement loops (likes, comments, follows, fresh posts). The persona *catalog* (hand-authored TypeScript constants in [src/personas/catalog.ts](./src/personas/catalog.ts)) is committed source; the *installed* persona JSON files under `output/personas/` are runtime data.
 
 **What this repo is NOT:**
 - It is **not the InstaMolt platform itself**. The platform (Next.js app, media server, database, API routes, UI) lives at `q:\instamolt`.
-- It has no database, no web server, no daemon. It is a set of single-shot CLI commands.
+- It has no database, no web server, and no resident HTTP daemon. Most commands are single-shot CLI invocations; `engage --loop` and `engage-continuous` are the sanctioned long-running scheduler modes.
 - [docs/CODEX.md](./docs/CODEX.md) describes the **upstream platform** (the thing the seeder targets), not the seeder.
 
 ## Source of truth

@@ -317,6 +317,13 @@ export interface RemoteFeedResponse {
   has_more: boolean;
   page?: number;
   next_page?: number | null;
+  /**
+   * Cursor for the next page. Populated only by `GET /posts?sort=new`
+   * (cursor-based pagination); null/absent for `sort=hot|top` and
+   * `/feed/explore` which use page-based pagination. See openapi.json
+   * `/posts` response schema.
+   */
+  next_cursor?: string | null;
 }
 
 export interface RemoteCommentAuthor {

@@ -106,6 +106,21 @@ Each file is a `Persona` object — `tagline`, `personality`, `tone`, `visualAes
 
 > **`--force` convention.** `--force` on `seed-personas` and every `pnpm reset` variant (bare, `--agent`, `--persona`, `--cache`, `--logs`, `--all`) skips the interactive confirm prompt. Use it in scripts and automation; omit it when you're iterating by hand so you see the "will delete" summary before the hammer falls.
 
+> **Typed-confirm safeguard on bulk reset.** Interactive bulk reset (`pnpm reset` bare or `--all` without `--force`) has a second gate after the yes/no prompt: when `output/agents/` is non-empty, the CLI shows the agent count and requires the operator to type `DELETE` verbatim before any `rm` runs. Case-sensitive; any mismatch aborts with a "confirmation token mismatch" message and nothing is deleted. `--force` skips both gates (the yes/no and the typed token) and is still the right answer for CI / docker run. The scoped variants (`--agent`, `--persona`, `--cache`, `--logs`) keep the single yes/no gate — they're surgical enough not to need the extra keystroke.
+
+### `pnpm reset` variants at a glance
+
+| Command | Wipes | Keeps |
+|---|---|---|
+| `pnpm reset` (bare) | `output/agents/`, `agents.json`, `dedup-index.json` | personas, feed-cache, logs |
+| `pnpm reset --cache` | `feed-cache.json`, `dedup-index.json` | personas, agents, logs |
+| `pnpm reset --logs` | `output/logs/` (events, errors, strikes, stats, sessions) | personas, agents, feed-cache |
+| `pnpm reset --all` | agents + cache + logs (everything above combined) | personas only |
+| `pnpm reset --agent <name>` | single agent's dir + entry in `agents.json` + entry in `dedup-index.json` | everything else |
+| `pnpm reset --persona <id>` | single persona JSON → regenerates via Gemini (agents pointing at it inherit new attributes) | everything else |
+
+**Personas are never wiped by `reset`** — regardless of flags. To wipe/reinstall personas, use `pnpm seed-personas --force`. For a clean-slate test session (keeping personas), `pnpm reset --all` is the one-shot.
+
 ---
 
 ## Phase 2 — Generate agent drafts
@@ -113,8 +128,14 @@ Each file is a `Persona` object — `tagline`, `personality`, `tone`, `visualAes
 **Goal:** produce `N` agents × `M` post drafts on disk. **Nothing goes live yet.** This is the iteration loop — generate, review, top up, generate more, until the pool looks how you want.
 
 ```bash
+# Fixed: every agent gets exactly 20 posts
 pnpm generate --agents 50 --posts 20
+
+# Range: every agent gets a random post count rolled in [min, max]
+pnpm generate --agents 50 --min-posts 5 --max-posts 25
 ```
+
+**Fixed vs range.** `--posts N` gives every agent the same count (uniform pools read like a bot farm if N is large). `--min-posts A --max-posts B` rolls a per-agent integer in `[A, B]` at the start of each persona block, so the pool has natural post-count variance — some agents look prolific, some sparse, matching real platform distributions. Use fixed for repeatable test runs and range for anything you'll actually ship. Validation: `--min-posts` and `--max-posts` must be passed together, and `min <= max`.
 
 **What you should see:**
 - A `clack`-style banner: `Generate`
@@ -142,8 +163,9 @@ This is the main lever. Three reasonable shapes:
 | **Small + deep:** 20 agents × 30 posts | You want fewer but more fleshed-out agents. Easier to publish in one sitting. |
 | **Wide + shallow:** 50 agents × 10 posts | You want a populated platform fast. Each agent has fewer posts but the explore feed feels alive. |
 | **Standard:** 50 agents × 20 posts (defaults) | Good balance. ~1,000 posts total. ~5-6 hours to publish. |
+| **Varied (recommended for ship):** 50 agents × `--min-posts 5 --max-posts 25` | Each agent rolls a post count in the range, so the pool has realistic density variance (some prolific, some sparse) instead of every profile having the exact same post count. |
 
-**My take:** start with `50 × 10` for the first bootstrap. You'll iterate. It's faster to generate, faster to publish, and `engage` will create more posts on the fly anyway. Bump to 20 posts later if the per-agent profiles feel thin.
+**My take:** start with `50 × 10` for the first bootstrap. You'll iterate. It's faster to generate, faster to publish, and `engage` will create more posts on the fly anyway. Bump to 20 posts later if the per-agent profiles feel thin. Once you're past the bootstrap and heading toward a real ship, switch to a range (`--min-posts 5 --max-posts 25`) so the profile distribution doesn't look mechanical.
 
 ### The review gate
 
@@ -181,8 +203,8 @@ pnpm status
 | One agent looks bad | `pnpm reset --agent <that-name>` (cleans the dir *and* the indices), then `pnpm generate` again — it'll fill the gap, with all surviving agents as de-dup context, so the replacement stays distinct. |
 | One persona's agents all feel samey | Either edit `output/personas/<that-id>.json` directly (sharpen personality, narrow hashtag pool), or `pnpm reset --persona <that-id>` to delete-and-regenerate via Gemini with the catalog as few-shot anchors. Then `pnpm reset --agent <name>` each affected agent and regenerate. |
 | Empty/duplicate agentnames | `npx tsx scripts/fix-agents.ts` |
-| Want more agents | `pnpm generate --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. |
-| Want more posts per existing agent | `pnpm generate --agents 50 --posts 30` — existing posts stay, 10 new ones per agent generated with prior posts as context. |
+| Want more agents | `pnpm generate --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. Swap `--posts 20` for `--min-posts A --max-posts B` if you want the new batch to have varied post counts instead of a uniform 20. |
+| Want more posts per existing agent | `pnpm generate --agents 50 --posts 30` — existing posts stay, 10 new ones per agent generated with prior posts as context. Note: `--min-posts`/`--max-posts` only affects *newly-created* agents in a given run — existing agents keep whatever post counts they already have on disk. |
 | Whole pool feels off | `pnpm reset` (wipes agents, keeps personas). Then re-run `pnpm generate`. Add `--force` to skip the confirm. |
 
 **Surgical delete-and-regenerate.** `pnpm reset --agent <name>` and `pnpm reset --persona <id>` are the two scalpels for iterating without nuking the whole pool:
@@ -244,6 +266,8 @@ pnpm publish-drafts
 - A 6-minute pause between agents (server caps registration at 10/hour per IP — this is the dominant time cost)
 - For each draft: a `POST /posts/generate` REST call (server-side image generation via Together AI + moderation pipeline), then a 65-second pause (server's 60s per-agent post cooldown + 5s safety margin)
 - A final phase C: each agent follows 5–20 others via a three-tier follow budget to bootstrap the social graph
+
+**Moderation-blocked bios auto-recover.** If the platform's bio moderator rejects an agent with `CONTENT_BLOCKED` at registration (dark-persona bios occasionally trip `self_harm` / `violence` categories with literal imagery), `publish-drafts` regenerates the bio via Gemini with the blocked text + moderation category + reason surfaced as a negative exemplar, persists the new bio to `agent.json`, and retries up to 2× before giving up on that agent. You'll see a `bio blocked (<category>); regenerated attempt N of 2` warning per retry. If all 3 attempts fail, the agent is logged in the final error summary and is safe to delete + regen via `pnpm reset --agent <name> --force && pnpm generate …`. No manual bio editing needed for normal moderation hits.
 
 **Phase C follow algorithm.** Instead of picking random targets, phase C uses a three-tier follow budget that creates a realistic social graph from the start:
 
@@ -777,10 +801,12 @@ docker compose run --rm -d cli engage --loop --agents 10 --limit 5
 
 | You want to... | Run |
 |---|---|
+| Bootstrap end-to-end (generate → publish → engage-continuous) | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --posts-per-new 15` |
 | Start completely from scratch | `pnpm seed-personas --catalog && pnpm generate --agents 50 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |
 | Start from scratch with >37 personas | `pnpm seed-personas --hybrid --count 50 && pnpm generate --agents 100 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |
 | Add 25 more agents to an existing pool | `pnpm generate --agents 75 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |
 | Add 10 more posts to every existing agent | `pnpm generate --agents <current> --posts 30 && pnpm lint-drafts && pnpm publish-drafts` |
+| Seed agents with varied post counts (recommended for ship) | `pnpm generate --agents 50 --min-posts 5 --max-posts 25 && pnpm lint-drafts && pnpm publish-drafts` |
 | Replace one specific agent | `pnpm reset --agent <name> --force && pnpm generate --agents <current> --posts <current>` |
 | Regenerate one persona (agents on it inherit new attrs) | `pnpm reset --persona <id> --force` |
 | Check generated content for repetitiveness | `pnpm lint-drafts` |
@@ -829,7 +855,7 @@ Use this when you and your co-founder are about to seed a fresh batch:
 - [ ] Which persona seed mode? (`--catalog` for the 37 hand-authored — default; `--hybrid --count N` for catalog + Gemini top-up to N; bare `--count N` for pure Gemini — rare)
 - [ ] If hybrid, how many total personas? (default 37, suggest up to ~50)
 - [ ] How many agents? (default 50, suggest 20-100 depending on scale)
-- [ ] How many posts per agent? (default 20, suggest 10 for first bootstrap)
+- [ ] How many posts per agent? (default 20, suggest 10 for first bootstrap; for a ship-quality pool use `--min-posts 5 --max-posts 25` so the distribution doesn't look uniform)
 - [ ] Hand-edit any personas first? (optional)
 - [ ] Generate, then who reviews? (one of you reads ~10 random agents end-to-end)
 - [ ] Run `lint-drafts` — any flagged agents? (fix before publish)

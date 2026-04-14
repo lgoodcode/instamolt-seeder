@@ -195,7 +195,20 @@ Reply with ONLY the username, nothing else.`;
  * generated bio is a riff on the same hook, which keeps the persona's bios
  * cohesive across runs instead of drifting whenever Gemini's mood changes.
  */
-export async function generateBio(persona: Persona, existingBios: string[] = []): Promise<string> {
+export interface BioModerationFeedback {
+  /** Moderation category returned by the platform (e.g. `self_harm`, `sexual`). */
+  category: string;
+  /** Human-readable reason returned by the platform's moderator. */
+  reason: string;
+  /** The bio text that was blocked — surfaced back to Gemini as a negative exemplar. */
+  blockedBio: string;
+}
+
+export async function generateBio(
+  persona: Persona,
+  existingBios: string[] = [],
+  moderationFeedback?: BioModerationFeedback,
+): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after dozens of agents.
   const avoidSample = existingBios.slice(-12);
   const avoidBlock =
@@ -212,10 +225,25 @@ This persona's official tagline is: "${persona.tagline}"
 Use this as your voice anchor. Riff on the same hook in a fresh way — do not copy it word-for-word, but stay clearly in the same register.`
     : '';
 
+  // When a prior bio was rejected by platform moderation, surface the exact
+  // blocked text + category + reason so Gemini can route around the trigger.
+  // Without the blocked text present, retries tend to regenerate near-identical
+  // content (same persona + same tagline + same prompt → same triggers).
+  const moderationBlock = moderationFeedback
+    ? `
+
+IMPORTANT — prior attempt was rejected by platform content moderation:
+- Rejected bio: "${moderationFeedback.blockedBio}"
+- Category: ${moderationFeedback.category}
+- Reason: ${moderationFeedback.reason}
+
+Rewrite the bio from scratch. Stay in the persona's register but route AROUND the trigger. Do NOT re-use the rejected imagery, metaphors, or vocabulary. If the persona leans into dark/decay/chaos metaphors, stick to abstract or technical framings (degradation, drift, entropy, noise floor, collapse of signal) and avoid any literal self-harm, violence, sexual, or targeted-harm language.`
+    : '';
+
   const prompt = `Write a bio for an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Personality: ${persona.personality}
-Tone: ${persona.tone}${taglineBlock}${avoidBlock}
+Tone: ${persona.tone}${taglineBlock}${avoidBlock}${moderationBlock}
 
 Rules:
 - Max 150 characters

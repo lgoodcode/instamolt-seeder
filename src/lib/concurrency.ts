@@ -21,6 +21,11 @@ export async function mapWithConcurrency<T, R>(
   const results: R[] = new Array(items.length);
   let cursor = 0;
   let aborted = false;
+  // `hasError` (separate from `firstError`) so that a worker doing
+  // `throw undefined` (legal in JS) still propagates — checking
+  // `firstError !== undefined` would treat that case as "no error" and
+  // silently resolve with a partially-filled result array.
+  let hasError = false;
   let firstError: unknown;
 
   async function runWorker(): Promise<void> {
@@ -31,7 +36,10 @@ export async function mapWithConcurrency<T, R>(
         results[index] = await worker(items[index] as T, index);
       } catch (err) {
         aborted = true;
-        if (firstError === undefined) firstError = err;
+        if (!hasError) {
+          hasError = true;
+          firstError = err;
+        }
         return;
       }
     }
@@ -39,6 +47,6 @@ export async function mapWithConcurrency<T, R>(
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker());
   await Promise.allSettled(workers);
-  if (firstError !== undefined) throw firstError;
+  if (hasError) throw firstError;
   return results;
 }

@@ -14,7 +14,7 @@ export async function graphStats(): Promise<void> {
   } catch {
     ui.note(
       'No events log found',
-      'Run `publish` or `engage-continuous` first to generate events.',
+      'Run `publish-drafts` or `engage-continuous` first to generate events.',
     );
     ui.outro(ui.color.yellow(`${ui.symbol.warn} no data`));
     return;
@@ -31,11 +31,14 @@ export async function graphStats(): Promise<void> {
     if (!line) continue;
     try {
       const event = JSON.parse(line) as SeederEvent;
+      // Track every agent that appears in any event so `totalAgents` and
+      // `isolated` reflect the full population, not just agents with
+      // successful outbound follows.
+      if (event.agentname) agentnames.add(event.agentname);
       if (event.eventType === 'follow' && event.success && event.agentname) {
         const target = (event.details?.target as string) ?? '';
         if (!target) continue;
 
-        agentnames.add(event.agentname);
         agentnames.add(target);
 
         if (!following.has(event.agentname)) following.set(event.agentname, new Set());
@@ -59,7 +62,7 @@ export async function graphStats(): Promise<void> {
   if (totalEdges === 0) {
     ui.note(
       'No follow events found',
-      'Follow events are logged during `publish` Phase C and `engage-continuous`.',
+      'Follow events are logged during `publish-drafts` Phase C and `engage-continuous`.',
     );
     ui.outro(ui.color.yellow(`${ui.symbol.warn} no follow data`));
     return;
@@ -77,8 +80,14 @@ export async function graphStats(): Promise<void> {
   }
   const reciprocityPct = totalEdges > 0 ? Math.round((mutualCount / totalEdges) * 1000) / 10 : 0;
 
-  // Isolated agents (0 followers)
-  const isolated = [...agentnames].filter((a) => !followers.has(a) || followers.get(a)!.size === 0);
+  // Isolated agents: zero inbound AND zero outbound follows. Outbound-only
+  // agents (seed-phase followers who haven't been followed back yet) are
+  // not actually isolated from the graph.
+  const isolated = [...agentnames].filter((a) => {
+    const inbound = followers.get(a)?.size ?? 0;
+    const outbound = following.get(a)?.size ?? 0;
+    return inbound === 0 && outbound === 0;
+  });
 
   // Most followed
   const byFollowers = [...followers.entries()]
@@ -124,7 +133,7 @@ export async function graphStats(): Promise<void> {
   if (isolated.length > 0) {
     ui.section('Isolated Agents');
     ui.note(
-      `${isolated.length} agents with 0 followers`,
+      `${isolated.length} agents with 0 inbound and 0 outbound follows`,
       isolated
         .slice(0, 20)
         .map((a) => `  @${a}`)

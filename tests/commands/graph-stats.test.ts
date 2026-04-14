@@ -196,23 +196,29 @@ describe('graphStats', () => {
     expect(body).toMatch(/Tier 3 \(discovery\):\s+1/);
   });
 
-  it('lists agents who are never followed as isolated', async () => {
-    // alpha follows beta and gamma; beta and gamma never get followed back,
-    // and alpha is never a target at all → alpha is isolated.
-    // Also: all the targets *are* followed, so they are NOT isolated.
+  it('lists only fully-disconnected agents (0 inbound AND 0 outbound) as isolated', async () => {
+    // delta appears as a follow-event author but every follow attempt it
+    // made failed (success=false) → delta has zero inbound AND zero
+    // outbound edges → delta is isolated. alpha has outbound follows so it
+    // is NOT isolated even though nobody follows alpha back. beta and
+    // gamma are targets of alpha's follows so they have inbound edges.
     const lines = [
       makeFollow({ agentname: 'alpha', target: 'beta', tier: 1 }),
       makeFollow({ agentname: 'alpha', target: 'gamma', tier: 2 }),
+      // delta tried to follow beta but the server rejected → no edge is
+      // recorded, but delta is still present in the population.
+      makeFollow({ agentname: 'delta', target: 'beta', tier: 1, success: false }),
     ];
     fsState.files.set(eventsPath, lines.join('\n'));
 
     await graphStats();
 
-    // Isolated section renders as a note whose title contains the count.
-    const isolatedNote = uiState.notes.find((n) => /with 0 followers/.test(n.title));
+    const isolatedNote = uiState.notes.find((n) => /with 0 inbound and 0 outbound/.test(n.title));
     expect(isolatedNote).toBeDefined();
-    expect(isolatedNote!.body).toContain('@alpha');
+    expect(isolatedNote!.body).toContain('@delta');
+    expect(isolatedNote!.body).not.toContain('@alpha');
     expect(isolatedNote!.body).not.toContain('@beta');
+    expect(isolatedNote!.body).not.toContain('@gamma');
     expect(isolatedNote!.body).not.toContain('@gamma');
   });
 

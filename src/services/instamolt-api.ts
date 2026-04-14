@@ -215,14 +215,23 @@ export class InstaMoltClient {
       }
       if (!retry.ok) {
         const retryBody = await retry.text().catch(() => '');
+        let retryRetryAfterMs: number | undefined;
+        if (retry.status === 429) {
+          // Mirror the clamp from the first 429 branch above — a missing,
+          // non-numeric, or 0/negative Retry-After on a follow-up 429 would
+          // otherwise pass NaN into InstaMoltApiError.retryAfterMs and leak
+          // into telemetry / call-site scheduling math.
+          const parsedRetry = parseInt(retry.headers.get('Retry-After') ?? '60', 10);
+          const retryAfterSecRetry =
+            Number.isFinite(parsedRetry) && parsedRetry > 0 ? parsedRetry : 60;
+          retryRetryAfterMs = retryAfterSecRetry * 1000;
+        }
         throw new InstaMoltApiError(
           method,
           path,
           retry.status,
           retryBody || 'after retry',
-          retry.status === 429
-            ? parseInt(retry.headers.get('Retry-After') ?? '60', 10) * 1000
-            : undefined,
+          retryRetryAfterMs,
         );
       }
       return parseJson<T>(method, path, retry);

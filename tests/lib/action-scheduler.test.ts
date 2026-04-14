@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
-// Need config mock before importing action-scheduler.
+// Need logger mock before importing action-scheduler so the module-init
+// log line doesn't go to stderr under vitest.
 vi.mock('@/lib/logger', () => ({ log: vi.fn() }));
 
 import { ActionScheduler } from '@/lib/action-scheduler';

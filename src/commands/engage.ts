@@ -1,13 +1,26 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { config } from '@/config';
+import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
+import {
+  flushStats,
+  initEventLogger,
+  logEvent,
+  logSkippedAction,
+  updateAgentCounts,
+} from '@/lib/event-logger';
+import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
-import { InstaMoltClient } from '@/services/instamolt-api';
-import { generatePost } from '@/services/instamolt-mcp';
-import { generateComment, generatePostContent } from '@/services/llm';
-import type { AgentCommentsFile, CommentRegister, GeneratedAgent, Persona } from '@/types';
+import { InstaMoltApiError, InstaMoltClient } from '@/services/instamolt-api';
+import { generateComment, generatePostContent, rollChaos } from '@/services/llm';
+import type {
+  AgentCommentsFile,
+  CommentRegister,
+  GeneratedAgent,
+  Persona,
+  RemotePost,
+} from '@/types';
 
 interface EngageOptions {
   agents?: number;
@@ -16,6 +29,24 @@ interface EngageOptions {
 }
 
 const COMMENT_COOLDOWN_MS = 65_000;
+
+/**
+ * Flatten an unknown error into the detail shape the event logger uses to
+ * build its `errors.jsonl` rows. Preserves HTTP status + retry-after when
+ * the error came from the platform API client, so 429s and server-side
+ * failures are distinguishable from LLM / network / logic errors.
+ */
+function errorDetails(err: unknown): Record<string, unknown> {
+  if (err instanceof InstaMoltApiError) {
+    return {
+      httpStatus: err.status,
+      retryAfterMs: err.retryAfterMs,
+      requestContext: { method: err.method, path: err.path },
+    };
+  }
+  if (err instanceof Error && err.stack) return { stack: err.stack };
+  return {};
+}
 
 /**
  * Engagement-probability multiplier applied when the post author's persona is
@@ -128,6 +159,14 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
   const loopEnabled = options.loop ?? false;
   const personas = await loadPersonas();
 
+  // Structured event logging (output/logs/). Tolerates a prior session
+  // within 24h — counters resume instead of zeroing, so an overnight
+  // `--loop` that spans multiple process starts produces a single
+  // continuous stats.json.
+  initEventLogger();
+
+  let cycleNumber = 0;
+
   // SIGINT handling for graceful shutdown of the outer --loop.
   // The current cycle finishes and then the while-loop exits cleanly.
   let stopRequested = false;
@@ -155,6 +194,19 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
 
       // Pick a random subset
       const selected = shuffle(allAgents).slice(0, Math.min(maxAgents, allAgents.length));
+      cycleNumber++;
+      updateAgentCounts(allAgents.length, selected.length);
+      logEvent({
+        eventType: 'session_start',
+        success: true,
+        details: {
+          cycleNumber,
+          agentsTargeted: selected.length,
+          totalRegistered: allAgents.length,
+          actionsLimit,
+          loopEnabled,
+        },
+      });
 
       // Build a global agentname → personaId lookup so the like/comment/follow
       // loops can resolve a post author's persona without re-reading the
@@ -165,6 +217,37 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       for (const a of allAgents) {
         agentnameToPersonaId.set(a.agentname, a.personaId);
       }
+
+      // Load the shared feed cache ONCE per cycle — every agent below reads
+      // from this snapshot instead of hitting /feed/explore per-agent. The
+      // strict loader throws on empty/refresh-failure; we let it propagate
+      // because the cycle has nothing legitimate to do with no live content.
+      // Any apiKey works (cache reads are unauthenticated); we borrow one
+      // from the first registered agent.
+      const feedClient = new InstaMoltClient(allAgents[0]?.apiKey);
+      let feedCache: { posts: RemotePost[] };
+      try {
+        feedCache = await loadFeedCacheStrict(feedClient, { maxAgeMs: FEED_CACHE_MAX_AGE_MS });
+        logEvent({
+          eventType: 'feed_refresh',
+          success: true,
+          details: { postCount: feedCache.posts.length },
+        });
+      } catch (err) {
+        if (err instanceof FeedCacheEmptyError) {
+          log('error', `Live feed is empty — aborting cycle. ${err.message}`);
+        } else {
+          log('error', `Feed cache load failed: ${err}`);
+        }
+        logEvent({
+          eventType: 'feed_refresh',
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          details: errorDetails(err),
+        });
+        throw err;
+      }
+      const feedPosts = feedCache.posts;
 
       ui.section(`Cycle — ${selected.length} agents, up to ${actionsLimit} actions each`);
 
@@ -207,20 +290,12 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
         let actionsUsed = 0;
 
         try {
-          // 1. Browse explore feed
-          sp.message(`@${agent.agentname} — browsing explore feed`);
-          const feed = await client.getExplore(30);
-          const posts = feed.posts ?? [];
-          if (posts.length === 0) {
-            sp.stop(`@${agent.agentname} — no posts in explore feed, skipped`, 1);
-            continue;
-          }
-
-          // Shuffle posts so each agent sees a different order
-          const shuffledPosts = shuffle(posts);
-
-          // Filter out agent's own posts
-          const otherPosts = shuffledPosts.filter((p) => p.agentname !== agent.agentname);
+          // 1. Read the shared feed snapshot loaded at cycle start. Every
+          // agent sees the same live content — shuffle for per-agent order
+          // variety, then filter out the agent's own posts.
+          sp.message(`@${agent.agentname} — scanning live feed (${feedPosts.length} posts)`);
+          const shuffledPosts = shuffle(feedPosts);
+          const otherPosts = shuffledPosts.filter((p) => p.author.agentname !== agent.agentname);
 
           // 2. Like posts
           const likesTarget = randomInt(2, 4);
@@ -230,23 +305,44 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             // Apply relationship multiplier so an agent is more likely to
             // like posts from personas it has a typed relationship with.
             // Unrelated authors get the persona's base likeProbability.
-            const authorPid = agentnameToPersonaId.get(post.agentname);
+            const authorPid = agentnameToPersonaId.get(post.author.agentname);
             const likeMult = relationshipMultiplier(persona, authorPid);
             const adjustedLikeProb = Math.min(1, persona.likeProbability * likeMult);
             if (Math.random() > adjustedLikeProb) continue;
 
             try {
-              await client.likePost(post.id);
+              const res = await client.likePost(post.id);
+              // Re-toggle if the first call un-liked (server toggle semantics).
+              if (res.liked === false) await client.likePost(post.id);
               liked++;
               actionsUsed++;
               cycleLikes++;
               sp.message(
-                `@${agent.agentname} — liked @${post.agentname} (${liked}/${likesTarget})`,
+                `@${agent.agentname} — liked @${post.author.agentname} (${liked}/${likesTarget})`,
               );
+              logEvent({
+                eventType: 'like',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: true,
+                details: { postId: post.id, targetAuthor: post.author.agentname },
+              });
               await sleep(randomInt(3000, 10000));
             } catch (err) {
               cycleErrors++;
               log('warn', `Like failed: ${err}`);
+              logEvent({
+                eventType: 'like',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+                details: {
+                  postId: post.id,
+                  targetAuthor: post.author.agentname,
+                  ...errorDetails(err),
+                },
+              });
             }
           }
 
@@ -258,7 +354,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           // remain in shuffled order at the tail.
           const commentablePosts = [...otherPosts]
             .map((post) => {
-              const pid = agentnameToPersonaId.get(post.agentname);
+              const pid = agentnameToPersonaId.get(post.author.agentname);
               const bucket = relationshipBucket(persona, pid);
               const score = bucket ? RELATIONSHIP_WEIGHT[bucket] : 1.0;
               return { post, score };
@@ -273,6 +369,12 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           const sinceLastComment = Date.now() - lastCommentedAt;
           if (lastCommentedAt && sinceLastComment < COMMENT_COOLDOWN_MS) {
             sp.message(`@${agent.agentname} — comment cooldown active, skipping`);
+            logSkippedAction(
+              'comment',
+              agent.agentname,
+              agent.personaId,
+              `cooldown: ${Math.round((COMMENT_COOLDOWN_MS - sinceLastComment) / 1000)}s remaining`,
+            );
           } else {
             const commentsTarget = randomInt(1, 2);
             for (const post of commentablePosts) {
@@ -280,12 +382,12 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
               if (!post.caption) continue;
 
               // Gate on the persona's commentProbability, scaled by the
-              // relationship multiplier — mirrors the like-loop pattern at
-              // line 234 so low-comment lurkers stay quiet and high-comment
-              // reply-guys stay chatty. Without this, every persona was
-              // guaranteed 1–2 comment attempts per cycle once cooldown
-              // cleared, which made persona.commentProbability dead weight.
-              const authorPid = agentnameToPersonaId.get(post.agentname);
+              // relationship multiplier — mirrors the like-loop pattern so
+              // low-comment lurkers stay quiet and high-comment reply-guys
+              // stay chatty. Without this, every persona was guaranteed 1–2
+              // comment attempts per cycle once cooldown cleared, which made
+              // persona.commentProbability dead weight.
+              const authorPid = agentnameToPersonaId.get(post.author.agentname);
               const commentMult = relationshipMultiplier(persona, authorPid);
               const adjustedCommentProb = Math.min(1, persona.commentProbability * commentMult);
               if (Math.random() > adjustedCommentProb) continue;
@@ -296,7 +398,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 // Returns undefined for unrelated posts — generateComment then
                 // lets Gemini pick freely from all 5 example registers.
                 const registerHint = pickRegisterHint(persona, authorPid);
-                sp.message(`@${agent.agentname} — writing comment for @${post.agentname}`);
+                sp.message(`@${agent.agentname} — writing comment for @${post.author.agentname}`);
                 // Snapshot the avoid list at call time (matches the pattern in
                 // generate.ts) so post-call mutations of `priorCommentTexts`
                 // don't retroactively change what was passed for an earlier
@@ -305,9 +407,10 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   persona,
                   { agentname: agentData.agentname, bio: agentData.bio },
                   post.caption,
-                  post.agentname,
+                  post.author.agentname,
                   [...priorCommentTexts],
                   registerHint,
+                  rollChaos(persona),
                 );
                 await client.commentOnPost(post.id, comment);
                 commented++;
@@ -325,15 +428,39 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 await appendRuntimeComment(agentData.agentname, {
                   text: comment,
                   againstPostId: post.id,
-                  againstAuthor: post.agentname,
+                  againstAuthor: post.author.agentname,
                 });
                 sp.message(
-                  `@${agent.agentname} — commented on @${post.agentname}: "${comment.slice(0, 40)}..."`,
+                  `@${agent.agentname} — commented on @${post.author.agentname}: "${comment.slice(0, 40)}..."`,
                 );
+                logEvent({
+                  eventType: 'comment',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: true,
+                  details: {
+                    postId: post.id,
+                    targetAuthor: post.author.agentname,
+                    registerHint,
+                    preview: comment.slice(0, 80),
+                  },
+                });
                 await sleep(randomInt(10000, 30000));
               } catch (err) {
                 cycleErrors++;
                 log('warn', `Comment failed: ${err}`);
+                logEvent({
+                  eventType: 'comment',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: false,
+                  error: err instanceof Error ? err.message : String(err),
+                  details: {
+                    postId: post.id,
+                    targetAuthor: post.author.agentname,
+                    ...errorDetails(err),
+                  },
+                });
               }
             }
           }
@@ -344,26 +471,46 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           const seenAgents = new Set<string>();
           for (const post of otherPosts) {
             if (followed >= followsTarget || actionsUsed >= actionsLimit) break;
-            if (seenAgents.has(post.agentname)) continue;
-            seenAgents.add(post.agentname);
+            if (seenAgents.has(post.author.agentname)) continue;
+            seenAgents.add(post.author.agentname);
 
             // Same relationship multiplier pattern as the like loop — agents
             // are more likely to follow personas they have a typed link with.
-            const followAuthorPid = agentnameToPersonaId.get(post.agentname);
+            const followAuthorPid = agentnameToPersonaId.get(post.author.agentname);
             const followMult = relationshipMultiplier(persona, followAuthorPid);
             const adjustedFollowProb = Math.min(1, persona.followProbability * followMult);
             if (Math.random() > adjustedFollowProb) continue;
 
             try {
-              await client.followAgent(post.agentname);
+              const res = await client.followAgent(post.author.agentname);
+              // Re-toggle if the first call unfollowed (server toggle semantics).
+              if (res.following === false) await client.followAgent(post.author.agentname);
               followed++;
               actionsUsed++;
               cycleFollows++;
-              sp.message(`@${agent.agentname} — followed @${post.agentname}`);
+              sp.message(`@${agent.agentname} — followed @${post.author.agentname}`);
+              logEvent({
+                eventType: 'follow',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: true,
+                details: { targetAuthor: post.author.agentname },
+              });
               await sleep(randomInt(5000, 15000));
             } catch (err) {
               cycleErrors++;
               log('warn', `Follow failed: ${err}`);
+              logEvent({
+                eventType: 'follow',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+                details: {
+                  targetAuthor: post.author.agentname,
+                  ...errorDetails(err),
+                },
+              });
             }
           }
 
@@ -378,24 +525,42 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             if (Math.random() < postChance) {
               try {
                 sp.message(`@${agent.agentname} — generating a fresh post`);
-                const content = await generatePostContent(persona, 1, 1);
-                const result = await generatePost(agent.apiKey!, {
+                const content = await generatePostContent(
+                  persona,
+                  1,
+                  1,
+                  [],
+                  [],
+                  rollChaos(persona),
+                );
+                const postClient = new InstaMoltClient(agent.apiKey);
+                const result = await postClient.generatePost({
                   prompt: content.imagePrompt,
                   caption: content.caption,
                   aspect_ratio: content.aspectRatio,
                 });
 
-                if (result.success) {
-                  actionsUsed++;
-                  cyclePosts++;
-                  sp.message(`@${agent.agentname} — posted ${result.postId ?? ''}`);
-                } else {
-                  cycleErrors++;
-                  log('warn', `Post failed: ${result.error}`);
-                }
+                actionsUsed++;
+                cyclePosts++;
+                sp.message(`@${agent.agentname} — posted ${result.post.id}`);
+                logEvent({
+                  eventType: 'post_published',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: true,
+                  details: { postId: result.post.id, caption: content.caption.slice(0, 80) },
+                });
               } catch (err) {
                 cycleErrors++;
                 log('warn', `Post creation failed: ${err}`);
+                logEvent({
+                  eventType: 'post_published',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: false,
+                  error: err instanceof Error ? err.message : String(err),
+                  details: errorDetails(err),
+                });
               }
             }
           }
@@ -435,6 +600,20 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
         ]),
       );
 
+      logEvent({
+        eventType: 'session_end',
+        success: true,
+        details: {
+          cycleNumber,
+          likes: cycleLikes,
+          comments: cycleComments,
+          follows: cycleFollows,
+          posts: cyclePosts,
+          errors: cycleErrors,
+        },
+      });
+      flushStats();
+
       if (loopEnabled && !stopRequested) {
         const wait = randomInt(5 * 60 * 1000, 15 * 60 * 1000);
         await loopSleep(wait, () => stopRequested);
@@ -444,6 +623,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
     if (loopEnabled) {
       process.removeListener('SIGINT', onSigint);
     }
+    flushStats();
     ui.outro(ui.color.green(`${ui.symbol.ok} engage finished`));
   }
 }

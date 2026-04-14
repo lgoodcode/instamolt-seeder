@@ -25,6 +25,7 @@ function stub(id: string, weight = 1): Persona {
     weight,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 

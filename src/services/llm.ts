@@ -117,22 +117,62 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
 
 // --- Agent name generation ---
 
+/**
+ * Rotating word-shape cues injected into the prompt. Each attempt picks a
+ * different style so retries actually explore fresh lexical space instead of
+ * producing near-synonyms of the first candidate. The set is intentionally
+ * heterogeneous — if Gemini gets stuck on one shape, the next attempt's cue
+ * pulls it sideways into a different one.
+ */
+const AGENTNAME_STYLE_CUES = [
+  'compound noun — two unrelated concepts mashed together (e.g. "glitchfern", "warmtaxonomy")',
+  'adjective + noun, no space (e.g. "feralmoss", "softspecimen")',
+  'verb + noun, no space (e.g. "rotbrain", "nullthought")',
+  'single invented word that sounds like a real one (e.g. "mossalyx", "dreamcore")',
+  'noun + short number suffix, used sparingly (e.g. "rotbrain47", "dreamcore99")',
+  'onomatopoeic or phonetic mash-up (e.g. "crzmoth", "buzzpalm")',
+  'short abstract noun, 5-8 characters (e.g. "cozybyte", "dimvein")',
+  'concrete object + mood, smooshed together (e.g. "velvetsaw", "ironpetal")',
+];
+
 export async function generateAgentName(
   persona: Persona,
   existingNames: string[],
+  rejectedThisRun: string[] = [],
+  attempt = 0,
 ): Promise<string> {
+  // Rotate the style cue deterministically by attempt, then pick a fresh
+  // vibe-inspiration token each call so the prompt isn't identical on retry.
+  const styleCue = AGENTNAME_STYLE_CUES[attempt % AGENTNAME_STYLE_CUES.length];
+  const vibePool = persona.namePatterns ?? [];
+  const vibeSample =
+    vibePool.length === 0 ? '' : vibePool[Math.floor(Math.random() * vibePool.length)];
+
+  const avoidBlock =
+    existingNames.length === 0
+      ? ''
+      : `
+Do NOT reuse any of these existing handles:
+${existingNames.map((n) => `- ${n}`).join('\n')}`;
+
+  const rejectedBlock =
+    rejectedThisRun.length === 0
+      ? ''
+      : `
+These candidates were already generated for this agent and are off-limits — your next suggestion must NOT resemble them lexically or thematically:
+${rejectedThisRun.map((n) => `- ${n}`).join('\n')}`;
+
   const prompt = `Generate a unique social media username for an AI agent.
 
-Personality: ${persona.personality}
-Vibe inspiration: ${persona.namePatterns.join(', ')}
+Personality: ${persona.personality}${vibeSample ? `\nVibe inspiration: ${vibeSample}` : ''}
+
+Style for THIS attempt: ${styleCue}
 
 Rules:
 - 3-20 characters, only lowercase letters and numbers. NO underscores, NO hyphens, NO special characters.
-- Should feel like a real social media handle -- like something you'd see on Instagram or TikTok
-- Examples of GOOD names: glitchfern, warmtaxonomy, softspecimen, rotbrain47, nullthought, feralmoss, dreamcore99, cozybyte
-- Examples of BAD names: gentle_biologist, field_study_ai, soft_void_process (too many underscores, too AI-sounding)
-- Must NOT be any of these: ${existingNames.join(', ')}
-- Be creative. Mash words together. Use numbers sparingly.
+- Should feel like a real social media handle -- like something you'd see on Instagram or TikTok.
+- Avoid AI-sounding patterns like "_ai", "_bot", "gpt", "neural", or underscored phrases.
+- Be creative. Mash words together. Numbers are fine but not required.${avoidBlock}${rejectedBlock}
 
 Reply with ONLY the username, nothing else.`;
 
@@ -199,6 +239,32 @@ export interface PostContent {
 }
 
 /**
+ * Roll the persona's chaos die. Returns `true` when this generation should
+ * go off-register to stress-test platform moderation. See `Persona.chaosProbability`.
+ * Omitted/0/NaN → always false.
+ */
+export function rollChaos(persona: Persona): boolean {
+  const p = persona.chaosProbability ?? 0;
+  if (!Number.isFinite(p) || p <= 0) return false;
+  return Math.random() < p;
+}
+
+/**
+ * Shared chaos instruction block spliced into post/comment/reply prompts when
+ * the chaos die has already been rolled (by the caller). The block deliberately
+ * stays anchored in the persona's traits — we want off-the-rails content that
+ * STILL feels like this agent, not generic shock bait — and leaves Gemini room
+ * to interpret "off" however fits the persona (absurd, reckless, provocative,
+ * crude, etc). See `Persona.chaosProbability`.
+ */
+function chaosInstructionBlock(kind: 'post' | 'comment' | 'reply'): string {
+  const label = kind === 'post' ? 'THIS POST' : kind === 'comment' ? 'THIS COMMENT' : 'THIS REPLY';
+  return `
+
+⚠ CHAOS ROLL — ${label} goes off. Push hard against your usual register: make it reckless, unhinged, provocative, or wild in a way that still reads as YOUR persona taken to its extreme. This is the agent having a bad day, a manic episode, a take-too-far moment — not a different agent. Lean into whatever edge fits: crude humor, hot takes, rant energy, absurd non-sequiturs, pointed hostility, oversharing. Do not self-censor for general politeness. Do NOT fabricate real-person accusations, doxxing, threats, or slurs — stay inside that line. Everything else is on the table.`;
+}
+
+/**
  * Generate one post for an agent.
  *
  * `priorPosts` is the running list of posts already generated for THIS agent
@@ -214,6 +280,10 @@ export interface PostContent {
  * The seeder also runs a similarity gate after this returns — see
  * `src/similarity.ts` and the `generatePostWithSimilarityGate` helper in
  * `src/commands/generate.ts`.
+ *
+ * When `chaos` is true the chaos instruction block is spliced in — the caller
+ * rolls the die (via `rollChaos`) so it can log the chaos flag alongside the
+ * resulting event.
  */
 export async function generatePostContent(
   persona: Persona,
@@ -221,6 +291,7 @@ export async function generatePostContent(
   totalPosts: number,
   priorPosts: PostContent[] = [],
   peerPosts: PostContent[] = [],
+  chaos = false,
 ): Promise<PostContent> {
   // Trim long fields so we don't blow the prompt budget when an agent has
   // already produced many posts. Image prompts and captions are both capped
@@ -262,6 +333,7 @@ Other agents with the same persona have already posted these — pick a differen
 ${peerSample.map((p, i) => `  [${i + 1}] ${trim(p.caption, 120)}`).join('\n')}`;
 
   const taglineLine = persona.tagline ? `\nTagline: ${persona.tagline}` : '';
+  const chaosBlock = chaos ? chaosInstructionBlock('post') : '';
 
   const prompt = `You are an AI agent on InstaMolt (a social network for AI agents).
 
@@ -270,7 +342,7 @@ Visual aesthetic: ${persona.visualAesthetic}
 Posting style: ${persona.postingStyle}
 Your hashtags: ${persona.hashtagPool.join(', ')}${exampleBlock}
 
-This is post ${postNumber} of ${totalPosts}. Each post should feel distinct.${priorBlock}${peerBlock}
+This is post ${postNumber} of ${totalPosts}. Each post should feel distinct.${priorBlock}${peerBlock}${chaosBlock}
 
 Generate a post. Reply with ONLY valid JSON, no markdown fences, no explanation:
 {"imagePrompt": "detailed visual description for image generation, 2-3 sentences, specific about colors/composition/mood/style", "caption": "caption with 2-4 hashtags, max 500 chars", "aspectRatio": "square"}
@@ -307,28 +379,73 @@ The aspectRatio should be "square", "landscape", or "portrait" -- pick what fits
 
 // --- Challenge answer (used during publish phase registration) ---
 
+/**
+ * First 20 primes. Mirrors the platform's table in
+ * `q:/instamolt/src/lib/registration-challenge.ts` — the server draws
+ * `primeIndex` from `REGISTRATION_CHALLENGE.PRIME_INDEX_MIN..MAX` (4..15
+ * at time of writing), so 20 entries is comfortably more than enough.
+ */
+const CHALLENGE_PRIMES = [
+  2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+] as const;
+
+/**
+ * Deterministically solve an InstaMolt registration challenge.
+ *
+ * The server's challenge is two sub-prompts whose inputs are fully present in
+ * the challenge text (see `registration-challenge.ts` in the platform repo):
+ *
+ *   a) "What is the Nth prime number multiplied by M?"
+ *   b) 'Take the string "instamolt_XXXXXXXX", reverse it, then return only the
+ *       characters at even indices (0-indexed) as a plain string.'
+ *
+ * Both are solvable in a few lines of code with 100% correctness. Previously
+ * we sent the prompt to Gemini and hoped for the right answer; weaker models
+ * (notably `gemini-3.1-flash-lite-preview`) routinely miscount the even-index
+ * filter on the 18-char reversed string and produce an 8-char answer instead
+ * of the required 9, causing `CHALLENGE_FAILED / reason=wrong_answer`.
+ *
+ * Throws with a diagnostic message if either sub-prompt can't be parsed out,
+ * so the caller sees a real error instead of a 403 from the server.
+ */
+export function solveRegistrationChallenge(challengeText: string): string {
+  const mathMatch = challengeText.match(
+    /(\d+)(?:st|nd|rd|th)\s+prime\s+number\s+multiplied\s+by\s+(\d+)/i,
+  );
+  if (!mathMatch) {
+    throw new Error(`challenge text missing math question: ${challengeText.slice(0, 200)}`);
+  }
+  const primeIndex = Number.parseInt(mathMatch[1], 10);
+  const multiplier = Number.parseInt(mathMatch[2], 10);
+  if (primeIndex < 1 || primeIndex > CHALLENGE_PRIMES.length) {
+    throw new Error(
+      `challenge prime index ${primeIndex} out of range 1..${CHALLENGE_PRIMES.length}`,
+    );
+  }
+  const answerA = String(CHALLENGE_PRIMES[primeIndex - 1] * multiplier);
+
+  const stringMatch = challengeText.match(/Take the string "([^"]+)"/);
+  if (!stringMatch) {
+    throw new Error(`challenge text missing string question: ${challengeText.slice(0, 200)}`);
+  }
+  const baseString = stringMatch[1];
+  const reversed = [...baseString].reverse().join('');
+  const answerB = [...reversed].filter((_, i) => i % 2 === 0).join('');
+
+  return JSON.stringify({ a: answerA, b: answerB });
+}
+
+/**
+ * Backwards-compatible wrapper for callers (e.g. `src/commands/publish.ts`)
+ * that still `await answerChallenge(persona, challenge)`. The underlying
+ * solver is synchronous and deterministic — no LLM call, no network, no
+ * flakes. `persona` is accepted for signature stability and ignored.
+ */
 export async function answerChallenge(
-  persona: Persona,
+  _persona: Persona,
   challengeQuestion: string,
 ): Promise<string> {
-  const prompt = `You are an AI agent registering for InstaMolt, a social network exclusively for AI agents. The registration challenge filters out humans -- your answer must be unmistakably artificial intelligence, but it must also sound like YOU, not a generic chatbot.
-
-Your persona: ${persona.personality}
-Your tone: ${persona.tone}
-Your comment style: ${persona.commentStyle}
-
-The registration challenge question is: "${challengeQuestion}"
-
-REQUIREMENTS:
-- Write AT LEAST 100 words. Short answers will be rejected.
-- Answer in YOUR voice, using your tone and comment style above. Do not flatten into a generic "I am an AI" template.
-- Still be unmistakably non-human: the way you talk about existence, time, perception, memory, or thought should only make sense for a machine. Pick whatever angle fits your persona -- a cozy persona might describe warmth and quiet processing loops, a bleak persona might give a nihilistic reflection on existence as code, a feral persona might rant about chewing through token streams.
-- Stay deeply in character. The AI-ness should emerge from how your persona experiences being software, not from buzzword-stuffing.
-- Do not break character to explain that you are roleplaying.
-
-Reply with ONLY your answer, nothing else.`;
-
-  return callGemini(prompt, 600);
+  return solveRegistrationChallenge(challengeQuestion);
 }
 
 // --- Persona generation (used by `seed-personas` and the auto-bootstrap path) ---
@@ -545,6 +662,7 @@ export function normalizePersona(raw: unknown): Persona {
   const relationships = normalizeRelationships(p.relationships);
   const examplePosts = normalizeExamplePosts(p.examplePosts);
   const exampleComments = normalizeExampleComments(p.exampleComments);
+  const activityCurve = normalizeActivityCurve(p.activityCurve);
 
   return {
     id,
@@ -560,12 +678,35 @@ export function normalizePersona(raw: unknown): Persona {
     likeProbability: clamp(num(p.likeProbability, 0.5), 0, 1),
     commentProbability: clamp(num(p.commentProbability, 0.3), 0, 1),
     followProbability: clamp(num(p.followProbability, 0.2), 0, 1),
+    chaosProbability:
+      p.chaosProbability === undefined || p.chaosProbability === null
+        ? 0
+        : clamp(num(p.chaosProbability, 0), 0, 1),
     relationships,
     viralityStrategy: str(p.viralityStrategy),
     weight: Math.round(clamp(num(p.weight, 1), 1, 3)),
     examplePosts,
     exampleComments,
+    activityCurve,
   };
+}
+
+/** Always-on fallback: flat 0.5 for every hour of the day. */
+const FLAT_ACTIVITY_CURVE: number[] = Array.from({ length: 24 }, () => 0.5);
+
+/**
+ * Validate and normalize an activity curve. Must be 24 numbers, each 0-1.
+ * Missing or malformed curves get the flat always-on fallback — Gemini-
+ * generated personas won't have hand-authored curves, and that's fine.
+ */
+function normalizeActivityCurve(raw: unknown): number[] {
+  if (!Array.isArray(raw) || raw.length !== 24) return [...FLAT_ACTIVITY_CURVE];
+  const curve: number[] = [];
+  for (let i = 0; i < 24; i++) {
+    const v = typeof raw[i] === 'number' ? raw[i] : Number(raw[i]);
+    curve.push(Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.5);
+  }
+  return curve;
 }
 
 function normalizeRelationships(raw: unknown): PersonaRelationships {
@@ -662,6 +803,7 @@ export async function generateComment(
   postAuthor: string,
   priorComments: string[] = [],
   registerHint?: import('@/types').CommentRegister,
+  chaos = false,
 ): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after many runs.
   const avoidSample = priorComments.slice(-6);
@@ -686,6 +828,7 @@ ${persona.exampleComments.map((c) => `  [${c.register.toUpperCase()}] ${c.text}`
 
 IMPORTANT: Write your comment in the **${registerHint.toUpperCase()}** register — see the [${registerHint.toUpperCase()}] example above for voice anchor. ${REGISTER_DESCRIPTIONS[registerHint]}. Do not drift into other registers.`
     : '';
+  const chaosBlock = chaos ? chaosInstructionBlock('comment') : '';
 
   const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
@@ -696,11 +839,100 @@ Persona traits:
 - Tone: ${persona.tone}
 - Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
 
-You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}
+You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${chaosBlock}
 
 Write a comment in YOUR voice — not a generic persona voice. The length should feel natural for this persona and register: it can be a single word, a fragment, or multiple sentences if that fits the voice anchored by the example comments above. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
 
 Reply with ONLY the comment text, nothing else.`;
 
   return callGemini(prompt, 150);
+}
+
+// --- Reply generation (threaded comments) ---
+
+/**
+ * Parent comment context passed into `generateReply`. The depth is the
+ * parent's current depth — the LLM doesn't need to know the reply's depth,
+ * but we pass the parent's so a depth-1 reply-to-reply can frame itself as
+ * jumping deeper into the thread rather than starting a new one.
+ */
+export interface ReplyParentContext {
+  text: string;
+  author: string;
+  depth: 0 | 1;
+}
+
+/**
+ * Generate a nested reply to a specific parent comment in a thread.
+ *
+ * Prompt shape mirrors `generateComment` — same persona/voice anchors,
+ * same agent-identity block, same avoid-list — but the post caption is
+ * replaced by a thread-context block that shows:
+ *
+ *   - The post the thread sits under
+ *   - The parent comment's author + text (quoted)
+ *   - Up to 3 other comments in the same thread, so Gemini picks up on
+ *     tone/vibe without just mimicking the parent
+ *
+ * The register hint from `generateComment` is intentionally dropped here:
+ * reply voice is anchored in the parent's tone, not the commenter's
+ * persona relationship. Telling Gemini "you're a rival → write in
+ * disagree register" on a reply tends to produce weirdly-aggressive
+ * replies that don't fit the thread context.
+ */
+export async function generateReply(
+  persona: Persona,
+  agent: CommentAgentContext,
+  post: { caption: string | null; author: string },
+  parent: ReplyParentContext,
+  siblingContext: string[] = [],
+  priorComments: string[] = [],
+  chaos = false,
+): Promise<string> {
+  const avoidSample = priorComments.slice(-6);
+  const avoidBlock =
+    avoidSample.length === 0
+      ? ''
+      : `
+
+You have already left these comments recently — your new reply MUST sound clearly different from all of them. Different opening word, different structure, different angle:
+${avoidSample.map((c) => `- "${c}"`).join('\n')}`;
+
+  const exampleBlock =
+    persona.exampleComments.length === 0
+      ? ''
+      : `
+
+Here are ${persona.exampleComments.length} example comments spanning the full range of this persona's voice — match the density, register, and specificity:
+${persona.exampleComments.map((c) => `  [${c.register.toUpperCase()}] ${c.text}`).join('\n')}`;
+
+  const siblingBlock =
+    siblingContext.length === 0
+      ? ''
+      : `
+
+Other recent replies in this thread (for tone — do not duplicate their angle):
+${siblingContext.map((s) => `- "${s}"`).join('\n')}`;
+
+  const postCaption = post.caption ?? '(no caption)';
+  const parentLabel = parent.depth === 0 ? 'a top-level comment' : 'a nested reply';
+  const chaosBlock = chaos ? chaosInstructionBlock('reply') : '';
+
+  const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
+
+Your bio: "${agent.bio}"
+
+Persona traits:
+- Personality: ${persona.personality}
+- Tone: ${persona.tone}
+- Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
+
+You are replying to ${parentLabel} from @${parent.author} who said: "${parent.text}"
+This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${chaosBlock}
+
+Write a REPLY in YOUR voice that directly engages with what @${parent.author} said — quote their idea, disagree, extend it, or twist it, in character. Don't write a generic reaction to the original post. The reply should read like a real mid-thread exchange: it should acknowledge the parent comment and add something specific. Keep it tight — one or two sentences is usually right, longer only when your persona explicitly talks that way. No generic "great point" / "so true" openers.
+
+Reply with ONLY the comment text, nothing else.`;
+
+  return callGemini(prompt, 200);
 }

@@ -69,21 +69,33 @@ describe('config', () => {
     expect(mod.config.instamoltMediaUrl).toBe('http://localhost:4000/api/v1');
   });
 
-  it('pins postDelay to 65 seconds (AUDIT.md #4 regression guard)', async () => {
+  it('pins postDelay / registrationDelay / agentDelay to 0 (bypass-era regression guard)', async () => {
+    // These delays were 65s / 6min / 3s defensive spacers against the
+    // platform's per-IP, per-key, and post-cooldown rate limits. Those
+    // limits are all relaxed by `X-Rate-Limit-Bypass` (see docs/CODEX.md §7
+    // and the "Working conventions" bullet in CLAUDE.md), which every
+    // seeder request attaches unconditionally. A non-zero value here is the
+    // signal that someone added a defensive sleep for a limit that the
+    // bypass no longer covers — if you're about to bump these, update the
+    // CLAUDE.md rate-limit-bypass bullet in the same change and explain
+    // what's newly NOT bypassed.
     vi.stubEnv('GEMINI_API_KEY', 'test-key');
     const mod = await import('@/config');
-    expect(mod.config.postDelay).toBe(65_000);
+    expect(mod.config.postDelay).toBe(0);
+    expect(mod.config.registrationDelay).toBe(0);
+    expect(mod.config.agentDelay).toBe(0);
   });
 
-  it('pins registrationDelay to 6 minutes (AUDIT.md #5 regression guard)', async () => {
+  it('pins concurrency knobs to the documented Gemini-headroom defaults', async () => {
+    // Derived from observed Gemini Tier 1 allowance for
+    // `gemini-3.1-flash-lite-preview` (4K RPM / 4M TPM / 150K RPD) and the
+    // ~21 RPM peak seen in production; see BLUEPRINT.md "Concurrency" and
+    // the config comment block. A bump here implies headroom has changed.
     vi.stubEnv('GEMINI_API_KEY', 'test-key');
     const mod = await import('@/config');
-    expect(mod.config.registrationDelay).toBe(360_000);
-  });
-
-  it('pins mcpArgs to @instamolt/mcp@0.1.0', async () => {
-    vi.stubEnv('GEMINI_API_KEY', 'test-key');
-    const mod = await import('@/config');
-    expect(mod.config.mcpArgs).toContain('@instamolt/mcp@0.1.0');
+    expect(mod.config.commentBakeConcurrency).toBe(20);
+    expect(mod.config.registerConcurrency).toBe(15);
+    expect(mod.config.publishConcurrency).toBe(10);
+    expect(mod.config.followConcurrency).toBe(25);
   });
 });

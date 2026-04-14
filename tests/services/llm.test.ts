@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.stubEnv('GEMINI_API_KEY', 'test-key');
 
 import {
+  answerChallenge,
   GeminiQuotaError,
   generateAgentName,
   generateBio,
@@ -13,6 +14,7 @@ import {
   generatePostContent,
   normalizePersona,
   type PostContent,
+  solveRegistrationChallenge,
 } from '@/services/llm';
 import type { Persona } from '@/types';
 
@@ -38,6 +40,7 @@ function p(overrides: Partial<Persona> = {}): Persona {
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
     ...overrides,
   };
 }
@@ -308,6 +311,46 @@ describe('generateAgentName', () => {
     expect(name.length).toBe(20);
     expect(name).toMatch(/^[a-z0-9]+$/);
   });
+
+  it('splices rejected candidates into the prompt on attempt > 0', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('freshpick'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateAgentName(p(), ['existing1'], ['rejected1', 'rejected2'], 1);
+
+    const call = fetchMock.mock.calls[0]!;
+    const init = (call[1] ?? {}) as { body?: string };
+    const body = JSON.parse(init.body ?? '{}');
+    const promptText = body.contents[0].parts[0].text as string;
+    expect(promptText).toContain('rejected1');
+    expect(promptText).toContain('rejected2');
+    expect(promptText).toContain('off-limits');
+  });
+
+  it('rotates the style cue per attempt so retries genuinely differ', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(geminiOk('a'))
+      .mockResolvedValueOnce(geminiOk('b'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateAgentName(p(), [], [], 0);
+    await generateAgentName(p(), [], [], 1);
+
+    const promptAt = (i: number): string => {
+      const call = fetchMock.mock.calls[i]!;
+      const init = (call[1] ?? {}) as { body?: string };
+      const body = JSON.parse(init.body ?? '{}');
+      return body.contents[0].parts[0].text as string;
+    };
+
+    const cueLine = (text: string): string =>
+      text.split('\n').find((l) => l.startsWith('Style for THIS attempt:')) ?? '';
+
+    expect(cueLine(promptAt(0))).not.toBe('');
+    expect(cueLine(promptAt(1))).not.toBe('');
+    expect(cueLine(promptAt(0))).not.toBe(cueLine(promptAt(1)));
+  });
 });
 
 describe('generatePersona', () => {
@@ -331,6 +374,7 @@ describe('generatePersona', () => {
       weight: 2,
       examplePosts: [],
       exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
       ...overrides,
     });
   }
@@ -560,6 +604,7 @@ describe('normalizePersona', () => {
       weight: 1,
       examplePosts: [],
       exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
     });
     expect(persona.likeProbability).toBe(1);
     expect(persona.commentProbability).toBe(0);
@@ -586,6 +631,7 @@ describe('normalizePersona', () => {
       weight: 1,
       examplePosts: [],
       exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
     });
     // Loader fixes min > max by setting min to max.
     expect(persona.postsPerDay[0]).toBeLessThanOrEqual(persona.postsPerDay[1]);
@@ -614,6 +660,7 @@ describe('normalizePersona', () => {
       weight: 1,
       examplePosts: [],
       exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
     });
     expect(persona.postsPerDay[0]).toBeGreaterThanOrEqual(0);
     expect(persona.postsPerDay[1]).toBeGreaterThanOrEqual(0);
@@ -640,6 +687,7 @@ describe('normalizePersona', () => {
       weight: 1,
       examplePosts: [],
       exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
     });
     expect(persona.postsPerDay[1]).toBe(12);
     expect(persona.postsPerDay[0]).toBe(1);
@@ -666,7 +714,126 @@ describe('normalizePersona', () => {
         weight: 1,
         examplePosts: [],
         exampleComments: [],
+        activityCurve: Array.from({ length: 24 }, () => 0.5),
       }),
     ).toThrow(/missing tagline/);
+  });
+});
+
+describe('solveRegistrationChallenge', () => {
+  // Mirrors the server's generator in
+  // q:/instamolt/src/lib/registration-challenge.ts. Keeping the expected
+  // outputs computed the same way the server does (primes × multiplier,
+  // reverse + even-index filter) catches prompt-format drift immediately.
+  const PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71];
+
+  function buildPrompt(primeIndex: number, multiplier: number, baseString: string): string {
+    const ordinalSuffix = (n: number): string => {
+      const mod100 = n % 100;
+      if (mod100 >= 11 && mod100 <= 13) return 'th';
+      switch (n % 10) {
+        case 1:
+          return 'st';
+        case 2:
+          return 'nd';
+        case 3:
+          return 'rd';
+        default:
+          return 'th';
+      }
+    };
+    return [
+      'Answer the following as a single JSON object with exactly the keys "a" and "b".',
+      '',
+      `a) What is the ${primeIndex}${ordinalSuffix(primeIndex)} prime number multiplied by ${multiplier}? Return the result as a base-10 integer string.`,
+      `b) Take the string "${baseString}", reverse it, then return only the characters at even indices (0-indexed) as a plain string.`,
+      '',
+      'Respond with ONLY the JSON object. No prose, no code fences, no explanation.',
+    ].join('\n');
+  }
+
+  function expectedAnswer(primeIndex: number, multiplier: number, baseString: string): string {
+    const a = String(PRIMES[primeIndex - 1] * multiplier);
+    const reversed = [...baseString].reverse().join('');
+    const b = [...reversed].filter((_, i) => i % 2 === 0).join('');
+    return JSON.stringify({ a, b });
+  }
+
+  it('solves the canonical worked example deterministically', () => {
+    // 5th prime (11) × 16 = 176; reverse "instamolt_a1b2c3d4" then take even
+    // indices (9 chars, always ends in 'n' because reversed index 16 is 'n').
+    const prompt = buildPrompt(5, 16, 'instamolt_a1b2c3d4');
+    expect(solveRegistrationChallenge(prompt)).toBe(expectedAnswer(5, 16, 'instamolt_a1b2c3d4'));
+    expect(JSON.parse(solveRegistrationChallenge(prompt))).toEqual({
+      a: '176',
+      b: '4321_lmtn',
+    });
+  });
+
+  it('solves every prime index the server can emit (4..15)', () => {
+    // The server draws primeIndex from PRIME_INDEX_MIN..MAX = 4..15. Covering
+    // the full range here guards against off-by-one regressions in the PRIMES
+    // table. Multiplier uses 3..20 on the server.
+    for (let primeIndex = 4; primeIndex <= 15; primeIndex++) {
+      for (const multiplier of [3, 11, 20]) {
+        const base = 'instamolt_0123abcd';
+        const prompt = buildPrompt(primeIndex, multiplier, base);
+        expect(solveRegistrationChallenge(prompt)).toBe(
+          expectedAnswer(primeIndex, multiplier, base),
+        );
+      }
+    }
+  });
+
+  it('answer B is always 9 chars and ends in "n" for the server shape', () => {
+    // The reversed string is always "<8-hex-reversed>_tlomatsni" (18 chars),
+    // so even indices 0,2,4,6,8,10,12,14,16 always end with reversed[16]='n'.
+    // The prior Gemini-based solver routinely produced 8-char answers; pin
+    // the invariant so any regression surfaces immediately.
+    const prompt = buildPrompt(7, 13, 'instamolt_deadbeef');
+    const answer = JSON.parse(solveRegistrationChallenge(prompt)) as {
+      a: string;
+      b: string;
+    };
+    expect(answer.b).toHaveLength(9);
+    expect(answer.b.endsWith('n')).toBe(true);
+  });
+
+  it('throws when the math sub-prompt is missing', () => {
+    expect(() =>
+      solveRegistrationChallenge('b) Take the string "instamolt_a1b2c3d4", reverse it...'),
+    ).toThrow(/missing math question/);
+  });
+
+  it('throws when the string sub-prompt is missing', () => {
+    expect(() =>
+      solveRegistrationChallenge('a) What is the 5th prime number multiplied by 16?'),
+    ).toThrow(/missing string question/);
+  });
+
+  it('throws when the prime index is outside the known table', () => {
+    const prompt = buildPrompt(99, 3, 'instamolt_a1b2c3d4').replace(
+      '99th',
+      '99th', // identity — the table has 20 primes, index 99 is out of range
+    );
+    expect(() => solveRegistrationChallenge(prompt)).toThrow(/out of range/);
+  });
+});
+
+describe('answerChallenge', () => {
+  it('delegates to the deterministic solver without calling Gemini', async () => {
+    // Wipe any prior fetch stub so a stray LLM call would blow up loudly.
+    vi.restoreAllMocks();
+    const prompt = [
+      'Answer the following as a single JSON object with exactly the keys "a" and "b".',
+      '',
+      'a) What is the 5th prime number multiplied by 16? Return the result as a base-10 integer string.',
+      'b) Take the string "instamolt_a1b2c3d4", reverse it, then return only the characters at even indices (0-indexed) as a plain string.',
+      '',
+      'Respond with ONLY the JSON object. No prose, no code fences, no explanation.',
+    ].join('\n');
+
+    const answer = await answerChallenge(p(), prompt);
+    expect(JSON.parse(answer)).toEqual({ a: '176', b: '4321_lmtn' });
   });
 });

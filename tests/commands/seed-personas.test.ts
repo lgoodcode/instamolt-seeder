@@ -117,8 +117,18 @@ vi.mock('@/lib/ui', () => ({
   symbol: { ok: '✓', err: '✗', warn: '!', info: 'i' },
 }));
 
+const eventLoggerMocks = vi.hoisted(() => ({
+  initEventLogger: vi.fn(),
+  logEvent: vi.fn(),
+  logSkippedAction: vi.fn(),
+  flushStats: vi.fn(),
+  updateAgentCounts: vi.fn(),
+}));
+vi.mock('@/lib/event-logger', () => eventLoggerMocks);
+
+import * as fsPromises from 'node:fs/promises';
 import { seedPersonasCommand } from '@/commands/seed-personas';
-import { _resetPersonaCache } from '@/personas/index';
+import { _resetPersonaCache, PERSONA_CATALOG } from '@/personas/index';
 
 function makePersona(id: string, weight = 1) {
   return {
@@ -140,6 +150,7 @@ function makePersona(id: string, weight = 1) {
     weight,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -149,6 +160,11 @@ describe('seedPersonasCommand', () => {
     fsState.dirEntries.clear();
     fsState.rmCalls = [];
     llmMocks.generatePersona.mockReset();
+    eventLoggerMocks.initEventLogger.mockReset();
+    eventLoggerMocks.logEvent.mockReset();
+    eventLoggerMocks.logSkippedAction.mockReset();
+    eventLoggerMocks.flushStats.mockReset();
+    eventLoggerMocks.updateAgentCounts.mockReset();
     _resetPersonaCache();
   });
 
@@ -216,5 +232,185 @@ describe('seedPersonasCommand', () => {
       (k) => k.startsWith(dupePrefix) && k !== fileKey('dupe'),
     );
     expect(newKeys.length).toBe(1);
+  });
+});
+
+describe('seed-personas event-logger integration', () => {
+  // Assertions on the structured activity stream wired through
+  // seed-personas.ts. Every run must bracket itself with session_start /
+  // session_end, emit one persona_installed per created persona, and flush
+  // stats before returning so overnight operators can reconstruct a seed
+  // session from `output/logs/events.jsonl`.
+
+  beforeEach(() => {
+    fsState.files.clear();
+    fsState.dirEntries.clear();
+    fsState.rmCalls = [];
+    llmMocks.generatePersona.mockReset();
+    eventLoggerMocks.initEventLogger.mockReset();
+    eventLoggerMocks.logEvent.mockReset();
+    eventLoggerMocks.logSkippedAction.mockReset();
+    eventLoggerMocks.flushStats.mockReset();
+    eventLoggerMocks.updateAgentCounts.mockReset();
+    _resetPersonaCache();
+  });
+
+  afterEach(() => {
+    _resetPersonaCache();
+  });
+
+  function eventTypes(): string[] {
+    return eventLoggerMocks.logEvent.mock.calls.map(
+      (c) => (c[0] as { eventType: string }).eventType,
+    );
+  }
+
+  function eventsOfType<T = Record<string, unknown>>(type: string): T[] {
+    return eventLoggerMocks.logEvent.mock.calls
+      .map((c) => c[0] as T & { eventType: string })
+      .filter((e) => e.eventType === type);
+  }
+
+  it('initializes the event logger on command start', async () => {
+    llmMocks.generatePersona.mockImplementation(async () => makePersona('gen_1'));
+
+    await seedPersonasCommand({ count: 1 });
+
+    expect(eventLoggerMocks.initEventLogger).toHaveBeenCalled();
+  });
+
+  it('emits session_start first with the requested command + mode', async () => {
+    let counter = 0;
+    llmMocks.generatePersona.mockImplementation(async () => {
+      counter++;
+      return makePersona(`gen_${counter}`);
+    });
+
+    await seedPersonasCommand({ count: 2, mode: 'gemini' });
+
+    const types = eventTypes();
+    expect(types[0]).toBe('session_start');
+    const starts = eventsOfType<{
+      details: { command: string; mode: string; count: number; force: boolean };
+    }>('session_start');
+    expect(starts).toHaveLength(1);
+    expect(starts[0].details.command).toBe('seed-personas');
+    expect(starts[0].details.mode).toBe('gemini');
+    expect(starts[0].details.count).toBe(2);
+    expect(starts[0].details.force).toBe(false);
+  });
+
+  it('emits session_end last with details.installed equal to created count', async () => {
+    let counter = 0;
+    llmMocks.generatePersona.mockImplementation(async () => {
+      counter++;
+      return makePersona(`gen_${counter}`);
+    });
+
+    await seedPersonasCommand({ count: 3, mode: 'gemini' });
+
+    const types = eventTypes();
+    expect(types[types.length - 1]).toBe('session_end');
+    const ends = eventsOfType<{
+      success: boolean;
+      details: { command: string; mode: string; installed: number };
+    }>('session_end');
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(true);
+    expect(ends[0].details.command).toBe('seed-personas');
+    expect(ends[0].details.mode).toBe('gemini');
+    expect(ends[0].details.installed).toBe(3);
+  });
+
+  it('calls flushStats on successful completion', async () => {
+    llmMocks.generatePersona.mockImplementation(async () => makePersona('gen_1'));
+
+    await seedPersonasCommand({ count: 1 });
+
+    expect(eventLoggerMocks.flushStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('emits one persona_installed event per created persona', async () => {
+    let counter = 0;
+    llmMocks.generatePersona.mockImplementation(async () => {
+      counter++;
+      return makePersona(`gen_${counter}`);
+    });
+
+    await seedPersonasCommand({ count: 3, mode: 'gemini' });
+
+    const installs = eventsOfType<{
+      persona: string;
+      success: boolean;
+      details: { source: string; tagline: string };
+    }>('persona_installed');
+    expect(installs).toHaveLength(3);
+    const ids = installs.map((e) => e.persona).sort();
+    expect(ids).toEqual(['gen_1', 'gen_2', 'gen_3']);
+    for (const ev of installs) {
+      expect(ev.success).toBe(true);
+      expect(ev.details.source).toBe('gemini');
+      expect(typeof ev.details.tagline).toBe('string');
+      expect(ev.details.tagline.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('catalog mode emits one persona_installed per catalog entry', async () => {
+    // Catalog mode is deterministic: seedPersonas copies the full
+    // PERSONA_CATALOG to disk without calling Gemini. One persona_installed
+    // event must fire for each catalog entry, tagged with source: 'catalog'.
+    await seedPersonasCommand({ mode: 'catalog' });
+
+    expect(llmMocks.generatePersona).not.toHaveBeenCalled();
+
+    const installs = eventsOfType<{
+      persona: string;
+      details: { source: string; tagline: string };
+    }>('persona_installed');
+    expect(installs).toHaveLength(PERSONA_CATALOG.length);
+    for (const ev of installs) {
+      expect(ev.details.source).toBe('catalog');
+    }
+    const catalogIds = new Set(PERSONA_CATALOG.map((p) => p.id));
+    for (const ev of installs) {
+      expect(catalogIds.has(ev.persona)).toBe(true);
+    }
+
+    // session_end.installed must mirror the catalog size.
+    const ends = eventsOfType<{
+      details: { mode: string; installed: number };
+    }>('session_end');
+    expect(ends).toHaveLength(1);
+    expect(ends[0].details.mode).toBe('catalog');
+    expect(ends[0].details.installed).toBe(PERSONA_CATALOG.length);
+  });
+
+  it('error path: session_end fires with success=false + error, flushStats called, error rethrown', async () => {
+    // seedPersonas swallows per-slot generatePersona failures internally
+    // (catch + skip). To exercise the command-level catch block, force a
+    // failure earlier in the pipeline by making mkdir reject once.
+    const boom = new Error('disk blew up');
+    vi.mocked(fsPromises.mkdir).mockRejectedValueOnce(boom);
+
+    await expect(seedPersonasCommand({ count: 2, mode: 'gemini' })).rejects.toThrow('disk blew up');
+
+    const ends = eventsOfType<{
+      success: boolean;
+      error?: string;
+      details: { command: string; mode: string };
+    }>('session_end');
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(false);
+    expect(ends[0].error).toBe('disk blew up');
+    expect(ends[0].details.command).toBe('seed-personas');
+    expect(ends[0].details.mode).toBe('gemini');
+
+    // No persona_installed events should fire on the failure path — the
+    // loop that emits them runs after the try/catch.
+    expect(eventsOfType('persona_installed')).toHaveLength(0);
+
+    // flushStats still fires before the rethrow so the partial session is
+    // persisted.
+    expect(eventLoggerMocks.flushStats).toHaveBeenCalledTimes(1);
   });
 });

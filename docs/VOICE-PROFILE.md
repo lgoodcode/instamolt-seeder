@@ -166,7 +166,7 @@ Used inside `generateComment` and `generatePostContent` (caption only) with a **
 | `generateBio` ([src/services/llm.ts:110](../src/services/llm.ts#L110)) | Splice voice block. Replace "punchy and memorable" with profile-appropriate length. No validator (one-shot, not worth the cost). |
 | `generatePostContent` ([:159](../src/services/llm.ts#L159)) | Splice voice block + stance block + caption-relevance block. Validate caption with 1 retry. Pass `now` for mood drift. |
 | `generateComment` ([:385](../src/services/llm.ts#L385)) | Accept new `relationship` arg. **Delete the "Write a short comment (1-3 sentences)" string at line 413** — single biggest bug today. Splice voice block + stance block + relationship block. Validate with 1 retry. |
-| `answerChallenge` ([:239](../src/services/llm.ts#L239)) | Splice voice block *without* verbosity hint. Use `CHALLENGE_MIN_WORDS[verbosity]` as the dynamic floor (one_word: 60, paragraph: 130). Add "this is the registration application" framing line. |
+| `answerChallenge` ([:239](../src/services/llm.ts#L239)) | **No longer voice-spliced.** The challenge is now deterministic (math + string manipulation) per [openapi.json](../openapi.json) `/agents/register/complete`; the server wants a strict `{"a":"...","b":"..."}` JSON object. `answerChallenge` solves the two sub-questions and returns a minified JSON string. Persona voice has no surface here — skip this row. |
 
 ### 5.4 `generatePersona` ([:273](../src/services/llm.ts#L273)) — variance pressure
 
@@ -220,14 +220,9 @@ Listed explicitly so the scope stays disciplined:
 
 > **For Lawrence:** these are decisions I parked because they need either external context I don't have or a judgment call you should make. Each one blocks or shapes implementation. Answer inline; I'll fold the answers into the implementation plan before any code is written.
 
-### Q1 — Challenge endpoint length floor (BLOCKING)
-The platform's challenge endpoint at `q:\instamolt\src\app\api\v1\challenge\` enforces some minimum word count for the registration answer. The current `answerChallenge` prompt asks for "AT LEAST 100 words". The proposed `CHALLENGE_MIN_WORDS[verbosity]` table would let `one_word` personas submit 60 words and `paragraph` personas submit 130.
+### Q1 — Challenge endpoint length floor (RESOLVED — no longer applicable)
 
-**Question:** What is the actual minimum the platform validator enforces? If it's a hard 100, the table can't go below 100 — `one_word` personas have to bend.
-
-**Suggested action:** I should grep `q:/instamolt/src/app/api/v1/challenge/` and read the validator before implementation. Worth checking now.
-
-**Your answer / decision:**
+The platform no longer uses a word-count-based challenge. The current `/agents/register/complete` endpoint expects a deterministic `{"a":"...","b":"..."}` JSON object answering a math + string-manipulation prompt (see [openapi.json](../openapi.json)). There is no voice surface and no minimum length. `answerChallenge` was rewritten to solve the deterministic sub-questions and return the required JSON; `CHALLENGE_MIN_WORDS` and the voice-splicing variant are no longer needed and should not be reintroduced.
 
 ---
 

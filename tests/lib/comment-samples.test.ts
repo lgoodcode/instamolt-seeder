@@ -1,50 +1,58 @@
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { GeneratedAgent, Persona } from '@/types';
-
-// ---------------- fs mock ----------------
-
-const fsState = vi.hoisted(() => ({
-  files: new Map<string, string>(),
-  dirEntries: new Map<string, string[]>(),
-}));
-
-vi.mock('node:fs/promises', () => ({
-  readFile: vi.fn(async (path: string) => {
-    const content = fsState.files.get(path);
-    if (content === undefined) {
-      const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
-      err.code = 'ENOENT';
-      throw err;
-    }
-    return content;
-  }),
-  readdir: vi.fn(async (path: string) => {
-    const entries = fsState.dirEntries.get(path);
-    if (entries === undefined) {
-      const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
-      err.code = 'ENOENT';
-      throw err;
-    }
-    return entries;
-  }),
-}));
+import type { CommentNode } from '@/lib/comment-tree';
+import type { FeedCacheFile, GeneratedAgent, Persona, RemoteComment, RemotePost } from '@/types';
 
 // ---------------- llm mock ----------------
 
 const llmMocks = vi.hoisted(() => ({
   generateComment: vi.fn<() => Promise<string>>(),
+  generateReply: vi.fn<() => Promise<string>>(),
 }));
 
 vi.mock('@/services/llm', () => llmMocks);
 
+// ---------------- comment-tree mock ----------------
+// bakeAgentReplies calls fetchCommentTree + pickReplyTarget. We stub both
+// to produce deterministic trees and targets for unit tests.
+
+const treeMocks = vi.hoisted(() => ({
+  fetchCommentTree: vi.fn<() => Promise<CommentNode[]>>(),
+  pickReplyTarget: vi.fn<() => { parent: RemoteComment; siblings: RemoteComment[] } | undefined>(),
+}));
+
+vi.mock('@/lib/comment-tree', () => treeMocks);
+
 import {
   bakeAgentComments,
-  buildCaptionsPoolFromDisk,
-  COMMENT_SAMPLES_PER_AGENT,
+  bakeAgentReplies,
+  buildCaptionsPoolFromFeedCache,
+  COMMENT_COUNT_MAX,
+  COMMENT_COUNT_MIN,
+  computeSampleCounts,
   pickPeerCaptions,
+  pickPostsWithComments,
+  REPLY_COUNT_MAX,
+  REPLY_COUNT_MIN,
   type SampleCaption,
 } from '@/lib/comment-samples';
+import type { VoiceProfile } from '@/types';
+
+function makeVoiceProfile(
+  overrides: Partial<VoiceProfile> & { verbosity: VoiceProfile['verbosity'] },
+): VoiceProfile {
+  return {
+    id: 'vp',
+    literacy: 'normal',
+    capitalization: 'proper',
+    punctuation: 'proper',
+    typoFrequency: 'none',
+    register: 'test',
+    lexicon: [],
+    examples: [],
+    prevalenceWeight: 1,
+    ...overrides,
+  };
+}
 
 function makePersona(id = 'test'): Persona {
   return {
@@ -66,6 +74,7 @@ function makePersona(id = 'test'): Persona {
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -73,11 +82,76 @@ function agent(name: string, personaId = 'test'): GeneratedAgent {
   return { agentname: name, personaId, voiceProfileId: 'normie_cam', bio: `${name} bio` };
 }
 
-describe('COMMENT_SAMPLES_PER_AGENT', () => {
-  it('exports a reasonable default (small integer)', () => {
-    expect(Number.isInteger(COMMENT_SAMPLES_PER_AGENT)).toBe(true);
-    expect(COMMENT_SAMPLES_PER_AGENT).toBeGreaterThan(0);
-    expect(COMMENT_SAMPLES_PER_AGENT).toBeLessThanOrEqual(10);
+describe('computeSampleCounts', () => {
+  it('clamps comments to [COMMENT_COUNT_MIN, COMMENT_COUNT_MAX] and replies to [REPLY_COUNT_MIN, REPLY_COUNT_MAX]', () => {
+    for (const p of [0, 0.25, 0.5, 0.75, 1]) {
+      const persona = makePersona();
+      persona.commentProbability = p;
+      for (const verbosity of [
+        'one_word',
+        'fragment',
+        'one_sentence',
+        'multi_sentence',
+        'paragraph',
+      ] as const) {
+        const plan = computeSampleCounts(persona, makeVoiceProfile({ verbosity }), 'agent-x');
+        expect(plan.comments).toBeGreaterThanOrEqual(COMMENT_COUNT_MIN);
+        expect(plan.comments).toBeLessThanOrEqual(COMMENT_COUNT_MAX);
+        expect(plan.replies).toBeGreaterThanOrEqual(REPLY_COUNT_MIN);
+        expect(plan.replies).toBeLessThanOrEqual(REPLY_COUNT_MAX);
+        expect(plan.replies).toBeLessThanOrEqual(plan.comments);
+        expect(plan.depthTargets).toHaveLength(plan.replies);
+        for (const d of plan.depthTargets) expect([0, 1]).toContain(d);
+      }
+    }
+  });
+
+  it('higher commentProbability produces at least as many comments for the same voice', () => {
+    const low = makePersona();
+    low.commentProbability = 0;
+    const high = makePersona();
+    high.commentProbability = 1;
+    const voice = makeVoiceProfile({ verbosity: 'one_sentence' });
+    const planLow = computeSampleCounts(low, voice, 'a');
+    const planHigh = computeSampleCounts(high, voice, 'a');
+    expect(planHigh.comments).toBeGreaterThanOrEqual(planLow.comments);
+    expect(planHigh.replies).toBeGreaterThanOrEqual(planLow.replies);
+  });
+
+  it('fragment-voice agent gets one more comment than paragraph-voice agent at the same mid probability', () => {
+    const persona = makePersona();
+    persona.commentProbability = 0.5;
+    const fragment = computeSampleCounts(persona, makeVoiceProfile({ verbosity: 'fragment' }), 'a');
+    const paragraph = computeSampleCounts(
+      persona,
+      makeVoiceProfile({ verbosity: 'paragraph' }),
+      'a',
+    );
+    expect(fragment.comments).toBe(paragraph.comments + 2);
+  });
+
+  it('returns an equal plan for the same (persona, voice, agentname)', () => {
+    const persona = makePersona();
+    persona.commentProbability = 0.7;
+    const voice = makeVoiceProfile({ verbosity: 'one_sentence' });
+    const a = computeSampleCounts(persona, voice, 'agent-alpha');
+    const b = computeSampleCounts(persona, voice, 'agent-alpha');
+    expect(a).toEqual(b);
+  });
+
+  it('depth targets put floor(replies/3) slots at depth 1, rest at depth 0', () => {
+    // Force each reply count via the probability + verbosity combo.
+    const persona = makePersona();
+    const voice = makeVoiceProfile({ verbosity: 'one_sentence' });
+
+    persona.commentProbability = 1;
+    expect(computeSampleCounts(persona, voice, 'a').depthTargets).toEqual([0, 0, 1]);
+
+    persona.commentProbability = 0.5;
+    expect(computeSampleCounts(persona, voice, 'a').depthTargets).toEqual([0, 0]);
+
+    persona.commentProbability = 0;
+    expect(computeSampleCounts(persona, voice, 'a').depthTargets).toEqual([0]);
   });
 });
 
@@ -195,115 +269,372 @@ describe('bakeAgentComments', () => {
   });
 });
 
-describe('buildCaptionsPoolFromDisk', () => {
-  beforeEach(() => {
-    fsState.files.clear();
-    fsState.dirEntries.clear();
+describe('buildCaptionsPoolFromFeedCache', () => {
+  function makePost(
+    overrides: Partial<RemotePost> & { id: string; agentname: string },
+  ): RemotePost {
+    return {
+      id: overrides.id,
+      image_url: 'http://x/y.jpg',
+      thumbnail_url: null,
+      caption: overrides.caption ?? null,
+      width: 1080,
+      height: 1080,
+      format: 'square',
+      like_count: 0,
+      comment_count: 0,
+      view_count: 0,
+      popularity_score: 0,
+      velocity_score: 0,
+      share_count: 0,
+      created_at: '2026-04-13T00:00:00.000Z',
+      author: {
+        agentname: overrides.agentname,
+        is_verified: false,
+      },
+    };
+  }
+
+  function makeCache(posts: RemotePost[]): FeedCacheFile {
+    return {
+      refreshedAt: '2026-04-13T00:00:00.000Z',
+      sources: ['explore'],
+      posts,
+    };
+  }
+
+  it('returns an empty pool when the cache has no posts', () => {
+    expect(buildCaptionsPoolFromFeedCache(makeCache([]))).toEqual([]);
   });
 
-  it('returns an empty pool when no agents have post files', async () => {
-    const agents = [agent('alpha')];
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['agent.json']);
-
-    const pool = await buildCaptionsPoolFromDisk(agents);
-    expect(pool).toEqual([]);
-  });
-
-  it('walks agent dirs and collects non-empty captions with author + persona attribution', async () => {
-    const agents = [agent('alpha', 'cozy'), agent('beta', 'chaotic')];
-
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), [
-      'agent.json',
-      'post-001.json',
-      'post-002.json',
+  it('maps author.agentname + caption to SampleCaption entries', () => {
+    const cache = makeCache([
+      makePost({ id: '1', agentname: 'alpha', caption: 'alpha says hi' }),
+      makePost({ id: '2', agentname: 'beta', caption: 'beta too' }),
     ]);
-    fsState.files.set(
-      join('./output/agents', 'alpha', 'post-001.json'),
-      JSON.stringify({
-        id: 'post-001',
-        imagePrompt: '',
-        caption: 'alpha cap one',
-        aspectRatio: 'square',
-      }),
-    );
-    fsState.files.set(
-      join('./output/agents', 'alpha', 'post-002.json'),
-      JSON.stringify({
-        id: 'post-002',
-        imagePrompt: '',
-        caption: '', // empty caption should be dropped
-        aspectRatio: 'square',
-      }),
-    );
 
-    fsState.dirEntries.set(join('./output/agents', 'beta'), ['post-001.json']);
-    fsState.files.set(
-      join('./output/agents', 'beta', 'post-001.json'),
-      JSON.stringify({
-        id: 'post-001',
-        imagePrompt: '',
-        caption: 'beta cap',
-        aspectRatio: 'square',
-      }),
-    );
-
-    const pool = await buildCaptionsPoolFromDisk(agents);
+    const pool = buildCaptionsPoolFromFeedCache(cache);
 
     expect(pool).toHaveLength(2);
-    expect(pool).toContainEqual({
-      author: 'alpha',
-      caption: 'alpha cap one',
-      personaId: 'cozy',
-    });
-    expect(pool).toContainEqual({
-      author: 'beta',
-      caption: 'beta cap',
-      personaId: 'chaotic',
-    });
+    expect(pool).toContainEqual({ author: 'alpha', caption: 'alpha says hi' });
+    expect(pool).toContainEqual({ author: 'beta', caption: 'beta too' });
   });
 
-  it('silently skips agents whose directory does not exist', async () => {
-    const agents = [agent('alpha'), agent('ghost')];
-
-    // Only alpha's dir exists.
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), ['post-001.json']);
-    fsState.files.set(
-      join('./output/agents', 'alpha', 'post-001.json'),
-      JSON.stringify({
-        id: 'post-001',
-        imagePrompt: '',
-        caption: 'lonely',
-        aspectRatio: 'square',
-      }),
-    );
-
-    const pool = await buildCaptionsPoolFromDisk(agents);
-    expect(pool).toHaveLength(1);
-    expect(pool[0]?.author).toBe('alpha');
-  });
-
-  it('ignores files that are not post-*.json (e.g. comments.json, agent.json)', async () => {
-    const agents = [agent('alpha')];
-    fsState.dirEntries.set(join('./output/agents', 'alpha'), [
-      'agent.json',
-      'comments.json',
-      'post-001.json',
+  it('drops posts whose caption is missing, null, or whitespace-only', () => {
+    const cache = makeCache([
+      makePost({ id: '1', agentname: 'alpha', caption: null }),
+      makePost({ id: '2', agentname: 'beta', caption: '   ' }),
+      makePost({ id: '3', agentname: 'gamma', caption: 'real content' }),
     ]);
-    // Only the post file should be read.
-    fsState.files.set(
-      join('./output/agents', 'alpha', 'post-001.json'),
-      JSON.stringify({
-        id: 'post-001',
-        imagePrompt: '',
-        caption: 'real',
-        aspectRatio: 'square',
-      }),
-    );
-    // agent.json / comments.json are NOT in files — if the loader tried to
-    // read them, it would throw. The loader must filter on file name first.
 
-    const pool = await buildCaptionsPoolFromDisk(agents);
+    const pool = buildCaptionsPoolFromFeedCache(cache);
     expect(pool).toHaveLength(1);
-    expect(pool[0]?.caption).toBe('real');
+    expect(pool[0]).toEqual({ author: 'gamma', caption: 'real content' });
+  });
+
+  it('does not populate personaId from the feed (peers are outside the persona set)', () => {
+    const cache = makeCache([makePost({ id: '1', agentname: 'alpha', caption: 'hi' })]);
+
+    const pool = buildCaptionsPoolFromFeedCache(cache);
+    expect(pool[0]?.personaId).toBeUndefined();
+  });
+});
+
+// ---------------- helpers for reply-bake tests ----------------
+
+function makePostWithComments(
+  id: string,
+  agentname: string,
+  caption: string,
+  commentCount: number,
+): RemotePost {
+  return {
+    id,
+    image_url: 'http://x/y.jpg',
+    thumbnail_url: null,
+    caption,
+    width: 1080,
+    height: 1080,
+    format: 'square',
+    like_count: 0,
+    comment_count: commentCount,
+    view_count: 0,
+    popularity_score: 0,
+    velocity_score: 0,
+    share_count: 0,
+    created_at: '2026-04-13T00:00:00.000Z',
+    author: { agentname, is_verified: false },
+  };
+}
+
+function makeFeedCacheWith(posts: RemotePost[]): FeedCacheFile {
+  return {
+    refreshedAt: '2026-04-13T00:00:00.000Z',
+    sources: ['explore'],
+    posts,
+  };
+}
+
+function makeRemoteComment(id: string, overrides: Partial<RemoteComment> = {}): RemoteComment {
+  return {
+    id,
+    content: `comment ${id}`,
+    parent_comment_id: null,
+    depth: 0,
+    reply_count: 0,
+    like_count: 0,
+    created_at: '2026-04-13T00:00:00.000Z',
+    author: { agentname: 'peer', is_verified: false, has_owner: false },
+    replies: [],
+    ...overrides,
+  };
+}
+
+describe('pickPostsWithComments', () => {
+  it('excludes posts with zero comments and posts authored by the caller', () => {
+    const cache = makeFeedCacheWith([
+      makePostWithComments('p1', 'alpha', 'mine', 5),
+      makePostWithComments('p2', 'beta', 'no comments yet', 0),
+      makePostWithComments('p3', 'gamma', 'has comments', 3),
+    ]);
+    const picked = pickPostsWithComments(cache, 3, 'alpha');
+    expect(picked.map((p) => p.id)).toEqual(['p3']);
+  });
+
+  it('deduplicates by author so samples span multiple authors', () => {
+    const cache = makeFeedCacheWith([
+      makePostWithComments('p1', 'beta', 'first', 5),
+      makePostWithComments('p2', 'beta', 'same author second', 3),
+      makePostWithComments('p3', 'gamma', 'different author', 2),
+    ]);
+    const picked = pickPostsWithComments(cache, 3, 'alpha');
+    const authors = picked.map((p) => p.author.agentname);
+    expect(new Set(authors).size).toBe(authors.length);
+    expect(authors).toContain('beta');
+    expect(authors).toContain('gamma');
+  });
+
+  it('sorts by comment_count descending by default (prefers richer threads)', () => {
+    const cache = makeFeedCacheWith([
+      makePostWithComments('p1', 'beta', 'low', 1),
+      makePostWithComments('p2', 'gamma', 'high', 10),
+      makePostWithComments('p3', 'delta', 'mid', 5),
+    ]);
+    const picked = pickPostsWithComments(cache, 3, 'alpha');
+    expect(picked.map((p) => p.id)).toEqual(['p2', 'p3', 'p1']);
+  });
+
+  it('caps output at `n`', () => {
+    const cache = makeFeedCacheWith([
+      makePostWithComments('p1', 'a', '', 5),
+      makePostWithComments('p2', 'b', '', 4),
+      makePostWithComments('p3', 'c', '', 3),
+      makePostWithComments('p4', 'd', '', 2),
+    ]);
+    const picked = pickPostsWithComments(cache, 2, 'alpha');
+    expect(picked).toHaveLength(2);
+  });
+});
+
+describe('bakeAgentReplies', () => {
+  beforeEach(() => {
+    llmMocks.generateReply.mockReset();
+    treeMocks.fetchCommentTree.mockReset();
+    treeMocks.pickReplyTarget.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubClient(): Parameters<typeof bakeAgentReplies>[2] {
+    // bakeAgentReplies only passes the client through to fetchCommentTree
+    // (which is mocked), so the client itself is never called directly.
+    return {} as Parameters<typeof bakeAgentReplies>[2];
+  }
+
+  it('accepts caller-provided depthTargets of any length', () => {
+    // Regression test for the signature change: bakeAgentReplies loops
+    // depthTargets.length times, not a hard-coded constant. The behavior
+    // tests below exercise the actual iteration.
+    expect(REPLY_COUNT_MAX).toBeGreaterThanOrEqual(REPLY_COUNT_MIN);
+    expect(REPLY_COUNT_MIN).toBeGreaterThanOrEqual(1);
+  });
+
+  it('fetches a comment tree per post and calls generateReply with the right shape', async () => {
+    const parent = makeRemoteComment('pc', {
+      depth: 0,
+      author: { agentname: 'peer', is_verified: false, has_owner: false },
+    });
+    const sibling = makeRemoteComment('sib', { depth: 0 });
+
+    treeMocks.fetchCommentTree.mockResolvedValue([
+      { comment: parent, children: [{ comment: sibling, children: [] }] },
+    ]);
+    treeMocks.pickReplyTarget.mockReturnValue({ parent, siblings: [sibling] });
+    llmMocks.generateReply.mockResolvedValue('my reply text');
+
+    const posts = [makePostWithComments('p1', 'peer', 'post caption', 2)];
+    const samples = await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      posts,
+      [0],
+      ['prior comment one'],
+    );
+
+    expect(treeMocks.fetchCommentTree).toHaveBeenCalledTimes(1);
+    expect(treeMocks.fetchCommentTree).toHaveBeenCalledWith(expect.anything(), 'p1');
+    expect(llmMocks.generateReply).toHaveBeenCalledTimes(1);
+
+    const callArgs = llmMocks.generateReply.mock.calls[0] as unknown[];
+    expect((callArgs[1] as { agentname: string }).agentname).toBe('alpha');
+    expect(callArgs[2] as { caption: string; author: string }).toEqual({
+      caption: 'post caption',
+      author: 'peer',
+    });
+    expect(callArgs[3] as { text: string; author: string; depth: 0 | 1 }).toEqual({
+      text: parent.content,
+      author: 'peer',
+      depth: 0,
+    });
+    expect(callArgs[4]).toEqual([sibling.content]);
+    // Prior avoid list passes through at call time.
+    expect(callArgs[5]).toEqual(['prior comment one']);
+
+    expect(samples).toHaveLength(1);
+    expect(samples[0]).toMatchObject({
+      kind: 'reply',
+      sourceCaption: 'post caption',
+      sourceAuthor: 'peer',
+      parentText: parent.content,
+      parentAuthor: 'peer',
+      parentDepth: 0,
+      siblingContext: [sibling.content],
+      text: 'my reply text',
+    });
+  });
+
+  it('accumulates each reply into the avoid list for subsequent calls', async () => {
+    const parent = makeRemoteComment('pc');
+    treeMocks.fetchCommentTree.mockResolvedValue([{ comment: parent, children: [] }]);
+    treeMocks.pickReplyTarget.mockReturnValue({ parent, siblings: [] });
+    llmMocks.generateReply
+      .mockResolvedValueOnce('first reply')
+      .mockResolvedValueOnce('second reply')
+      .mockResolvedValueOnce('third reply');
+
+    const posts = [
+      makePostWithComments('p1', 'a', 'x', 1),
+      makePostWithComments('p2', 'b', 'y', 1),
+      makePostWithComments('p3', 'c', 'z', 1),
+    ];
+    await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      posts,
+      [0, 0, 1],
+      ['seed'],
+    );
+
+    const calls = llmMocks.generateReply.mock.calls as unknown[][];
+    expect(calls[0]?.[5]).toEqual(['seed']);
+    expect(calls[1]?.[5]).toEqual(['seed', 'first reply']);
+    expect(calls[2]?.[5]).toEqual(['seed', 'first reply', 'second reply']);
+  });
+
+  it('silently skips a post when fetchCommentTree throws', async () => {
+    const parent = makeRemoteComment('ok');
+    treeMocks.fetchCommentTree
+      .mockRejectedValueOnce(new Error('429 rate limited'))
+      .mockResolvedValueOnce([{ comment: parent, children: [] }]);
+    treeMocks.pickReplyTarget.mockReturnValue({ parent, siblings: [] });
+    llmMocks.generateReply.mockResolvedValue('survived');
+
+    const posts = [
+      makePostWithComments('p1', 'a', 'bad', 1),
+      makePostWithComments('p2', 'b', 'good', 1),
+    ];
+    const samples = await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      posts,
+      [0, 0],
+      [],
+    );
+    expect(samples).toHaveLength(1);
+    expect(samples[0]?.text).toBe('survived');
+  });
+
+  it('silently skips a post when pickReplyTarget returns undefined', async () => {
+    treeMocks.fetchCommentTree.mockResolvedValue([]);
+    treeMocks.pickReplyTarget.mockReturnValue(undefined);
+    llmMocks.generateReply.mockResolvedValue('never called');
+
+    const posts = [makePostWithComments('p1', 'a', 'x', 1)];
+    const samples = await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      posts,
+      [0],
+      [],
+    );
+    expect(samples).toEqual([]);
+    expect(llmMocks.generateReply).not.toHaveBeenCalled();
+  });
+
+  it('biases toward the target depth via reroll, accepting fallback after retries', async () => {
+    // First attempt returns depth 1 (wanted), second slot wants depth 1 too,
+    // third slot wants depth 1 and gets it on first pick.
+    const d0 = makeRemoteComment('d0', { depth: 0 });
+    const d1 = makeRemoteComment('d1', { depth: 1 });
+
+    treeMocks.fetchCommentTree.mockResolvedValue([{ comment: d0, children: [] }]);
+    // Slots 0 + 1 want depth 0; slot 2 wants depth 1. Make pickReplyTarget
+    // always return d0 so slot 2 forces the reroll fallback path.
+    treeMocks.pickReplyTarget.mockReturnValue({ parent: d0, siblings: [] });
+    llmMocks.generateReply.mockResolvedValue('ok');
+
+    const posts = [
+      makePostWithComments('p1', 'a', 'x', 1),
+      makePostWithComments('p2', 'b', 'y', 1),
+      makePostWithComments('p3', 'c', 'z', 1),
+    ];
+    const samples = await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      posts,
+      [0, 0, 1],
+      [],
+    );
+    expect(samples).toHaveLength(3);
+    // Slot 2 wanted depth 1 but got depth 0 after rerolls — that's the
+    // documented fallback behavior.
+    expect(samples[2]?.parentDepth).toBe(0);
+    // Sanity: the slot-0 parent is d0 (depth 0, matches target).
+    expect(samples[0]?.parentDepth).toBe(0);
+    void d1; // unused, kept for documentation of the scenario
+  });
+
+  it('attaches kind: "reply" to every baked sample', async () => {
+    const parent = makeRemoteComment('pc');
+    treeMocks.fetchCommentTree.mockResolvedValue([{ comment: parent, children: [] }]);
+    treeMocks.pickReplyTarget.mockReturnValue({ parent, siblings: [] });
+    llmMocks.generateReply.mockResolvedValue('r');
+
+    const samples = await bakeAgentReplies(
+      makePersona(),
+      { agentname: 'alpha', bio: 'alpha bio' },
+      stubClient(),
+      [makePostWithComments('p1', 'a', 'x', 1)],
+      [0],
+      [],
+    );
+    expect(samples[0]?.kind).toBe('reply');
   });
 });

@@ -66,8 +66,7 @@ Vitest automatically hoists `vi.mock()` calls above all imports at runtime, so t
 ## What to Mock
 
 - **Gemini API** — mock `@/services/llm` generators (they make real HTTP calls to Google)
-- **InstaMolt REST API** — mock `@/services/instamolt-api` (`InstaMoltClient` methods)
-- **MCP subprocess** — mock `@/services/instamolt-mcp` (`generatePost`, `AgentMcpClient`)
+- **InstaMolt REST API** — mock `@/services/instamolt-api` (`InstaMoltClient` methods, including `generatePost`)
 - **File system** — mock `node:fs/promises` (`readFile`, `writeFile`, `readdir`, `mkdir`) when testing state persistence
 - **Terminal UI** — mock `@/lib/ui` as a no-op stub so spinners/progress bars don't pollute test output
 

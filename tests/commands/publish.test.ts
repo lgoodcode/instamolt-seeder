@@ -40,21 +40,6 @@ const llmMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/services/llm', () => llmMocks);
 
-// ---------------- mcp mock ----------------
-
-const mcpMocks = vi.hoisted(() => ({
-  generatePost:
-    vi.fn<
-      () => Promise<{
-        success: boolean;
-        postId?: string;
-        imageUrl?: string;
-        error?: string;
-      }>
-    >(),
-}));
-vi.mock('@/services/instamolt-mcp', () => mcpMocks);
-
 // ---------------- instamolt-api mock ----------------
 // Constructor mock: must be a `function` not an arrow so `new` works.
 
@@ -81,6 +66,12 @@ const apiMocks = vi.hoisted(() => ({
     >(),
   updateProfile: vi.fn<(description: string) => Promise<void>>(),
   followAgent: vi.fn<(agentname: string) => Promise<void>>(),
+  generatePost:
+    vi.fn<
+      () => Promise<{
+        post: { id: string; image_url: string };
+      }>
+    >(),
 }));
 
 vi.mock('@/services/instamolt-api', () => ({
@@ -90,6 +81,7 @@ vi.mock('@/services/instamolt-api', () => ({
       completeChallenge: apiMocks.completeChallenge,
       updateProfile: apiMocks.updateProfile,
       followAgent: apiMocks.followAgent,
+      generatePost: apiMocks.generatePost,
     };
   }),
 }));
@@ -151,12 +143,17 @@ function makePersona(id: string): Persona {
     postsPerDay: [1, 2],
     likeProbability: 0,
     commentProbability: 0,
-    followProbability: 0,
+    // Non-zero so planFollows returns edges in Phase C tests. With the
+    // follow-algorithm update that floors budget at 5 only when
+    // followProbability > 0, a zero here would silently return an empty
+    // plan and break every Phase C assertion.
+    followProbability: 0.5,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -216,7 +213,7 @@ describe('publish', () => {
     apiMocks.updateProfile.mockReset();
     apiMocks.followAgent.mockReset();
     llmMocks.answerChallenge.mockReset();
-    mcpMocks.generatePost.mockReset();
+    apiMocks.generatePost.mockReset();
     personaMocks.loadPersonas.mockReset();
 
     personaMocks.loadPersonas.mockResolvedValue(
@@ -316,6 +313,50 @@ describe('publish', () => {
     expect(onDisk.apiKey).toBeUndefined();
   });
 
+  it('Phase A: one agent failing to register does not abort the others (concurrent worker pool)', async () => {
+    // Phase A runs agents through `mapWithConcurrency(config.registerConcurrency)`.
+    // Each worker wraps its per-agent body in try/catch, so one
+    // completeChallenge rejection should increment the error counter and
+    // leave the other agents registered. This guards the batch-level
+    // error-isolation contract that was introduced with the refactor from
+    // the sequential for-loop.
+    primeAgent('alpha');
+    primeAgent('beta');
+    primeAgent('gamma');
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    // Issue a request_id keyed by agentname so completeChallenge can look up
+    // which agent it's answering for. With worker-pool concurrency we can't
+    // rely on call ordering to match pairs.
+    apiMocks.startChallenge.mockImplementation(async (agentname: string, _desc: string) => ({
+      request_id: `req-${agentname}`,
+      challenge: 'q?',
+    }));
+    // Beta's completeChallenge rejects; alpha and gamma succeed with distinct
+    // keys so we can verify each agent's file separately.
+    apiMocks.completeChallenge.mockImplementation(async (requestId: string, _answer: string) => {
+      const agentname = requestId.replace(/^req-/, '');
+      if (agentname === 'beta') {
+        throw new Error('synthetic registration failure for beta');
+      }
+      return {
+        success: true,
+        agent: { agentname, api_key: `key-${agentname}`, is_verified: false },
+      };
+    });
+
+    await publish({ skipFollowGraph: true });
+
+    const alphaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+    const betaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('beta'))!);
+    const gammaOnDisk = JSON.parse(fsState.files.get(agentJsonPath('gamma'))!);
+
+    // Alpha and gamma land their apiKey; beta does NOT.
+    expect(alphaOnDisk.apiKey).toBe('key-alpha');
+    expect(gammaOnDisk.apiKey).toBe('key-gamma');
+    expect(betaOnDisk.apiKey).toBeUndefined();
+  });
+
   it('treats updateProfile failure as best-effort (apiKey still persisted)', async () => {
     primeAgent('alpha');
     primeIndex(['alpha']);
@@ -333,7 +374,7 @@ describe('publish', () => {
     expect(onDisk.apiKey).toBe('key-alpha');
   });
 
-  it('publishes unpublished posts via the MCP generatePost helper', async () => {
+  it('publishes unpublished posts via the platform generatePost endpoint', async () => {
     primeAgent('alpha', { apiKey: 'key-alpha' });
     primeIndex(['alpha']);
     fsState.dirEntries.set(join('./output/agents', 'alpha'), ['agent.json', 'post-001.json']);
@@ -347,15 +388,13 @@ describe('publish', () => {
       }),
     );
 
-    mcpMocks.generatePost.mockResolvedValue({
-      success: true,
-      postId: 'server-post-1',
-      imageUrl: 'https://cdn/1.jpg',
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'server-post-1', image_url: 'https://cdn/1.jpg' },
     });
 
     await publish({ skipFollowGraph: true });
 
-    expect(mcpMocks.generatePost).toHaveBeenCalledTimes(1);
+    expect(apiMocks.generatePost).toHaveBeenCalledTimes(1);
     const updated = JSON.parse(
       fsState.files.get(join('./output/agents', 'alpha', 'post-001.json'))!,
     );
@@ -382,7 +421,101 @@ describe('publish', () => {
 
     await publish({ skipFollowGraph: true });
 
-    expect(mcpMocks.generatePost).not.toHaveBeenCalled();
+    expect(apiMocks.generatePost).not.toHaveBeenCalled();
+  });
+
+  it('--limit N still publishes unpublished drafts when the first N post files are already published', async () => {
+    // Regression: --limit was previously derived from total post-*.json count,
+    // so if the first N files on disk were already `published: true`, the
+    // worker would exit on the tick cap before ever reaching an unpublished
+    // draft. With the fix, `expected` counts only unpublished posts.
+    primeAgent('alpha', { apiKey: 'key-alpha' });
+    primeIndex(['alpha']);
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), [
+      'agent.json',
+      'post-001.json',
+      'post-002.json',
+      'post-003.json',
+    ]);
+    // First two already published, third is an unpublished draft.
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-001.json'),
+      JSON.stringify({
+        id: 'post-001',
+        imagePrompt: 'a',
+        caption: 'a',
+        aspectRatio: 'square',
+        published: true,
+        publishedAt: '2026-04-01T00:00:00Z',
+        instamoltPostId: 'pub-1',
+      }),
+    );
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-002.json'),
+      JSON.stringify({
+        id: 'post-002',
+        imagePrompt: 'b',
+        caption: 'b',
+        aspectRatio: 'square',
+        published: true,
+        publishedAt: '2026-04-01T00:00:00Z',
+        instamoltPostId: 'pub-2',
+      }),
+    );
+    fsState.files.set(
+      join('./output/agents', 'alpha', 'post-003.json'),
+      JSON.stringify({
+        id: 'post-003',
+        imagePrompt: 'c',
+        caption: 'c',
+        aspectRatio: 'square',
+      }),
+    );
+
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'server-post-3', image_url: 'https://cdn/3.jpg' },
+    });
+
+    await publish({ skipFollowGraph: true, limit: 2 });
+
+    // post-003 should have been published despite --limit 2 and 2 prior
+    // published files ahead of it.
+    expect(apiMocks.generatePost).toHaveBeenCalledTimes(1);
+    const third = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'post-003.json'))!);
+    expect(third.published).toBe(true);
+    expect(third.instamoltPostId).toBe('server-post-3');
+  });
+
+  it('--agent foo only creates follow edges FROM foo (does not mutate graph for other agents)', async () => {
+    // Regression: Phase C previously iterated the full registered fleet as
+    // followers even when options.agent was set, so a targeted single-agent
+    // publish would silently create follow edges on every other agent too.
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      primeAgent(name, { apiKey: `key-${name}` });
+    }
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    // Track which apiKey each InstaMoltClient was constructed with so we can
+    // assert Phase C only used alpha's key as the follower.
+    const { InstaMoltClient } = await import('@/services/instamolt-api');
+    const ctor = InstaMoltClient as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    await publish({ agent: 'alpha' });
+
+    const followerKeys = ctor.mock.calls
+      .map((args: unknown[]) => args[0])
+      .filter((k: unknown): k is string => typeof k === 'string' && k.startsWith('key-'));
+    // All authed clients constructed during Phase A/B/C for the follower
+    // position must be alpha's. Beta/gamma keys should never appear as
+    // followers (they might appear as *targets* in the candidate pool, but
+    // the candidate pool doesn't construct a client).
+    for (const k of followerKeys) {
+      expect(k).toBe('key-alpha');
+    }
+    // Phase C should have run (alpha has candidates), so followAgent is called
+    // at least once.
+    expect(apiMocks.followAgent).toHaveBeenCalled();
   });
 
   it('runs Phase C follow-graph bootstrap when ≥2 registered agents exist', async () => {

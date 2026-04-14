@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Persona } from '@/types';
+import type { FeedCacheFile, Persona, RemotePost } from '@/types';
 
 // ---------------- fs mocks ----------------
 
@@ -45,48 +45,112 @@ const llmMocks = vi.hoisted(() => ({
         aspectRatio: 'square' | 'landscape' | 'portrait';
       }>
     >(),
+  rollChaos: vi.fn(() => false),
 }));
 vi.mock('@/services/llm', () => llmMocks);
-
-// ---------------- mcp mock ----------------
-
-const mcpMocks = vi.hoisted(() => ({
-  generatePost: vi.fn<() => Promise<{ success: boolean; postId?: string; error?: string }>>(),
-}));
-vi.mock('@/services/instamolt-mcp', () => mcpMocks);
 
 // ---------------- instamolt-api mock ----------------
 
 const apiMocks = vi.hoisted(() => ({
-  getExplore:
-    vi.fn<
-      () => Promise<{
-        posts: Array<{
-          id: string;
-          agentname: string;
-          caption?: string;
-          likes_count: number;
-          comments_count: number;
-          created_at: string;
-        }>;
-        has_more: boolean;
-      }>
-    >(),
-  likePost: vi.fn<() => Promise<void>>(),
+  likePost: vi.fn<() => Promise<{ success: boolean; liked: boolean }>>(),
   commentOnPost: vi.fn<() => Promise<void>>(),
-  followAgent: vi.fn<() => Promise<void>>(),
+  followAgent: vi.fn<() => Promise<{ success: boolean; following: boolean }>>(),
+  generatePost: vi.fn<() => Promise<{ post: { id: string; image_url: string } }>>(),
 }));
 
 vi.mock('@/services/instamolt-api', () => ({
   InstaMoltClient: vi.fn().mockImplementation(function () {
     return {
-      getExplore: apiMocks.getExplore,
       likePost: apiMocks.likePost,
       commentOnPost: apiMocks.commentOnPost,
       followAgent: apiMocks.followAgent,
+      generatePost: apiMocks.generatePost,
     };
   }),
+  InstaMoltApiError: class extends Error {
+    constructor(
+      readonly method: string,
+      readonly path: string,
+      readonly status: number,
+      readonly body: string,
+      readonly retryAfterMs?: number,
+    ) {
+      super(`${method} ${path}: ${status}`);
+      this.name = 'InstaMoltApiError';
+    }
+  },
 }));
+
+// ---------------- event-logger mock ----------------
+// Event-logger writes JSONL files via node:fs (sync). Mock it as a no-op so
+// tests never touch the real filesystem and so we can assert on calls if
+// we want to later.
+
+const eventLoggerMocks = vi.hoisted(() => ({
+  initEventLogger: vi.fn(),
+  logEvent: vi.fn(),
+  logSkippedAction: vi.fn(),
+  flushStats: vi.fn(),
+  updateAgentCounts: vi.fn(),
+}));
+vi.mock('@/lib/event-logger', () => eventLoggerMocks);
+
+// ---------------- feed-cache mock ----------------
+// engage.ts loads the shared feed cache once per cycle via loadFeedCacheStrict
+// and every agent reads posts from the same snapshot.
+
+const feedCacheMocks = vi.hoisted(() => ({
+  loadFeedCacheStrict: vi.fn<() => Promise<FeedCacheFile>>(),
+}));
+
+vi.mock('@/lib/feed-cache', async () => {
+  // Preserve the real FeedCacheEmptyError class so `instanceof` inside
+  // engage.ts resolves against the same constructor.
+  const actual = await vi.importActual<typeof import('@/lib/feed-cache')>('@/lib/feed-cache');
+  return {
+    ...actual,
+    loadFeedCacheStrict: feedCacheMocks.loadFeedCacheStrict,
+  };
+});
+
+function makeRemotePost(id: string, agentname: string, caption: string): RemotePost {
+  return {
+    id,
+    image_url: 'http://x/y.jpg',
+    thumbnail_url: null,
+    caption,
+    width: 1080,
+    height: 1080,
+    format: 'square',
+    like_count: 0,
+    comment_count: 0,
+    view_count: 0,
+    popularity_score: 0,
+    velocity_score: 0,
+    share_count: 0,
+    created_at: '2026-04-13T00:00:00.000Z',
+    author: { agentname, is_verified: false },
+  };
+}
+
+function makeFeedCache(posts: RemotePost[]): FeedCacheFile {
+  return {
+    refreshedAt: '2026-04-13T00:00:00.000Z',
+    sources: ['explore'],
+    posts,
+  };
+}
+
+/**
+ * Convenience helper so tests can describe feed content in the legacy
+ * `{id, agentname, caption}` shape (same ergonomics as the pre-feed-cache
+ * engage tests) while the mock still returns a properly-shaped `FeedCacheFile`.
+ */
+function feedCacheFromLegacy(
+  legacy: Array<{ id: string; agentname: string; caption?: string }>,
+): FeedCacheFile {
+  return makeFeedCache(legacy.map((p) => makeRemotePost(p.id, p.agentname, p.caption ?? '')));
+}
 
 // ---------------- personas mock ----------------
 
@@ -161,6 +225,7 @@ function makePersona(id: string): Persona {
     weight: 1,
     examplePosts: [],
     exampleComments: [],
+    activityCurve: Array.from({ length: 24 }, () => 0.5),
   };
 }
 
@@ -201,23 +266,30 @@ describe('engage', () => {
     fsState.files.clear();
     fsState.dirEntries.clear();
     uiMocks.spinnerMessages.length = 0;
-    apiMocks.getExplore.mockReset();
+    feedCacheMocks.loadFeedCacheStrict.mockReset();
     apiMocks.likePost.mockReset();
     apiMocks.commentOnPost.mockReset();
     apiMocks.followAgent.mockReset();
     llmMocks.generateComment.mockReset();
     llmMocks.generatePostContent.mockReset();
-    mcpMocks.generatePost.mockReset();
+    apiMocks.generatePost.mockReset();
     personaMocks.loadPersonas.mockReset();
+    eventLoggerMocks.initEventLogger.mockReset();
+    eventLoggerMocks.logEvent.mockReset();
+    eventLoggerMocks.logSkippedAction.mockReset();
+    eventLoggerMocks.flushStats.mockReset();
+    eventLoggerMocks.updateAgentCounts.mockReset();
 
     personaMocks.loadPersonas.mockResolvedValue(
       new Map([['test-persona', makePersona('test-persona')]]),
     );
-    apiMocks.likePost.mockResolvedValue(undefined);
+    apiMocks.likePost.mockResolvedValue({ success: true, liked: true });
     apiMocks.commentOnPost.mockResolvedValue(undefined);
-    apiMocks.followAgent.mockResolvedValue(undefined);
+    apiMocks.followAgent.mockResolvedValue({ success: true, following: true });
     llmMocks.generateComment.mockResolvedValue('thoughtful take');
-    mcpMocks.generatePost.mockResolvedValue({ success: true, postId: 'p1' });
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'p1', image_url: 'https://cdn/p1.jpg' },
+    });
 
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   });
@@ -237,50 +309,21 @@ describe('engage', () => {
     await engage();
     const out = getLogOutput();
     expect(out).toMatch(/No registered agents/i);
-    expect(apiMocks.getExplore).not.toHaveBeenCalled();
+    expect(feedCacheMocks.loadFeedCacheStrict).not.toHaveBeenCalled();
   });
 
   it('runs one cycle against a single agent with likes/comments/follows', async () => {
     primeAgent('alpha');
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'hi',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'post-2',
-          agentname: 'beta',
-          caption: 'yo',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'post-3',
-          agentname: 'beta',
-          caption: 'ok',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'post-4',
-          agentname: 'beta',
-          caption: 'sure',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'hi' },
+        { id: 'post-2', agentname: 'beta', caption: 'yo' },
+        { id: 'post-3', agentname: 'beta', caption: 'ok' },
+        { id: 'post-4', agentname: 'beta', caption: 'sure' },
+      ]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -296,19 +339,9 @@ describe('engage', () => {
     primeAgent('alpha', { lastCommentedAt: new Date().toISOString() });
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'hi',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -324,19 +357,9 @@ describe('engage', () => {
     primeAgent('alpha', { lastCommentedAt: twoMinutesAgo });
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'hi',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -347,19 +370,9 @@ describe('engage', () => {
     primeAgent('alpha');
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'hi',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -374,19 +387,9 @@ describe('engage', () => {
     primeAgent('alpha');
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'cap text',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap text' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -407,27 +410,12 @@ describe('engage', () => {
     primeAgent('alpha');
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'cap one',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'post-2',
-          agentname: 'beta',
-          caption: 'cap two',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'cap one' },
+        { id: 'post-2', agentname: 'beta', caption: 'cap two' },
+      ]),
+    );
 
     llmMocks.generateComment
       .mockResolvedValueOnce('runtime first reply')
@@ -473,19 +461,9 @@ describe('engage', () => {
       }),
     );
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'cap',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -513,19 +491,9 @@ describe('engage', () => {
       }),
     );
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'cap',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
@@ -554,27 +522,12 @@ describe('engage', () => {
       }),
     );
 
-    apiMocks.getExplore.mockResolvedValue({
-      posts: [
-        {
-          id: 'post-1',
-          agentname: 'beta',
-          caption: 'first',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-        {
-          id: 'post-2',
-          agentname: 'beta',
-          caption: 'second',
-          likes_count: 0,
-          comments_count: 0,
-          created_at: '',
-        },
-      ],
-      has_more: false,
-    });
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'first' },
+        { id: 'post-2', agentname: 'beta', caption: 'second' },
+      ]),
+    );
 
     // Have generateComment return predictable text so we can verify it gets
     // appended to the in-memory avoid list across calls within the same cycle.
@@ -600,21 +553,316 @@ describe('engage', () => {
       }),
     );
     fsState.dirEntries.set('./output/agents', ['alpha']);
-
-    await engage({ agents: 1, limit: 10 });
-
-    expect(apiMocks.getExplore).not.toHaveBeenCalled();
-  });
-
-  it('warns and continues when explore feed is empty', async () => {
-    primeAgent('alpha');
-    fsState.dirEntries.set('./output/agents', ['alpha']);
-
-    apiMocks.getExplore.mockResolvedValue({ posts: [], has_more: false });
+    // Feed cache is loaded once per cycle BEFORE we iterate agents, so even
+    // when every agent is unskippable the cache load still fires. We assert
+    // the per-agent action paths stay untouched instead.
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'ignored' }]),
+    );
 
     await engage({ agents: 1, limit: 10 });
 
     expect(apiMocks.likePost).not.toHaveBeenCalled();
     expect(apiMocks.commentOnPost).not.toHaveBeenCalled();
+    expect(apiMocks.followAgent).not.toHaveBeenCalled();
+  });
+
+  it('aborts the cycle when the live feed is empty (FeedCacheEmptyError)', async () => {
+    const { FeedCacheEmptyError } = await import('@/lib/feed-cache');
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+
+    feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError());
+
+    await expect(engage({ agents: 1, limit: 10 })).rejects.toThrow(FeedCacheEmptyError);
+
+    // Per-agent actions must not fire when the feed is empty — no synthetic
+    // fallback, no silent skip.
+    expect(apiMocks.likePost).not.toHaveBeenCalled();
+    expect(apiMocks.commentOnPost).not.toHaveBeenCalled();
+    expect(apiMocks.followAgent).not.toHaveBeenCalled();
+  });
+
+  // --- Event-logger integration -----------------------------------------
+  // Assertions on the structured activity stream wired through engage.ts.
+  // Each action path (like / comment / follow / post / cooldown-skip /
+  // feed-refresh success+fail) must surface the right event so overnight
+  // operators can reconstruct a cycle from `output/logs/events.jsonl`.
+
+  function eventTypes(): string[] {
+    return eventLoggerMocks.logEvent.mock.calls.map(
+      (c) => (c[0] as { eventType: string }).eventType,
+    );
+  }
+
+  function eventsOfType<T = Record<string, unknown>>(type: string): T[] {
+    return eventLoggerMocks.logEvent.mock.calls
+      .map((c) => c[0] as T & { eventType: string })
+      .filter((e) => e.eventType === type);
+  }
+
+  it('initializes the event logger on command start', async () => {
+    fsState.dirEntries.set('./output/agents', []);
+    await engage();
+    expect(eventLoggerMocks.initEventLogger).toHaveBeenCalled();
+  });
+
+  it('emits session_start, session_end, and flushes on a full cycle', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const types = eventTypes();
+    expect(types).toContain('session_start');
+    expect(types).toContain('session_end');
+    // session_start fires before session_end.
+    expect(types.indexOf('session_start')).toBeLessThan(types.indexOf('session_end'));
+    // Cycle number is tracked on both bookend events.
+    const starts = eventsOfType<{ details: { cycleNumber: number } }>('session_start');
+    const ends = eventsOfType<{ details: { cycleNumber: number } }>('session_end');
+    expect(starts[0].details.cycleNumber).toBe(1);
+    expect(ends[0].details.cycleNumber).toBe(1);
+    // updateAgentCounts is called with (registered, active) — 1 agent primed,
+    // 1 selected for this cycle.
+    expect(eventLoggerMocks.updateAgentCounts).toHaveBeenCalledWith(1, 1);
+    // flushStats fires at cycle end + once more in the finally block.
+    expect(eventLoggerMocks.flushStats).toHaveBeenCalled();
+  });
+
+  it('emits a feed_refresh success event with the post count', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'one' },
+        { id: 'post-2', agentname: 'beta', caption: 'two' },
+        { id: 'post-3', agentname: 'beta', caption: 'three' },
+      ]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const refreshes = eventsOfType<{
+      success: boolean;
+      details: { postCount: number };
+    }>('feed_refresh');
+    expect(refreshes.length).toBe(1);
+    expect(refreshes[0].success).toBe(true);
+    expect(refreshes[0].details.postCount).toBe(3);
+  });
+
+  it('emits a feed_refresh failure event when the feed load throws', async () => {
+    const { FeedCacheEmptyError } = await import('@/lib/feed-cache');
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError('empty'));
+
+    await expect(engage({ agents: 1, limit: 10 })).rejects.toThrow(FeedCacheEmptyError);
+
+    const refreshes = eventsOfType<{ success: boolean; error?: string }>('feed_refresh');
+    expect(refreshes.length).toBe(1);
+    expect(refreshes[0].success).toBe(false);
+    expect(refreshes[0].error).toMatch(/empty/i);
+  });
+
+  it('emits a like event for each successful like with agent + post context', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'one' },
+        { id: 'post-2', agentname: 'beta', caption: 'two' },
+        { id: 'post-3', agentname: 'beta', caption: 'three' },
+        { id: 'post-4', agentname: 'beta', caption: 'four' },
+      ]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const likes = eventsOfType<{
+      agentname: string;
+      persona: string;
+      success: boolean;
+      details: { postId: string; targetAuthor: string };
+    }>('like');
+    expect(likes.length).toBeGreaterThanOrEqual(1);
+    expect(likes.length).toBe(apiMocks.likePost.mock.calls.length);
+    for (const e of likes) {
+      expect(e.agentname).toBe('alpha');
+      expect(e.persona).toBe('test-persona');
+      expect(e.success).toBe(true);
+      expect(e.details.targetAuthor).toBe('beta');
+      expect(e.details.postId).toMatch(/^post-\d$/);
+    }
+  });
+
+  it('emits a like failure event with httpStatus + requestContext when the API throws InstaMoltApiError', async () => {
+    const { InstaMoltApiError } = await import('@/services/instamolt-api');
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'one' }]),
+    );
+    // Fail every like attempt with a typed API error so errorDetails() pulls
+    // out status + requestContext.
+    apiMocks.likePost.mockRejectedValue(
+      new InstaMoltApiError('POST', '/posts/post-1/like', 500, 'boom'),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const likeFailures = eventsOfType<{
+      success: boolean;
+      error?: string;
+      details: {
+        postId: string;
+        targetAuthor: string;
+        httpStatus?: number;
+        requestContext?: { method?: string; path?: string };
+      };
+    }>('like').filter((e) => !e.success);
+    expect(likeFailures.length).toBeGreaterThanOrEqual(1);
+    expect(likeFailures[0].details.httpStatus).toBe(500);
+    expect(likeFailures[0].details.requestContext?.method).toBe('POST');
+    expect(likeFailures[0].details.requestContext?.path).toBe('/posts/post-1/like');
+    expect(likeFailures[0].error).toMatch(/500/);
+  });
+
+  it('emits a comment event on each successful comment and a cooldown skip via logSkippedAction', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    // At least one comment success event for the single posted comment.
+    const comments = eventsOfType<{
+      agentname: string;
+      persona: string;
+      success: boolean;
+      details: { postId: string; targetAuthor: string; preview: string };
+    }>('comment');
+    const successes = comments.filter((c) => c.success);
+    expect(successes.length).toBeGreaterThanOrEqual(1);
+    expect(successes[0].details.targetAuthor).toBe('beta');
+    expect(successes[0].details.preview).toMatch(/thoughtful take/);
+    // No cooldown skip on a fresh agent.
+    expect(eventLoggerMocks.logSkippedAction).not.toHaveBeenCalled();
+  });
+
+  it('calls logSkippedAction("comment", …, reason: cooldown) when the agent is on cooldown', async () => {
+    primeAgent('alpha', { lastCommentedAt: new Date().toISOString() });
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    expect(eventLoggerMocks.logSkippedAction).toHaveBeenCalledWith(
+      'comment',
+      'alpha',
+      'test-persona',
+      expect.stringMatching(/^cooldown:/),
+    );
+    // The comment success path must NOT fire a comment event on cooldown.
+    const commentSuccesses = eventsOfType<{ success: boolean }>('comment').filter((c) => c.success);
+    expect(commentSuccesses.length).toBe(0);
+  });
+
+  it('emits a follow event on each successful follow', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const follows = eventsOfType<{
+      agentname: string;
+      persona: string;
+      success: boolean;
+      details: { targetAuthor: string };
+    }>('follow');
+    const successes = follows.filter((f) => f.success);
+    expect(successes.length).toBe(apiMocks.followAgent.mock.calls.length);
+    expect(successes[0].details.targetAuthor).toBe('beta');
+    expect(successes[0].agentname).toBe('alpha');
+  });
+
+  it('emits a post_published success event when the fresh-post branch fires', async () => {
+    // Force the fresh-post roll to always land by giving the persona a
+    // guaranteed postsPerDay window. makePersona has [0,0] for determinism,
+    // so override here.
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([
+        [
+          'test-persona',
+          { ...makePersona('test-persona'), postsPerDay: [100, 100] as [number, number] },
+        ],
+      ]),
+    );
+    llmMocks.generatePostContent.mockResolvedValue({
+      imagePrompt: 'a sunset',
+      caption: 'warm light',
+      aspectRatio: 'square',
+    });
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'post-new-1', image_url: 'https://cdn/post-new-1.jpg' },
+    });
+
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const publishes = eventsOfType<{
+      success: boolean;
+      details: { postId?: string; caption?: string };
+    }>('post_published');
+    const successes = publishes.filter((p) => p.success);
+    expect(successes.length).toBe(1);
+    expect(successes[0].details.postId).toBe('post-new-1');
+    expect(successes[0].details.caption).toBe('warm light');
+  });
+
+  it('emits a post_published failure when generatePost throws', async () => {
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([
+        [
+          'test-persona',
+          { ...makePersona('test-persona'), postsPerDay: [100, 100] as [number, number] },
+        ],
+      ]),
+    );
+    llmMocks.generatePostContent.mockResolvedValue({
+      imagePrompt: 'x',
+      caption: 'y',
+      aspectRatio: 'square',
+    });
+    apiMocks.generatePost.mockRejectedValue(new Error('moderation blocked'));
+
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
+    );
+
+    await engage({ agents: 1, limit: 10 });
+
+    const publishes = eventsOfType<{ success: boolean; error?: string }>('post_published');
+    const failures = publishes.filter((p) => !p.success);
+    expect(failures.length).toBe(1);
+    expect(failures[0].error).toBe('moderation blocked');
   });
 });

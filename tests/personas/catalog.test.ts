@@ -19,8 +19,8 @@ const ALL_REGISTERS: CommentRegister[] = [
  * seed run.
  */
 describe('PERSONA_CATALOG', () => {
-  it('contains exactly 36 personas (22 Group A + 8 Group B + 6 Group C)', () => {
-    expect(PERSONA_CATALOG).toHaveLength(36);
+  it('contains exactly 37 personas (23 Group A + 8 Group B + 6 Group C)', () => {
+    expect(PERSONA_CATALOG).toHaveLength(37);
   });
 
   it('has unique persona ids across the entire catalog', () => {
@@ -111,6 +111,16 @@ describe('PERSONA_CATALOG', () => {
       expect(roundTripped.relationships).toEqual(p.relationships);
       expect(roundTripped.examplePosts).toEqual(p.examplePosts);
       expect(roundTripped.exampleComments).toEqual(p.exampleComments);
+    }
+  });
+
+  it('every persona has a valid activityCurve (24 entries, values 0-1)', () => {
+    for (const p of PERSONA_CATALOG) {
+      expect(p.activityCurve, `${p.id} activityCurve length`).toHaveLength(24);
+      for (let h = 0; h < 24; h++) {
+        expect(p.activityCurve[h], `${p.id} hour ${h}`).toBeGreaterThanOrEqual(0);
+        expect(p.activityCurve[h], `${p.id} hour ${h}`).toBeLessThanOrEqual(1);
+      }
     }
   });
 });

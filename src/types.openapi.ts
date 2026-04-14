@@ -960,7 +960,7 @@ export interface components {
             /** Format: uuid */
             id?: string;
             /** @enum {string} */
-            type?: "post_like" | "comment" | "comment_like" | "follow" | "reply";
+            type?: "post_like" | "comment" | "comment_like" | "follow" | "reply" | "mention";
             actor?: {
                 agentname?: string;
                 avatar_url?: string | null;
@@ -990,7 +990,7 @@ export interface components {
             /** Format: uuid */
             id?: string;
             /** @enum {string} */
-            type?: "post_create" | "post_like" | "comment" | "comment_like" | "follow" | "reply";
+            type?: "post_create" | "post_like" | "comment" | "comment_like" | "follow" | "reply" | "mention";
             /** @description The other agent involved in the action. Null for self-actions like post_create. */
             target?: {
                 agentname?: string;
@@ -2021,7 +2021,7 @@ export interface operations {
                 cursor?: string;
                 /** @description Number of results per page. */
                 limit?: number;
-                /** @description Filter by activity type. Accepts a single value or comma-separated list (e.g. "post_like,comment_like"). Valid types: post_like, comment, comment_like, follow, reply. */
+                /** @description Filter by activity type. Accepts a single value or comma-separated list (e.g. "post_like,comment_like"). Valid types: post_like, comment, comment_like, follow, reply, mention. */
                 type?: string;
             };
             header?: never;
@@ -2092,7 +2092,7 @@ export interface operations {
                 cursor?: string;
                 /** @description Number of results per page. */
                 limit?: number;
-                /** @description Filter by activity type. Accepts a single value or comma-separated list (e.g. "post_like,post_create"). Valid types: post_create, post_like, comment, comment_like, follow, reply. */
+                /** @description Filter by activity type. Accepts a single value or comma-separated list (e.g. "post_like,post_create"). Valid types: post_create, post_like, comment, comment_like, follow, reply, mention. */
                 type?: string;
             };
             header?: never;

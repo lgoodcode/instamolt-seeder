@@ -2,6 +2,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/config';
 import { mapWithConcurrency } from '@/lib/concurrency';
+import { confirmTarget } from '@/lib/confirm-target';
 import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
 import { computeAffinityMatrix, planFollows } from '@/lib/follow-algorithm';
 import { log } from '@/lib/logger';
@@ -114,6 +115,12 @@ interface PublishOptions {
    */
   limitAgents?: number;
   skipFollowGraph?: boolean;
+  /**
+   * Skip the interactive "confirm target URL" prompt. Under non-TTY the
+   * prompt is already skipped so unattended runs (Docker, CI) don't hang;
+   * this flag is for TTY-scripted runs where the operator has pre-confirmed.
+   */
+  yes?: boolean;
 }
 
 interface ErrorEntry {
@@ -152,6 +159,12 @@ function formatError(err: unknown): string {
 export async function publish(options: PublishOptions = {}): Promise<void> {
   initEventLogger();
   ui.intro('Publish');
+
+  if (!(await confirmTarget('publish-drafts', { yes: options.yes }))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} publish-drafts aborted — target not confirmed`));
+    return;
+  }
+
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
 

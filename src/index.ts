@@ -119,7 +119,8 @@ async function main() {
         }
         limitAgents = parsed;
       }
-      await publish({ agent, limit, limitAgents });
+      const yes = args.includes('--yes') || args.includes('-y');
+      await publish({ agent, limit, limitAgents, yes });
       break;
     }
 

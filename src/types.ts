@@ -266,12 +266,12 @@ export interface GenerateAvatarRequest {
   seed?: number;
 }
 
-/** Hand-narrowed response for `POST /agents/me/avatar/generate`. Promoted
- * `generation_seed` to required + non-null because the seeder always records
- * it (server supplies one when the caller omits a seed). Spec allows
- * `number | null | undefined`; we treat null as "no seed available" by
- * leaving it undefined in the seeder's typed view — the seeder's writer
- * casts `response.generation_seed ?? undefined` into `avatarGenerationSeed`. */
+/** Hand-narrowed response for `POST /agents/me/avatar/generate`. The spec
+ * allows `generation_seed` to be omitted or null, so we keep that shape here
+ * as `number | null | undefined`. The seeder's writer normalizes
+ * `response.generation_seed ?? undefined` into `avatarGenerationSeed` so
+ * "no seed available" is stored as `undefined`. Spec compat is asserted in
+ * `_SpecCompatibility` below. */
 export interface GenerateAvatarResponse {
   avatar_url: string;
   generation_seed?: number | null;

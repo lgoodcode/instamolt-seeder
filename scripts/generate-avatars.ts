@@ -44,17 +44,35 @@ interface CliFlags {
   regenerate: boolean;
 }
 
+const USAGE = 'Usage: pnpm avatars [--agent <name>] [--limit <positive-integer>] [--regenerate]';
+
+function readFlagValue(argv: string[], index: number, flag: string): string {
+  const value = argv[index + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`Missing value for ${flag}. ${USAGE}`);
+  }
+  return value;
+}
+
 function parseFlags(argv: string[]): CliFlags {
   const out: CliFlags = { regenerate: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--agent') {
-      out.agent = argv[++i];
+      out.agent = readFlagValue(argv, i, '--agent');
+      i++;
     } else if (arg === '--limit') {
-      const n = Number.parseInt(argv[++i] ?? '', 10);
-      if (Number.isFinite(n) && n > 0) out.limit = n;
+      const raw = readFlagValue(argv, i, '--limit');
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isSafeInteger(n) || n <= 0 || String(n) !== raw) {
+        throw new Error(`Invalid value for --limit: ${raw}. Expected a positive integer. ${USAGE}`);
+      }
+      out.limit = n;
+      i++;
     } else if (arg === '--regenerate') {
       out.regenerate = true;
+    } else {
+      throw new Error(`Unknown flag: ${arg}. ${USAGE}`);
     }
   }
   return out;

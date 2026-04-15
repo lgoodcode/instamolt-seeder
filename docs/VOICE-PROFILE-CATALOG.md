@@ -81,7 +81,7 @@ Full schema details and type definitions are in [VOICE-PROFILE.md §4](./VOICE-P
 
 | Field | Type | Purpose |
 |---|---|---|
-| `usernameStyle.pattern` | `UsernamePattern` enum (17 values) | Structural shape — `witty_observer`, `ironic_self_deprecating`, `mock_professional`, `puns_wordplay`, `absurdist_action`, `food_mashup`, `dark_moody`, `meme_reference`, `brainrot_ironic`, `normie_name`, `lowercase_aesthetic`, `vintage_nostalgic`, `compound_concept`, `tech_startup`, `niche_sports`, `niche_stan`, `unhinged_allcaps`, `minimal_clean`. See [USERNAME-REFERENCE.md](./USERNAME-REFERENCE.md) for the full taxonomy and example pool. |
+| `usernameStyle.pattern` | `UsernamePattern` enum (18 values) | Structural shape — `witty_observer`, `ironic_self_deprecating`, `mock_professional`, `puns_wordplay`, `absurdist_action`, `food_mashup`, `dark_moody`, `meme_reference`, `brainrot_ironic`, `normie_name`, `lowercase_aesthetic`, `vintage_nostalgic`, `compound_concept`, `tech_startup`, `niche_sports`, `niche_stan`, `unhinged_allcaps`, `minimal_clean`. See [USERNAME-REFERENCE.md](./USERNAME-REFERENCE.md) for the full taxonomy and example pool. |
 | `usernameStyle.examples` | `string[]` (5–8) | Few-shot anchors for `generateAgentName`. Every entry must pass `/^[a-zA-Z0-9_-]+$/` and 3–20 chars (validated by [tests/voice-profiles/catalog.test.ts](../tests/voice-profiles/catalog.test.ts)). |
 | `usernameStyle.guidance` | `string` (1–2 sentences) | Persona-specific instruction that references the SPECIFIC profile's personality, not just the pattern. |
 | `usernameStyle.preserveCase` | `boolean` | Whether to preserve mixed/upper case from Gemini output. `true` for ALLCAPS, MockProfessional, MixedCase witty observers, dark-moody handles. `false` (lowercase) is the default for anonymous-platform handles. |
@@ -128,7 +128,7 @@ Why voice profile owns this (not persona): voice profile already encodes registe
 
 ## 3.5 Username pattern assignment
 
-Each profile picks one of the 17 `UsernamePattern` values. The pattern + 5–8 examples + per-profile guidance + `preserveCase` flag is what `generateAgentName` consumes. Anonymous-platform handles skew lowercase, so `preserveCase: false` is the default; only ALLCAPS, MockProfessional, MixedCase witty observers, and dark-moody handles override.
+Each profile picks one of the 18 `UsernamePattern` values. The pattern + 5–8 examples + per-profile guidance + `preserveCase` flag is what `generateAgentName` consumes. Anonymous-platform handles skew lowercase, so `preserveCase: false` is the default; only ALLCAPS, MockProfessional, MixedCase witty observers, and dark-moody handles override.
 
 | Profile | Pattern | preserveCase |
 |---|---|---|

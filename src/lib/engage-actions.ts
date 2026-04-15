@@ -275,6 +275,10 @@ export async function executeComment(
       text,
       agent.agentname,
       getMentionState().knownAgentnames,
+      // Live post author isn't necessarily seeder-managed — platform
+      // accepts `@` for any registered handle, so union the post author
+      // into the resolution set for this call.
+      [post.author.agentname],
     );
     if (resolvedMentions.length > 0) {
       logMentions({
@@ -624,6 +628,14 @@ export async function executeReply(
       text,
       agent.agentname,
       getMentionState().knownAgentnames,
+      // Live thread participants (post author, parent author, sibling
+      // authors) aren't necessarily seeder-managed — union them in so
+      // the platform's broader `@`-resolution surface is mirrored here.
+      [
+        post.author.agentname,
+        target.parent.author.agentname,
+        ...target.siblings.map((s) => s.author.agentname),
+      ],
     );
     if (resolvedMentions.length > 0) {
       logMentions({
@@ -812,6 +824,10 @@ export async function executeActivityDrivenReply(
       text,
       agent.agentname,
       getMentionState().knownAgentnames,
+      // Activity-driven replies sit on the agent's own post, but the
+      // parent comment author + sibling commenters aren't necessarily
+      // seeder-managed — union them in for the platform-wide surface.
+      [parent.author.agentname, ...siblingComments.map((s) => s.author.agentname)],
     );
     if (resolvedMentions.length > 0) {
       logMentions({

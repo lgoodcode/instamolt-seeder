@@ -103,6 +103,28 @@ describe('parseResolvedMentions', () => {
     const out = parseResolvedMentions('@cool-cat and @bob_smith', SELF, known);
     expect(out).toEqual(['cool-cat', 'bob_smith']);
   });
+
+  it('resolves mentions of live authors passed via extraKnownAgentnames', () => {
+    // Live thread participants (post/parent/sibling authors) aren't always
+    // in the seeded roster — caller injects them per-call to avoid silently
+    // dropping valid mentions of real platform users.
+    const out = parseResolvedMentions('hey @live_user', SELF, known, ['live_user']);
+    expect(out).toEqual(['live_user']);
+  });
+
+  it('still drops self when self is also passed in extraKnownAgentnames', () => {
+    // Defense-in-depth: callers may union ALL thread participants without
+    // filtering self out, so the self exclusion must hold regardless.
+    const out = parseResolvedMentions(`@${SELF}`, SELF, known, [SELF]);
+    expect(out).toEqual([]);
+  });
+
+  it('handles undefined / empty entries in extraKnownAgentnames', () => {
+    // Real call sites build the extra set from optional fields (e.g.
+    // `parent.author?.agentname`), so falsy entries must be tolerated.
+    const out = parseResolvedMentions('hi @alice', SELF, known, ['', 'alice']);
+    expect(out).toEqual(['alice']);
+  });
 });
 
 describe('buildReplyCandidates', () => {
@@ -230,6 +252,25 @@ describe('effectiveMentionProbability', () => {
     expect(effectiveMentionProbability(undefined, 'reply')).toBeCloseTo(
       Math.min(REPLY_MENTION_PROB_CAP, DEFAULT_MENTION_PROBABILITY * REPLY_MENTION_PROB_MULTIPLIER),
     );
+  });
+
+  it('clamps base probability above 0.25 to MENTION_PROBABILITY_MAX — comment', () => {
+    // Hand-edited / malformed personas can carry out-of-range values; the
+    // gate must not exceed the documented 0–0.25 range.
+    expect(effectiveMentionProbability(0.9, 'comment')).toBe(0.25);
+  });
+
+  it('clamps negative base probability to 0 — comment', () => {
+    expect(effectiveMentionProbability(-1, 'comment')).toBe(0);
+  });
+
+  it('clamps base before applying reply multiplier', () => {
+    // Pre-clamp, 0.9 * 2 capped at 0.4 = 0.4. Post-clamp, 0.25 * 2 = 0.5
+    // capped at 0.4 = 0.4. Both produce the same result here, but the
+    // base clamp matters for values just above the cap (e.g. 0.3 * 2 = 0.6
+    // → cap 0.4; clamped 0.25 * 2 = 0.5 → cap 0.4 — identical, but
+    // `.appliedBase` is now bounded which the gate semantics depend on).
+    expect(effectiveMentionProbability(0.9, 'reply')).toBe(REPLY_MENTION_PROB_CAP);
   });
 });
 

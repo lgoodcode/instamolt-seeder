@@ -803,8 +803,20 @@ export interface SeederStats {
    */
   mentions: {
     total: number;
+    /** Phase-only totals across all contexts. Derivable from `byContext`
+     * but kept here for cheap top-line rendering. */
     byPhase: { bake: number; runtime: number };
-    byContext: { comment: number; reply: number };
+    /**
+     * Cross-product of context × phase. Nested (rather than flat) so
+     * `pnpm status` can compute a *runtime-only* rate (`runtime mentions
+     * / runtime comment success`) without mixing bake-phase counts into
+     * the numerator while the denominator is runtime-only — that
+     * mismatch was overstating rates per CodeRabbit feedback on PR #11.
+     */
+    byContext: {
+      comment: { bake: number; runtime: number };
+      reply: { bake: number; runtime: number };
+    };
     /** Agentname → count of mentions this agent has made. */
     byMentioningAgent: Record<string, number>;
     /** Agentname → count of times this agent has been mentioned. */

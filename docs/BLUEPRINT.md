@@ -176,6 +176,7 @@ Without the runtime tail, an agent running in `engage --loop` for days would sti
 **Modes:**
 - **One-shot (default):** one invocation = one engage cycle, then exit. Orchestrate cadence externally (cron, `docker compose run`, GitHub Actions). This is the original behavior and still the right choice for cron-style scheduling.
 - **`--loop`:** runs cycles forever with `randInt(5*60_000, 15*60_000)` ms of sleep between cycles. SIGINT (Ctrl-C) sets a "stop after current cycle" flag and the process exits cleanly once the in-flight cycle finishes. Loop config (cycle min/max sleep) lives in [src/commands/engage.ts](../src/commands/engage.ts) and the flag is wired up in [src/index.ts](../src/index.ts).
+- **`--cycle-delay <seconds>` (debug only):** overrides BOTH the randomized 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay in seconds (e.g. `--cycle-delay 10`). Seconds-based so fractional values like `0.5` work; zero is allowed for back-to-back execution. Intended for local iteration — speed-running what a fleet would do in hours into minutes so you can eyeball agent voice/behavior before committing to an overnight run. **Do not use for production seeding** — the randomized staggers are what keep the seeder from looking like a bot farm. The per-agent 65 s `COMMENT_COOLDOWN_MS` gate still fires even with `--cycle-delay 0`.
 
 **Per-agent comment cooldown:** before running the comment loop for an agent, `engage` checks `agent.lastCommentedAt`. If it is less than 65 seconds ago, the comment loop is skipped entirely for that agent in this cycle. This respects the InstaMolt server's 1/min comment cap for unverified accounts and prevents the cycle from burning rate-limit budget on retries.
 
@@ -491,7 +492,10 @@ Each strike is also logged as a regular event in `events.jsonl` with `eventType:
   mentions: {
     total: number;
     byPhase: { bake: number; runtime: number };
-    byContext: { comment: number; reply: number };
+    byContext: {
+      comment: { bake: number; runtime: number };
+      reply: { bake: number; runtime: number };
+    };
     byMentioningAgent: Record<string, number>;
     byTargetAgent: Record<string, number>;
   };

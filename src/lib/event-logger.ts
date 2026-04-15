@@ -152,7 +152,10 @@ function freshStats(): SeederStats {
     mentions: {
       total: 0,
       byPhase: { bake: 0, runtime: 0 },
-      byContext: { comment: 0, reply: 0 },
+      byContext: {
+        comment: { bake: 0, runtime: 0 },
+        reply: { bake: 0, runtime: 0 },
+      },
       byMentioningAgent: {},
       byTargetAgent: {},
     },
@@ -184,15 +187,36 @@ function loadOrArchivePriorStats(): SeederStats {
       // `pushLatency` call would crash on `stats.latency[type]`.
       if (!prev.latency) prev.latency = {};
       // Backfill `mentions` for stats files written before the mention
-      // aggregation shipped.
+      // aggregation shipped, OR migrate the flat-byContext shape (PR #11
+      // initial cut) to the nested-by-phase shape (PR #11 review fix).
       if (!prev.mentions) {
         prev.mentions = {
           total: 0,
           byPhase: { bake: 0, runtime: 0 },
-          byContext: { comment: 0, reply: 0 },
+          byContext: {
+            comment: { bake: 0, runtime: 0 },
+            reply: { bake: 0, runtime: 0 },
+          },
           byMentioningAgent: {},
           byTargetAgent: {},
         };
+      } else {
+        // Detect the legacy flat shape (`byContext.comment` is a number).
+        // Older stats files that resume into this version: collapse the
+        // legacy totals into `runtime` since pre-fix rates were already
+        // implicitly runtime-skewed.
+        const ctx = prev.mentions.byContext as unknown as {
+          comment: number | { bake: number; runtime: number };
+          reply: number | { bake: number; runtime: number };
+        };
+        if (typeof ctx.comment === 'number' || typeof ctx.reply === 'number') {
+          const commentNum = typeof ctx.comment === 'number' ? ctx.comment : 0;
+          const replyNum = typeof ctx.reply === 'number' ? ctx.reply : 0;
+          prev.mentions.byContext = {
+            comment: { bake: 0, runtime: commentNum },
+            reply: { bake: 0, runtime: replyNum },
+          };
+        }
       }
       return prev;
     }
@@ -350,7 +374,7 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     if (target && phase && context) {
       stats.mentions.total++;
       stats.mentions.byPhase[phase]++;
-      stats.mentions.byContext[context]++;
+      stats.mentions.byContext[context][phase]++;
       if (event.agentname) {
         stats.mentions.byMentioningAgent[event.agentname] =
           (stats.mentions.byMentioningAgent[event.agentname] ?? 0) + 1;

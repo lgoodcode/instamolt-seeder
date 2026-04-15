@@ -207,19 +207,27 @@ async function renderMentions(): Promise<void> {
     return;
   }
 
+  // Rate is RUNTIME-ONLY on both sides — `stats.actions.*.success` only
+  // counts runtime live-API calls, so mixing bake-phase mentions into the
+  // numerator (as the initial cut did) overstated rates. Bake totals are
+  // still surfaced in the absolute breakdown below.
+  const ctx = mentions.byContext;
+  const commentTotal = ctx.comment.bake + ctx.comment.runtime;
+  const replyTotal = ctx.reply.bake + ctx.reply.runtime;
   const commentDenom = stats.actions.comment?.success ?? 0;
   const replyDenom = stats.actions.reply?.success ?? 0;
   const commentRate =
-    commentDenom > 0 ? ((PER_HUNDRED * mentions.byContext.comment) / commentDenom).toFixed(2) : '—';
+    commentDenom > 0 ? ((PER_HUNDRED * ctx.comment.runtime) / commentDenom).toFixed(2) : '—';
   const replyRate =
-    replyDenom > 0 ? ((PER_HUNDRED * mentions.byContext.reply) / replyDenom).toFixed(2) : '—';
+    replyDenom > 0 ? ((PER_HUNDRED * ctx.reply.runtime) / replyDenom).toFixed(2) : '—';
 
   ui.note(
     `Total: ${mentions.total}`,
     [
-      `${ui.color.dim('By phase   ')} bake ${ui.color.cyan(String(mentions.byPhase.bake))} / runtime ${ui.color.cyan(String(mentions.byPhase.runtime))}`,
-      `${ui.color.dim('By context ')} comment ${ui.color.cyan(String(mentions.byContext.comment))} / reply ${ui.color.cyan(String(mentions.byContext.reply))}`,
-      `${ui.color.dim('Rate       ')} ${ui.color.cyan(commentRate)} per 100 comments, ${ui.color.cyan(replyRate)} per 100 replies`,
+      `${ui.color.dim('By phase     ')} bake ${ui.color.cyan(String(mentions.byPhase.bake))} / runtime ${ui.color.cyan(String(mentions.byPhase.runtime))}`,
+      `${ui.color.dim('Comments     ')} ${ui.color.cyan(String(commentTotal))} (bake ${ctx.comment.bake} / runtime ${ctx.comment.runtime})`,
+      `${ui.color.dim('Replies      ')} ${ui.color.cyan(String(replyTotal))} (bake ${ctx.reply.bake} / runtime ${ctx.reply.runtime})`,
+      `${ui.color.dim('Runtime rate ')} ${ui.color.cyan(commentRate)} per 100 runtime comments, ${ui.color.cyan(replyRate)} per 100 runtime replies`,
     ].join('\n'),
   );
 

@@ -508,6 +508,10 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                     comment,
                     agentData.agentname,
                     knownAgentnames,
+                    // Live post author isn't necessarily seeder-managed —
+                    // union into the per-call resolution set so mentions
+                    // of real platform users aren't silently dropped.
+                    [post.author.agentname],
                   );
                   if (resolvedMentions.length > 0) {
                     logMentions({
@@ -684,9 +688,11 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           }
         }
 
-        // Stagger between agents: 30-60 seconds
+        // Stagger between agents: 30-60 seconds by default, or a fixed
+        // cycleDelayMs for debug/speed-run previews (same knob as the
+        // inter-cycle sleep).
         if (i < selected.length - 1) {
-          const gap = randomInt(30000, 60000);
+          const gap = cycleDelayMs ?? randomInt(30000, 60000);
           await staggerSleep(gap);
         }
       }

@@ -245,8 +245,13 @@ export async function bakeAgentComments(
       mentionCandidates,
     );
 
+    // Live post author isn't necessarily in the seeded roster — the LLM can
+    // validly mention them, so we union them into the resolution set for
+    // this call. Without this, a mention of the real post author (who is
+    // on the live platform but not seeder-managed) gets silently dropped
+    // from `sample.mentions` + fan-out events.
     const resolved = mentionCtx
-      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames)
+      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames, [source.author])
       : [];
 
     samples.push({
@@ -447,8 +452,15 @@ export async function bakeAgentReplies(
       continue;
     }
 
+    // Same live-author union as `bakeAgentComments` — plus the parent
+    // comment author and sibling authors, since replies can mention any
+    // thread participant and those are pulled live from the platform feed.
     const resolved = mentionCtx
-      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames)
+      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames, [
+          post.author.agentname,
+          target.parent.author.agentname,
+          ...target.siblings.map((s) => s.author.agentname),
+        ])
       : [];
 
     samples.push({

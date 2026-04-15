@@ -50,20 +50,33 @@ export const DEFAULT_MENTION_PROBABILITY = 0.1;
  * platform's server-side parsing rules: case-insensitive dedup, no self,
  * intersected with a known-agents set.
  *
+ * The seeder's resolution surface is intentionally broader than just the
+ * seeded population — candidate builders can surface live post authors,
+ * parent comment authors, and sibling authors pulled from the platform
+ * feed, and the platform accepts `@` for any registered handle (not just
+ * seeder-managed ones). The `extraKnownAgentnames` set is how callers
+ * inject those live-thread participants per-call without polluting the
+ * seeded roster that `ctx.authorPersonaLookup` tracks.
+ *
  * @param text - the generated comment/reply body
  * @param selfAgentname - the agent producing the comment (always excluded)
- * @param knownAgentnames - population of agents that exist (lowercase compare)
+ * @param knownAgentnames - seeded population of agents (lowercase compare)
+ * @param extraKnownAgentnames - additional live authors in scope for this call
  * @returns preserved-case agentnames from the text that resolve to real agents
  */
 export function parseResolvedMentions(
   text: string,
   selfAgentname: string,
   knownAgentnames: ReadonlySet<string>,
+  extraKnownAgentnames: Iterable<string> = [],
 ): string[] {
   if (!text) return [];
   const selfLower = selfAgentname.toLowerCase();
   const knownLower = new Set<string>();
   for (const name of knownAgentnames) knownLower.add(name.toLowerCase());
+  for (const name of extraKnownAgentnames) {
+    if (name) knownLower.add(name.toLowerCase());
+  }
 
   const seen = new Set<string>();
   const out: string[] = [];
@@ -149,15 +162,27 @@ export function buildCommentCandidates(input: {
 }
 
 /**
+ * Hard ceiling on `persona.mentionProbability`. Hand-authored catalog values
+ * top out here (`drama_llama` is the only persona at the cap); any persona
+ * that somehow carries a higher value — malformed JSON, operator hand-edit,
+ * future Gemini synthesis — gets clamped back so a bad field can't break the
+ * "mentions stay rare" feature contract.
+ */
+export const MENTION_PROBABILITY_MAX = 0.25;
+
+/**
  * Effective mention probability for a given persona + context. Replies get a
  * bounded multiplier; top-level comments use the persona value verbatim.
  * A missing `mentionProbability` field falls back to {@link DEFAULT_MENTION_PROBABILITY}.
+ * The raw value is clamped to `[0, MENTION_PROBABILITY_MAX]` before any
+ * context math so out-of-range values can't break the documented gate range.
  */
 export function effectiveMentionProbability(
   mentionProbability: number | undefined,
   context: 'comment' | 'reply',
 ): number {
-  const base = mentionProbability ?? DEFAULT_MENTION_PROBABILITY;
+  const rawBase = mentionProbability ?? DEFAULT_MENTION_PROBABILITY;
+  const base = Math.min(MENTION_PROBABILITY_MAX, Math.max(0, rawBase));
   if (context === 'comment') return base;
   return Math.min(REPLY_MENTION_PROB_CAP, base * REPLY_MENTION_PROB_MULTIPLIER);
 }

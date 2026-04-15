@@ -13,10 +13,8 @@
 import { config } from '@/config';
 import * as ui from './ui';
 
-const PROD_HOST_PATTERN = /(^|\/\/)([\w.-]+\.)?instamolt\.app(\/|$)/i;
-
 export function isProductionTarget(baseUrl: string = config.instamoltBaseUrl): boolean {
-  return PROD_HOST_PATTERN.test(baseUrl);
+  return baseUrl.includes('instamolt.app');
 }
 
 export async function confirmTarget(

@@ -62,12 +62,27 @@ function stashIfDirty(branch: string): boolean {
   return stashed;
 }
 
+// popStash is only called when stashIfDirty returned true, so a successful
+// no-op ("No stash entries found") shouldn't happen in practice — but guard
+// for it anyway. Any other error means `git stash pop` hit a conflict or
+// another failure; the stash entry is still on the stack, so surface that
+// distinctly so the operator doesn't assume their changes were reapplied.
 function popStash(): void {
   try {
     git('stash', 'pop');
     console.log(pc.cyan('Reapplied stashed changes'));
-  } catch {
-    console.log(pc.dim('No stash to reapply'));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('No stash entries found')) {
+      console.log(pc.dim('No stash to reapply'));
+      return;
+    }
+    console.warn(
+      pc.yellow(
+        `Could not reapply stashed changes — your stash entry is preserved on the stack. Inspect with 'git stash list' and reapply manually with 'git stash pop' once resolved.`,
+      ),
+    );
+    console.warn(pc.dim(message));
   }
 }
 
@@ -105,12 +120,16 @@ const MODE_FLAG_GROUPS: Array<[string, string]> = [
   ['-d', '--delete'],
   ['--prune', '--prune-all'],
 ];
-const modesRequested = MODE_FLAG_GROUPS.filter(
-  ([short, long]) => args.has(short) || args.has(long),
-);
+const modesRequested = MODE_FLAG_GROUPS.flatMap(([short, long]) => {
+  if (args.has(short) && args.has(long)) return [`${short}/${long}`];
+  if (args.has(short)) return [short];
+  if (args.has(long)) return [long];
+  return [];
+});
 if (modesRequested.length > 1) {
-  const labels = modesRequested.map(([, long]) => long).join(', ');
-  console.error(pc.red(`Conflicting mode flags: ${labels}. Pass exactly one mode.`));
+  console.error(
+    pc.red(`Conflicting mode flags: ${modesRequested.join(', ')}. Pass exactly one mode.`),
+  );
   process.exit(2);
 }
 
@@ -265,8 +284,24 @@ switch (mode) {
     const stashed = stashIfDirty(branch);
     git('checkout', 'main');
     git('pull', 'origin', 'main');
-    git('branch', '-d', '--', branch);
-    console.log(`${pc.green('✓')} Deleted branch: ${pc.bold(branch)}`);
+    try {
+      git('branch', '-d', '--', branch);
+      console.log(`${pc.green('✓')} Deleted branch: ${pc.bold(branch)}`);
+    } catch {
+      // -d fails if not fully merged — force-delete tmp branches, keep others.
+      if (branch.startsWith('tmp-')) {
+        git('branch', '-D', '--', branch);
+        console.log(`${pc.green('✓')} Force-deleted branch: ${pc.bold(branch)}`);
+      } else {
+        if (stashed) popStash();
+        console.error(
+          pc.red(
+            `Branch ${pc.bold(branch)} is not fully merged into main. Use 'git branch -D ${branch}' manually if you're sure.`,
+          ),
+        );
+        process.exit(1);
+      }
+    }
     if (stashed) popStash();
 
     break;

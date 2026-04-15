@@ -18,12 +18,19 @@ vi.mock('node:fs/promises', () => ({
     }
     return content;
   }),
-  readdir: vi.fn(async (path: string) => {
+  readdir: vi.fn(async (path: string, options?: { withFileTypes?: boolean }) => {
     const entries = fsState.dirEntries.get(path);
     if (entries === undefined) {
       const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
       err.code = 'ENOENT';
       throw err;
+    }
+    if (options?.withFileTypes) {
+      return entries.map((name) => ({
+        name,
+        isDirectory: () => true,
+        isFile: () => false,
+      }));
     }
     return entries;
   }),
@@ -452,6 +459,28 @@ describe('reset', () => {
       expect(uiState.textCalls).toBe(1);
       expect(fsState.rmCalls).toHaveLength(0);
       expect(uiState.outros.join(' ')).toMatch(/confirmation token mismatch/);
+    });
+
+    it('counts agents from agents.json (authoritative) even if agents dir is empty', async () => {
+      fsState.files.set(
+        config.agentsIndexPath,
+        JSON.stringify({
+          agents: [
+            { agentname: 'alpha', personaId: 'p' },
+            { agentname: 'beta', personaId: 'p' },
+          ],
+          totalAgents: 2,
+          totalPosts: 0,
+        }),
+      );
+      // agents dir missing — index is what matters for the confirmation gate
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      // Label reflects index-derived count (2 agents)
+      const note = uiState.notes.find((n) => n.title === 'Will delete');
+      expect(note?.body).toMatch(/2 agents/);
     });
 
     it('without --force, skips typed gate when agents dir is empty', async () => {

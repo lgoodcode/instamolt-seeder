@@ -70,6 +70,9 @@ async function main() {
       let postsMin: number;
       let postsMax: number;
       if (minPostsFlag !== undefined || maxPostsFlag !== undefined) {
+        if (args.includes('--posts')) {
+          throw new Error('generate: --posts cannot be combined with --min-posts/--max-posts');
+        }
         if (minPostsFlag === undefined || maxPostsFlag === undefined) {
           throw new Error('generate: --min-posts and --max-posts must be passed together');
         }
@@ -84,7 +87,14 @@ async function main() {
           );
         }
       } else {
-        const posts = parseInt(getFlag('posts') ?? '20', 10);
+        const postsFlag = getFlag('posts');
+        if (args.includes('--posts') && (postsFlag === undefined || postsFlag === '')) {
+          throw new Error('generate: --posts requires an integer value');
+        }
+        const posts = parseInt(postsFlag ?? '20', 10);
+        if (Number.isNaN(posts)) {
+          throw new Error(`generate: --posts must be an integer (got "${postsFlag}")`);
+        }
         postsMin = posts;
         postsMax = posts;
       }

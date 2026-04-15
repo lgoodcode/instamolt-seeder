@@ -68,10 +68,25 @@ export async function reset(options: ResetOptions = {}): Promise<void> {
 /** Typed token the operator must enter to confirm a bulk wipe of agents. */
 const TYPED_CONFIRMATION_TOKEN = 'DELETE';
 
-async function countAgentsOnDisk(): Promise<number> {
+/**
+ * Count agents for the typed-confirmation gate. `agents.json` is the
+ * authoritative source — it's the only file that tracks registered API keys,
+ * so a wipe with agents in the index (even if `output/agents/` is missing)
+ * still orphans live accounts. Falls back to a directory-only count when the
+ * index is missing/corrupt, filtering to subdirectories so stray files (e.g.
+ * `.DS_Store`, temp artifacts) don't inflate the count.
+ */
+async function countAgentsForConfirmation(): Promise<number> {
   try {
-    const entries = await readdir(config.agentsDir);
-    return entries.length;
+    const raw = await readFile(config.agentsIndexPath, 'utf-8');
+    const index = JSON.parse(raw) as AgentsIndex;
+    if (Array.isArray(index.agents)) return index.agents.length;
+  } catch {
+    // Fall through to disk-based fallback.
+  }
+  try {
+    const entries = await readdir(config.agentsDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).length;
   } catch {
     return 0;
   }
@@ -83,14 +98,14 @@ async function resetBulk(options: ResetOptions): Promise<void> {
   const wipeAgents = options.all || !(options.cache || options.logs);
   const wipeCache = options.all || options.cache === true;
   const wipeLogs = options.all || options.logs === true;
-  const agentCount = wipeAgents ? await countAgentsOnDisk() : 0;
+  const agentCount = wipeAgents ? await countAgentsForConfirmation() : 0;
 
   const targets: string[] = [];
   if (wipeAgents) {
     const label =
       agentCount > 0
-        ? `${config.agentsDir}/ (${agentCount} agent dir${agentCount === 1 ? '' : 's'})`
-        : `${config.agentsDir}/ (empty)`;
+        ? `${config.agentsDir}/ (${agentCount} agent${agentCount === 1 ? '' : 's'})`
+        : `${config.agentsDir}/ (empty or missing)`;
     targets.push(label, config.agentsIndexPath, config.dedupIndexPath);
   }
   if (wipeCache) {

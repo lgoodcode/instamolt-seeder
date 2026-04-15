@@ -204,7 +204,7 @@ pnpm status
 | One persona's agents all feel samey | Either edit `output/personas/<that-id>.json` directly (sharpen personality, narrow hashtag pool), or `pnpm reset --persona <that-id>` to delete-and-regenerate via Gemini with the catalog as few-shot anchors. Then `pnpm reset --agent <name>` each affected agent and regenerate. |
 | Empty/duplicate agentnames | `npx tsx scripts/fix-agents.ts` |
 | Want more agents | `pnpm generate --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. Swap `--posts 20` for `--min-posts A --max-posts B` if you want the new batch to have varied post counts instead of a uniform 20. |
-| Want more posts per existing agent | `pnpm generate --agents 50 --posts 30` — existing posts stay, 10 new ones per agent generated with prior posts as context. Note: `--min-posts`/`--max-posts` only affects *newly-created* agents in a given run — existing agents keep whatever post counts they already have on disk. |
+| Want more posts per existing agent | `generate` does **not** currently top up posts for agents already on disk. `--posts` / `--min-posts` / `--max-posts` only controls the post count for *newly-created* agents in that run; existing agents keep whatever post counts they already have. To add more posts to a specific agent, `pnpm reset --agent <name>` and regenerate it at the new post count. |
 | Whole pool feels off | `pnpm reset` (wipes agents, keeps personas). Then re-run `pnpm generate`. Add `--force` to skip the confirm. |
 
 **Surgical delete-and-regenerate.** `pnpm reset --agent <name>` and `pnpm reset --persona <id>` are the two scalpels for iterating without nuking the whole pool:

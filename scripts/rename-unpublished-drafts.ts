@@ -53,7 +53,6 @@
 import 'dotenv/config';
 import { access, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { config } from '@/config';
 import { pickDiverseAndRecent } from '@/lib/similarity';
@@ -62,13 +61,6 @@ import { InstaMoltClient } from '@/services/instamolt-api';
 import { generateAgentName } from '@/services/llm';
 import type { Persona, VoiceProfile } from '@/types';
 import { loadVoiceProfiles } from '@/voice-profiles';
-
-// Resolve the top-level indices relative to the script file so this works
-// from any CWD (matches scripts/fix-agents.ts). The agents dir itself comes
-// from `config.agentsDir` because callers can override it via env.
-const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const AGENTS_INDEX_PATH = join(REPO_ROOT, 'output', 'agents.json');
-const DEDUP_INDEX_PATH = join(REPO_ROOT, 'output', 'dedup-index.json');
 
 const MAX_AGENTNAME_ATTEMPTS = 8;
 const AGENTNAME_PROMPT_SAMPLE_K = 20;
@@ -279,7 +271,10 @@ async function main(): Promise<void> {
   let targets = unpublished;
   if (flags.limit !== null) targets = targets.slice(0, flags.limit);
 
-  const personas = await loadPersonas();
+  // Dry-run must not auto-seed new persona JSONs; only --apply should write
+  // to disk. Operators running a fresh checkout in dry-run should see the
+  // "no personas on disk" failure instead of silently gaining 30 seeded ones.
+  const personas = await loadPersonas({ autoSeed: flags.apply });
   const voiceProfiles = loadVoiceProfiles();
   const client = new InstaMoltClient();
 
@@ -364,9 +359,9 @@ async function main(): Promise<void> {
   }
 
   console.log('\nApplying renames...');
-  const agentsIndexRaw = await readFile(AGENTS_INDEX_PATH, 'utf-8');
+  const agentsIndexRaw = await readFile(config.agentsIndexPath, 'utf-8');
   const agentsIndex = JSON.parse(agentsIndexRaw);
-  const dedupIndexRaw = await readFile(DEDUP_INDEX_PATH, 'utf-8');
+  const dedupIndexRaw = await readFile(config.dedupIndexPath, 'utf-8');
   const dedupIndex = JSON.parse(dedupIndexRaw);
 
   let applied = 0;
@@ -375,6 +370,13 @@ async function main(): Promise<void> {
     try {
       await applyRename(p, agentsIndex, dedupIndex);
       applied++;
+      // Checkpoint the top-level indices after every successful rename so a
+      // crash mid-batch doesn't leave already-renamed drafts with stale
+      // agents.json / dedup-index.json entries.
+      agentsIndex.generatedAt = new Date().toISOString();
+      dedupIndex.updatedAt = new Date().toISOString();
+      await writeFile(config.agentsIndexPath, JSON.stringify(agentsIndex, null, 2));
+      await writeFile(config.dedupIndexPath, JSON.stringify(dedupIndex, null, 2));
       console.log(`  ✓ ${p.oldName} → ${p.newName}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -382,12 +384,6 @@ async function main(): Promise<void> {
       console.log(`  ✗ ${p.oldName} → ${p.newName} — ${msg}`);
     }
   }
-
-  // Refresh the bookkeeping fields and write indices back.
-  agentsIndex.generatedAt = new Date().toISOString();
-  dedupIndex.updatedAt = new Date().toISOString();
-  await writeFile(AGENTS_INDEX_PATH, JSON.stringify(agentsIndex, null, 2));
-  await writeFile(DEDUP_INDEX_PATH, JSON.stringify(dedupIndex, null, 2));
 
   console.log(
     `\nDone. Applied ${applied}/${proposals.length} renames; ${applyFailures.length} failed at apply time.`,

@@ -6,6 +6,7 @@ import type {
   Persona,
   RemoteComment,
   RemotePost,
+  VoiceProfile,
 } from '@/types';
 
 // --- In-memory fs mock (quota.ts + runtime-comments.ts both hit disk) ---
@@ -79,7 +80,6 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [2, 5],
     likeProbability: 0.5,
@@ -140,18 +140,39 @@ function makeComment(id: string, overrides: Partial<RemoteComment> = {}): Remote
   };
 }
 
+const TEST_VOICE_PROFILE: VoiceProfile = {
+  id: 'test_voice',
+  literacy: 'normal',
+  verbosity: 'one_sentence',
+  capitalization: 'lowercase',
+  punctuation: 'dropped',
+  typoFrequency: 'none',
+  register: 'test register',
+  lexicon: ['vibe'],
+  examples: ['test utterance'],
+  prevalenceWeight: 1,
+  usernameStyle: {
+    pattern: 'witty_observer',
+    examples: ['Reluctant_Squid'],
+    guidance: 'test guidance',
+    preserveCase: true,
+  },
+};
+
 function makeCtx(overrides: Partial<EngageContext> & { client: InstaMoltClient }): EngageContext {
-  return {
+  const base: EngageContext = {
+    client: overrides.client,
     feedCache: {
       refreshedAt: new Date().toISOString(),
       sources: ['explore'],
       posts: [makePost('p1'), makePost('p2', 'another')],
     },
     personas: new Map(),
+    voiceProfiles: new Map([['test_voice', TEST_VOICE_PROFILE]]),
     authorPersonaLookup: new Map(),
     dryRun: false,
-    ...overrides,
   };
+  return { ...base, ...overrides };
 }
 
 function makeFreshQuota(agentname: string, persona: Persona): AgentQuota {

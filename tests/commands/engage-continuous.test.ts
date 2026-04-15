@@ -206,7 +206,6 @@ function makePersona(id: string, overrides: Partial<Persona> = {}): Persona {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: ['#foo'],
     postsPerDay: [1, 2],
     likeProbability: 1,

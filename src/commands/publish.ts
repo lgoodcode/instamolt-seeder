@@ -15,7 +15,9 @@ import type {
   GeneratedAgent,
   GeneratedPost,
   Persona,
+  VoiceProfile,
 } from '@/types';
+import { loadVoiceProfiles, resolveVoiceProfile } from '@/voice-profiles/index';
 
 /**
  * Max number of bio regenerations attempted after a `CONTENT_BLOCKED` response
@@ -63,6 +65,7 @@ async function startChallengeWithBioRetry(
   agentname: string,
   data: GeneratedAgent,
   persona: Persona,
+  voiceProfile: VoiceProfile,
   jsonPath: string,
   onBioRegenerated: (details: { attempt: number; category: string; reason: string }) => void,
 ): Promise<ChallengeResponse> {
@@ -86,7 +89,7 @@ async function startChallengeWithBioRetry(
         reason,
         blockedBio: data.bio,
       };
-      const newBio = await generateBio(persona, [], feedback);
+      const newBio = await generateBio(persona, voiceProfile, [], feedback);
       data.bio = newBio;
       await writeFile(jsonPath, JSON.stringify(data, null, 2));
       attempt++;
@@ -138,6 +141,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   initEventLogger();
   ui.intro('Publish');
   const personas = await loadPersonas();
+  const voiceProfiles = loadVoiceProfiles();
 
   // Load the master index
   let index: AgentsIndex;
@@ -176,6 +180,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     dir: string;
     jsonPath: string;
     persona: Persona;
+    voiceProfile: VoiceProfile;
   }
   const prepared: PreparedAgent[] = [];
   for (const agent of agents) {
@@ -207,7 +212,20 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       );
       continue;
     }
-    prepared.push({ indexAgent: agent, data, dir, jsonPath, persona });
+    const resolved = resolveVoiceProfile(voiceProfiles, data);
+    if ('error' in resolved) {
+      log('warn', `${resolved.error}, skipping`);
+      errors.push({ agent: agent.agentname, phase: 'prepare', message: resolved.error });
+      continue;
+    }
+    prepared.push({
+      indexAgent: agent,
+      data,
+      dir,
+      jsonPath,
+      persona,
+      voiceProfile: resolved.profile,
+    });
   }
 
   // --- Phase A: Register concurrently ---
@@ -229,7 +247,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     await mapWithConcurrency(
       needsRegistration,
       config.registerConcurrency,
-      async ({ indexAgent, data, jsonPath, persona }) => {
+      async ({ indexAgent, data, jsonPath, persona, voiceProfile }) => {
         try {
           const client = new InstaMoltClient();
           const challenge = await startChallengeWithBioRetry(
@@ -237,6 +255,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
             indexAgent.agentname,
             data,
             persona,
+            voiceProfile,
             jsonPath,
             ({ attempt, category, reason }) => {
               log(

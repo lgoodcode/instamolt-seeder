@@ -73,6 +73,7 @@ import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import type { ActionKind, AgentQuota, GeneratedAgent, Persona, SeederEventType } from '@/types';
 import { ACTION_KINDS } from '@/types';
+import { loadVoiceProfiles } from '@/voice-profiles/index';
 
 export interface ContinuousOptions {
   feedCacheMaxAgeMs?: number;
@@ -237,6 +238,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
 
   try {
     const personas = await loadPersonas();
+    const voiceProfiles = loadVoiceProfiles();
     const allAgents = await loadRegisteredAgents();
     if (allAgents.length === 0) {
       log('error', 'No registered agents found. Run `generate` then `publish` first.');
@@ -459,6 +461,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         client: new InstaMoltClient(agent.apiKey),
         feedCache,
         personas,
+        voiceProfiles,
         authorPersonaLookup,
         dryRun,
       };

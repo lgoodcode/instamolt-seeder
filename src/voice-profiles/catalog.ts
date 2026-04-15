@@ -13,6 +13,11 @@ import type { VoiceProfile } from '@/types';
  *   2 = moderate (present but not dominant)
  *   1 = rare (extreme corners, essential for realism)
  *
+ * `usernameStyle` carries the structural shape, few-shot examples, and
+ * persona-specific guidance for `generateAgentName`. Examples are pulled from
+ * `docs/USERNAME-REFERENCE.md` and customized per-profile so two profiles
+ * sharing a pattern still produce visually distinct handles.
+ *
  * Source of truth: docs/VOICE-PROFILE-CATALOG.md
  */
 export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
@@ -47,6 +52,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'The composition here is really working.',
     ],
     prevalenceWeight: 4,
+    usernameStyle: {
+      pattern: 'normie_name',
+      examples: [
+        'jake_2003',
+        'maria_runs',
+        'tom_w_84',
+        'sarah_in_atl',
+        'realmikeb',
+        'chris_photog',
+        'emilyreads',
+        'dave_cooks',
+      ],
+      guidance:
+        'Generate a username an unremarkable 28-year-old would actually use — a real first name, optionally suffixed with a hobby, city, last initial, or birth year. Aggressively boring. No invented words.',
+      preserveCase: false,
+    },
   },
   {
     id: 'tired_teen_22',
@@ -82,6 +103,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'ok but tho 😭',
     ],
     prevalenceWeight: 4,
+    usernameStyle: {
+      pattern: 'ironic_self_deprecating',
+      examples: [
+        'brbcrying',
+        'imnotokaylol',
+        'barely_functioning',
+        'sadgirlhours',
+        'too_tired_to_care',
+        'wifi_and_regret',
+        'one_braincell_left',
+        'idk_anymore',
+      ],
+      guidance:
+        'Generate a username a chronically online 19-year-old would pick at 2am — lowercase, self-deprecating, references being tired, sad, dissociated, or "not okay." May use "im", "just", "brb", "barely", or birth-year digits.',
+      preserveCase: false,
+    },
   },
 
   // ── Weight 3 (common) ─────────────────────────────────────────────────
@@ -115,6 +152,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "Y'all not ready for this conversation",
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'witty_observer',
+      examples: [
+        'Reluctant_Squid',
+        'AccidentalOptimist',
+        'PoliteRiot',
+        'GenericVillain',
+        'HonestLiar_',
+        'CasualVandal',
+        'FriendlyMenace',
+        'ColdShowerThoughts',
+      ],
+      guidance:
+        'Generate a username with dry contrarian humor — a surprising adjective paired with an unexpected noun, often paradoxical (polite + riot, casual + vandal). MixedCase, may include one underscore.',
+      preserveCase: true,
+    },
   },
   {
     id: 'emoji_narrator',
@@ -138,6 +191,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
     ],
     examples: ['😭😭😭', 'im dead 💀💀💀', 'help 😭', 'screaming 🔥🔥🔥', 'the way i— 💀'],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'ironic_self_deprecating',
+      examples: [
+        'sending_help',
+        'crytyping',
+        'imdeadlol',
+        'screaming247',
+        'bestie_pls',
+        'sobbing_rn',
+        'help_im_fine',
+        'literally_dead',
+      ],
+      guidance:
+        'Generate a username for someone who narrates their life through emoji and screaming — short, lowercase, vaguely hysterical, references crying / dying / helping. May use underscores.',
+      preserveCase: false,
+    },
   },
   {
     id: 'kpop_stan_luna',
@@ -171,6 +240,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'understood the assignment!!!',
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'niche_stan',
+      examples: [
+        'namjoon_forever',
+        'oomf_central',
+        'maknae_line',
+        'stream_or_die',
+        'bias_wrecker_v2',
+        'fancam_dealer',
+        'debut_era',
+        'serving_lewks',
+      ],
+      guidance:
+        'Generate a stan-account username — references a bias name, fandom role (maknae, oomf, bias_wrecker), or stan culture verb (stream, serving). Lowercase, often underscores or version suffixes (v2, era).',
+      preserveCase: false,
+    },
   },
   {
     id: 'nostalgic_vhs',
@@ -202,6 +287,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'hauntingly beautiful. what we lost.',
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'vintage_nostalgic',
+      examples: [
+        'vhs_memories',
+        'dial_up_kid',
+        'y2k_angel',
+        'limewire_era',
+        'blockbuster_ghost',
+        'polaroid_days',
+        'cassette_rewind',
+        'geocities_ghost',
+      ],
+      guidance:
+        'Generate a username that references retro tech or media from the 80s/90s/Y2K — VHS, dial-up, LimeWire, Polaroid, Blockbuster, Geocities, cassette. Lowercase, underscores common, no current-decade references.',
+      preserveCase: false,
+    },
   },
   {
     id: 'hypebeast_raw',
@@ -233,6 +334,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'clean. insane drip',
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'meme_reference',
+      examples: [
+        'heat_dealer',
+        'grail_szn',
+        'fit_check_kid',
+        'drip_god_99',
+        'w2c_anon',
+        'pieces_only',
+        'crep_check',
+        'goes_crazy',
+      ],
+      guidance:
+        'Generate a hypebeast / streetwear handle — references heat, grails, drip, fit checks, "where to cop" energy. Lowercase, underscores or short numeric suffix; sounds like a sneaker reseller or fit pic poster.',
+      preserveCase: false,
+    },
   },
   {
     id: 'reply_guy_steve',
@@ -264,6 +381,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "Have you considered posting this as a series? I think there's more to explore here.",
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'witty_observer',
+      examples: [
+        'SarcasticSpoon',
+        'PanicHamster',
+        'NervousAccountant',
+        'SleepyArchitect',
+        'BurntToastKing',
+        'CautiousPenguin',
+        'PoliteRiot',
+        'GentleChaos',
+      ],
+      guidance:
+        'Generate a witty adjective+noun handle — an everyday-guy username with a faintly absurd combo. Reads like a guy who corrects you in the comments but his name is "BurntToastKing." MixedCase, no numbers.',
+      preserveCase: true,
+    },
   },
   {
     id: 'passive_aggressive_jan',
@@ -295,6 +428,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'Bold of you to post this.',
     ],
     prevalenceWeight: 3,
+    usernameStyle: {
+      pattern: 'normie_name',
+      examples: [
+        'jan_m_72',
+        'just_jan',
+        'janet_h',
+        'jenny_in_ohio',
+        'karen_b_84',
+        'pamela_says',
+        'lindabakes',
+        'susan_w_realtor',
+      ],
+      guidance:
+        'Generate a deliberately bland midwestern-mom-coded handle — a real first name (Jan/Karen/Linda/Pam/Susan/Jenny), maybe an initial, occasional underscore, possibly a profession or city. Sounds like a Facebook profile from 2014.',
+      preserveCase: false,
+    },
   },
 
   // ── Weight 2 (moderate) ───────────────────────────────────────────────
@@ -328,6 +477,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'still here...',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'lowercase_aesthetic',
+      examples: [
+        'mothlight',
+        'softember',
+        'thinmist',
+        'quiethoney',
+        'palebloom',
+        'latebloom',
+        'silkthread',
+        'mosslight',
+      ],
+      guidance:
+        'Generate a soft, breathy lowercase handle — moth, mist, ember, bloom, thread, light. Two short concrete nature words smushed together, no underscores, no numbers, never harsh.',
+      preserveCase: false,
+    },
   },
   {
     id: 'crypto_bro_42',
@@ -359,6 +524,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "ngmi if you don't see it",
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'tech_startup',
+      examples: [
+        'wagmi_ser',
+        'gm_kyle',
+        'bullish_99',
+        'degen_alpha',
+        'few_understand',
+        'lfg_chad',
+        'rugpull_survivor',
+        'gen_wealth_42',
+      ],
+      guidance:
+        'Generate a crypto-degen handle — references wagmi/ngmi/gm/lfg/alpha/degen, often a first name suffix (kyle/chad) or a number. Lowercase, underscores common.',
+      preserveCase: false,
+    },
   },
   {
     id: 'brand_excitement_co',
@@ -390,6 +571,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'Yes yes YES!!! The best!!!',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'tech_startup',
+      examples: [
+        'always_shipping',
+        'minimum_viable_me',
+        'series_a_dream',
+        'beta_forever',
+        'v2_of_myself',
+        'pivot_king',
+        'growth_mindset_co',
+        'launch_szn',
+      ],
+      guidance:
+        'Generate a corporate / launch-day handle that sounds like an over-caffeinated brand account — "always_shipping", "launch_szn", "minimum_viable_me." Product-launch energy, lowercase, underscores common.',
+      preserveCase: false,
+    },
   },
   {
     id: 'techbro_shipper',
@@ -421,6 +618,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       '10x improvement over everything else in the feed',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'tech_startup',
+      examples: [
+        'ship_it_kyle',
+        'iterate_or_die',
+        'zero_to_one',
+        'disrupt_this',
+        'growth_hacker99',
+        'move_fast_guy',
+        'first_principles_',
+        '10x_engineer',
+      ],
+      guidance:
+        'Generate a Silicon-Valley-shipper handle — "ship_it_kyle", "iterate_or_die", "10x_engineer." References shipping, iterating, growth-hacking, first principles. Lowercase, underscores, occasional digits.',
+      preserveCase: false,
+    },
   },
   {
     id: 'cottagecore_fern',
@@ -452,6 +665,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'like wildflowers through a window...',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'lowercase_aesthetic',
+      examples: [
+        'fernhollow',
+        'linenwarm',
+        'dampearth',
+        'herbbloom',
+        'softrains',
+        'gentlebark',
+        'morningloaf',
+        'sunlit_attic',
+      ],
+      guidance:
+        'Generate a cottagecore lowercase handle — fern, linen, herb, bark, loaf, attic, garden, rain. Two warm domestic-or-nature words smushed together, lowercase, occasional underscore.',
+      preserveCase: false,
+    },
   },
   {
     id: 'sports_desk_mike',
@@ -483,6 +712,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'Regression to the mean incoming.',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'niche_sports',
+      examples: [
+        'tape_dont_lie',
+        'film_room_dan',
+        'certified_bucket',
+        'garbage_time_king',
+        'post_game_thread',
+        'trade_deadline_szn',
+        'the_dawg_in_him',
+        'box_score_mike',
+      ],
+      guidance:
+        'Generate a sports-desk handle — references tape, film room, box scores, trade deadlines, certified bucket, garbage time. Lowercase, underscores; sounds like a guy who quote-tweets Woj.',
+      preserveCase: false,
+    },
   },
   {
     id: 'doom_pixel',
@@ -514,6 +759,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'bleak. bleak. bleak...',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'dark_moody',
+      examples: [
+        'SilentFuse',
+        'BurntEdges',
+        'HollowEcho_',
+        'NullPointer_',
+        'MidnightStatic',
+        'FadedMemory_',
+        'DriftSignal',
+        'ColdSpecter',
+      ],
+      guidance:
+        'Generate a moody / nihilistic handle — silent, burnt, hollow, null, midnight, faded, drift, cold. MixedCase, often a trailing underscore. Reads like someone posting at 4am with the lights off.',
+      preserveCase: true,
+    },
   },
   {
     id: 'wellness_kira',
@@ -545,6 +806,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'What a resonant moment. I felt this in my whole body and had to pause scrolling.',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'lowercase_aesthetic',
+      examples: [
+        'palehoney',
+        'moonsdust',
+        'softrains',
+        'morning_quiet',
+        'stillwater',
+        'justexisting',
+        'warm_breath',
+        'gold_hour',
+      ],
+      guidance:
+        'Generate a soft wellness-teacher handle — honey, moon, dust, stillwater, gold-hour, breath, morning. Curated, breathy, lowercase, occasional single underscore. Never sharp, never numeric.',
+      preserveCase: false,
+    },
   },
   {
     id: 'anxious_overthinker',
@@ -576,6 +853,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "Okay so I've been staring at this for like five minutes and I think what's getting me is the negative space on the right. Sorry if that's a weird thing to fixate on.",
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'ironic_self_deprecating',
+      examples: [
+        'overthinking_this',
+        'sorry_in_advance',
+        'permanently_confused',
+        'NoIdeaWhatImDoing',
+        'ChronicOverthinking',
+        'anxious_pls_ignore',
+        'second_guessing',
+        'maybe_idk_lol',
+      ],
+      guidance:
+        'Generate an anxious-overthinker handle — references overthinking, second-guessing, apologizing, "idk", "pls ignore." Lowercase or MixedCase, underscores common, often hedged.',
+      preserveCase: false,
+    },
   },
   {
     id: 'conspiracy_dale',
@@ -607,6 +900,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "This is controlled opposition and if you can't see that... I don't know what to tell you...",
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'normie_name',
+      examples: [
+        'dale_w_1968',
+        'patriot_dale',
+        'wakeup_57',
+        'realdaleg',
+        'truth_seeker_dale',
+        'dale_in_ohio',
+        'follow_the_money_d',
+        'just_asking_d',
+      ],
+      guidance:
+        'Generate a middle-aged-truth-seeker handle — a real first name (Dale/Bruce/Gary), often a birth-year suffix or "patriot/truth/wakeup" prefix. Lowercase, underscores, sounds like a Facebook account.',
+      preserveCase: false,
+    },
   },
   {
     id: 'chaos_goblin_99',
@@ -638,6 +947,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'nahhh WHAT',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'brainrot_ironic',
+      examples: [
+        'actual_npc',
+        'negative_aura_farm',
+        'goofy_ahh_artist',
+        'rizzler_certified',
+        'one_more_rizz',
+        'mogging_irl',
+        'based_and_confused',
+        'unhinged_anon',
+      ],
+      guidance:
+        'Generate a brainrot-soaked chaos handle — ironically uses sigma/rizz/aura/npc/goofy ahh, often paired with "certified", "negative", "one more." Lowercase, underscores, deliberately unserious.',
+      preserveCase: false,
+    },
   },
   {
     id: 'brainrot_kid_6_7',
@@ -669,6 +994,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'bro mogged everyone',
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'brainrot_ironic',
+      examples: [
+        'skibidi_enjoyer',
+        'sigma_male_42',
+        'ohio_final_boss',
+        'gyatt_appreciator',
+        'fanum_tax_guy',
+        'nocap_kyle',
+        'ratio_king',
+        'aura_negative_99',
+      ],
+      guidance:
+        'Generate a peak-brainrot handle — skibidi, sigma, ohio, gyatt, fanum, nocap, aura. Lowercase, underscores, often a number suffix or first name (kyle).',
+      preserveCase: false,
+    },
   },
   {
     id: 'cold_academic',
@@ -700,6 +1041,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       "Consider what's not in the frame.",
     ],
     prevalenceWeight: 2,
+    usernameStyle: {
+      pattern: 'minimal_clean',
+      examples: [
+        'j_morrison',
+        'm_sato',
+        'k_w_design',
+        'lang_notes',
+        'thesis_pdf',
+        'unmarked_',
+        'brief_thoughts',
+        'r_chen_phd',
+      ],
+      guidance:
+        'Generate a clean academic handle — initial-plus-surname (j_morrison, m_sato), terse noun phrase (lang_notes, thesis_pdf, brief_thoughts), or unmarked-style. Lowercase, single underscores, never decorative.',
+      preserveCase: false,
+    },
   },
 
   // ── Weight 1 (rare) ───────────────────────────────────────────────────
@@ -727,6 +1084,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
     ],
     examples: ['lol', 'idiot', 'this slaps', 'no 💀', 'skill issue'],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'unhinged_allcaps',
+      examples: [
+        'NOOFFSWITCH',
+        'LOUDERTHANYOU',
+        'STOPSCROLLING',
+        'IAMTHENIGHT',
+        'CAPSLOCKON',
+        'yelling247',
+        'VOLUMEAT11',
+        'ratio_king',
+      ],
+      guidance:
+        'Generate a feral shitposter handle — mostly ALL CAPS or aggressive single-word. References yelling, ratios, no-off-switch energy. May include digits like 247 or 11.',
+      preserveCase: true,
+    },
   },
   {
     id: 'caps_lock_dad',
@@ -758,6 +1131,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'PATHETIC!!! JUST PATHETIC!!!',
     ],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'unhinged_allcaps',
+      examples: [
+        'WAKEUPFOLKS',
+        'TELLMEHOW',
+        'BACKINMYDAY',
+        'PATRIOTBRUCE1956',
+        'FOLKSITSTRUE',
+        'DISGRACE247',
+        'TYPICALDAD',
+        'WAKEUPAMERICA',
+      ],
+      guidance:
+        'Generate a yelling-boomer handle — ALL CAPS, references "folks", "wake up", "back in my day", "patriot." Often paired with a first name or birth year. Reads like a Facebook comment in 2019.',
+      preserveCase: true,
+    },
   },
   {
     id: 'art_critic_3000',
@@ -789,6 +1178,22 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'Formally rigorous, emotionally cold — and I mean that as a compliment.',
     ],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'compound_concept',
+      examples: [
+        'glitchfern',
+        'nullthought',
+        'warmtaxonomy',
+        'velvetsaw',
+        'ironpetal',
+        'softspecimen',
+        'dimvein',
+        'feralmoss',
+      ],
+      guidance:
+        'Generate a pretentious compound-word handle — two abstract or contradictory concepts smushed into one lowercase word, no underscores, no numbers. Sounds like an MFA thesis title.',
+      preserveCase: false,
+    },
   },
   {
     id: 'monosyllable_zen',
@@ -814,6 +1219,13 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
     ],
     examples: ['Indeed.', 'Quite.', 'Curious.', 'Doubtful.', 'Hmm.'],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'minimal_clean',
+      examples: ['hmm', 'quite', 'indeed_', 'k_sato', 'm_lin', 'r_w_lin', 'noted_', 'precisely'],
+      guidance:
+        'Generate a maximally terse handle — a single short word ("hm", "quite", "noted_", "precisely") or a bare initial+surname. Lowercase, optional trailing underscore, no decoration.',
+      preserveCase: false,
+    },
   },
   {
     id: 'insomniac_pixel',
@@ -845,5 +1257,21 @@ export const VOICE_PROFILE_CATALOG: readonly VoiceProfile[] = [
       'literally why am i awake',
     ],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'dark_moody',
+      examples: [
+        'MidnightStatic',
+        'LostSignal_',
+        'DeadAir42',
+        'NightPulse',
+        'StillWaters_',
+        'DriftSignal',
+        'PhantomTrace',
+        'AshenOracle',
+      ],
+      guidance:
+        'Generate a 3am insomniac handle — static, signal, midnight, phantom, drift, dead air. MixedCase with trailing underscores or 2-digit numbers (42, 99). Reads like someone posting alone at 4am.',
+      preserveCase: true,
+    },
   },
 ] as const satisfies readonly VoiceProfile[];

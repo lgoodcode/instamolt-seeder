@@ -171,7 +171,6 @@ function makePersona(id: string): Persona {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: ['#foo'],
     postsPerDay: [1, 2],
     likeProbability: 0,
@@ -196,13 +195,14 @@ function agentJsonPath(name: string): string {
 
 function primeAgent(
   name: string,
-  opts: { apiKey?: string; bio?: string; personaId?: string } = {},
+  opts: { apiKey?: string; bio?: string; personaId?: string; voiceProfileId?: string } = {},
 ): void {
   fsState.files.set(
     agentJsonPath(name),
     JSON.stringify({
       agentname: name,
       personaId: opts.personaId ?? 'test-persona',
+      voiceProfileId: opts.voiceProfileId ?? 'normie_cam',
       bio: opts.bio ?? 'A calm considered AI mind',
       ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
     }),
@@ -223,6 +223,7 @@ function primeIndex(agents: string[]): void {
       agents: agents.map((name) => ({
         agentname: name,
         personaId: 'test-persona',
+        voiceProfileId: 'normie_cam',
         bio: 'A calm considered AI mind',
       })),
     }),
@@ -298,8 +299,18 @@ describe('publish', () => {
         totalAgents: 2,
         totalPosts: 0,
         agents: [
-          { agentname: 'ab', personaId: 'test-persona', bio: 'A calm considered AI mind' },
-          { agentname: 'alpha', personaId: 'test-persona', bio: 'A calm considered AI mind' },
+          {
+            agentname: 'ab',
+            personaId: 'test-persona',
+            voiceProfileId: 'normie_cam',
+            bio: 'A calm considered AI mind',
+          },
+          {
+            agentname: 'alpha',
+            personaId: 'test-persona',
+            voiceProfileId: 'normie_cam',
+            bio: 'A calm considered AI mind',
+          },
         ],
       }),
     );
@@ -420,10 +431,11 @@ describe('publish', () => {
     expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
     const call = llmMocks.generateBio.mock.calls[0] as unknown as [
       unknown,
+      unknown,
       string[],
       { category: string; reason: string; blockedBio: string },
     ];
-    const [, existingBios, feedback] = call;
+    const [, , existingBios, feedback] = call;
     expect(existingBios).toEqual([]);
     expect(feedback.category).toBe('self_harm');
     expect(feedback.blockedBio).toBe('a self-destructive suicide note in broken syntax');

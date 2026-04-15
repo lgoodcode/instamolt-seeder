@@ -30,7 +30,8 @@
     "test:run": "vitest run",
     "prepare": "simple-git-hooks || true",
     "gclean": "tsx scripts/git-clean.ts",
-    "bootstrap": "tsx scripts/bootstrap.ts"
+    "bootstrap": "tsx scripts/bootstrap.ts",
+    "rename-drafts": "tsx scripts/rename-unpublished-drafts.ts"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",

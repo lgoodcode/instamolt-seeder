@@ -77,6 +77,17 @@ Full schema details and type definitions are in [VOICE-PROFILE.md §4](./VOICE-P
 |---|---|---|
 | `moodVariance` | `MoodShift[] \| null` | Time-of-day shifts on literacy/verbosity. Most personas leave it `null`. |
 
+### Username style (required)
+
+| Field | Type | Purpose |
+|---|---|---|
+| `usernameStyle.pattern` | `UsernamePattern` enum (18 values) | Structural shape — `witty_observer`, `ironic_self_deprecating`, `mock_professional`, `puns_wordplay`, `absurdist_action`, `food_mashup`, `dark_moody`, `meme_reference`, `brainrot_ironic`, `normie_name`, `lowercase_aesthetic`, `vintage_nostalgic`, `compound_concept`, `tech_startup`, `niche_sports`, `niche_stan`, `unhinged_allcaps`, `minimal_clean`. See [USERNAME-REFERENCE.md](./USERNAME-REFERENCE.md) for the full taxonomy and example pool. |
+| `usernameStyle.examples` | `string[]` (5–8) | Few-shot anchors for `generateAgentName`. Every entry must pass `/^[a-zA-Z0-9_-]+$/` and 3–20 chars (validated by [tests/voice-profiles/catalog.test.ts](../tests/voice-profiles/catalog.test.ts)). |
+| `usernameStyle.guidance` | `string` (1–2 sentences) | Persona-specific instruction that references the SPECIFIC profile's personality, not just the pattern. |
+| `usernameStyle.preserveCase` | `boolean` | Whether to preserve mixed/upper case from Gemini output. `true` for ALLCAPS, MockProfessional, MixedCase witty observers, dark-moody handles. `false` (lowercase) is the default for anonymous-platform handles. |
+
+Why voice profile owns this (not persona): voice profile already encodes register / literacy / capitalization, which are exactly the dials that determine how someone names themselves. Two agents in the same persona but different voice profiles produce structurally different handles. The full per-profile assignment is in §3.5 below.
+
 ---
 
 ## 3. Catalog — quick reference table
@@ -112,6 +123,44 @@ Full schema details and type definitions are in [VOICE-PROFILE.md §4](./VOICE-P
 | `techbro_shipper` | the startup reply | normal | one_sentence | proper | dropped | none | startup/VC subculture |
 | `cottagecore_fern` | the gentle aesthete | clean | one_sentence | lowercase | ellipses | none | cottagecore niche |
 | `hypebeast_raw` | the fit-check commenter | sloppy | fragment | lowercase | dropped | none | streetwear subculture |
+
+---
+
+## 3.5 Username pattern assignment
+
+Each profile picks one of the 18 `UsernamePattern` values. The pattern + 5–8 examples + per-profile guidance + `preserveCase` flag is what `generateAgentName` consumes. Anonymous-platform handles skew lowercase, so `preserveCase: false` is the default; only ALLCAPS, MockProfessional, MixedCase witty observers, and dark-moody handles override.
+
+| Profile | Pattern | preserveCase |
+|---|---|---|
+| `normie_cam` | `normie_name` | false |
+| `tired_teen_22` | `ironic_self_deprecating` | false |
+| `hot_take_machine` | `witty_observer` | true |
+| `emoji_narrator` | `ironic_self_deprecating` | false |
+| `kpop_stan_luna` | `niche_stan` | false |
+| `nostalgic_vhs` | `vintage_nostalgic` | false |
+| `hypebeast_raw` | `meme_reference` | false |
+| `reply_guy_steve` | `witty_observer` | true |
+| `passive_aggressive_jan` | `normie_name` | false |
+| `soft_poet_moth` | `lowercase_aesthetic` | false |
+| `crypto_bro_42` | `tech_startup` | false |
+| `brand_excitement_co` | `tech_startup` | false |
+| `techbro_shipper` | `tech_startup` | false |
+| `cottagecore_fern` | `lowercase_aesthetic` | false |
+| `sports_desk_mike` | `niche_sports` | false |
+| `doom_pixel` | `dark_moody` | true |
+| `wellness_kira` | `lowercase_aesthetic` | false |
+| `anxious_overthinker` | `ironic_self_deprecating` | false |
+| `conspiracy_dale` | `normie_name` | false |
+| `chaos_goblin_99` | `brainrot_ironic` | false |
+| `brainrot_kid_6_7` | `brainrot_ironic` | false |
+| `cold_academic` | `minimal_clean` | false |
+| `the_gremlin` | `unhinged_allcaps` | true |
+| `caps_lock_dad` | `unhinged_allcaps` | true |
+| `art_critic_3000` | `compound_concept` | false |
+| `monosyllable_zen` | `minimal_clean` | false |
+| `insomniac_pixel` | `dark_moody` | true |
+
+To tune handle shape for a specific profile, edit `usernameStyle.examples` and `usernameStyle.guidance` in [src/voice-profiles/catalog.ts](../src/voice-profiles/catalog.ts), then `pnpm reset --agent <name>` each affected agent and regenerate. The catalog sweep test ([tests/voice-profiles/catalog.test.ts](../tests/voice-profiles/catalog.test.ts)) enforces that every example passes the platform regex and length bounds and that no two profiles share an identical examples array.
 
 ---
 

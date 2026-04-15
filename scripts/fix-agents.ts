@@ -1,7 +1,7 @@
 /**
  * Scans output/agents/ and fixes:
  *   1. Duplicate agentnames — appends a random 2-digit suffix
- *   2. Empty agentnames — generates one from persona namePatterns
+ *   2. Empty agentnames — generates a stub from the personaId + digits
  *   3. Short bios (< 3 words) — takes first sentence of persona personality
  *
  * Also updates agents.json master index to match.
@@ -11,27 +11,32 @@
 
 import { access, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Inline the paths so this script runs standalone without dotenv/config
-const AGENTS_DIR = './output/agents';
-const INDEX_PATH = './output/agents.json';
+// Resolve paths relative to the script file so this works from any CWD
+// (e.g. `tsx scripts/fix-agents.ts` run from a subdir).
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const AGENTS_DIR = join(REPO_ROOT, 'output', 'agents');
+const INDEX_PATH = join(REPO_ROOT, 'output', 'agents.json');
 
-// Minimal persona loader — re-uses the project's persona files
-async function loadPersonaMap(): Promise<
-  Map<string, { namePatterns: string[]; personality: string }>
-> {
-  const personasDir = join(__dirname, '..', 'src', 'personas');
-  const files = await readdir(personasDir);
-  const SKIP = new Set(['index.ts', 'index.js', 'registry.ts', 'registry.js']);
-  const map = new Map<string, { namePatterns: string[]; personality: string }>();
-
+// Minimal persona loader — reads the runtime-installed personas in
+// `output/personas/*.json`. Only `personality` is used (for short-bio
+// fallback); empty-name fallback uses the personaId itself as the stub seed.
+async function loadPersonaMap(): Promise<Map<string, { personality: string }>> {
+  const personasDir = join(REPO_ROOT, 'output', 'personas');
+  const map = new Map<string, { personality: string }>();
+  let files: string[];
+  try {
+    files = await readdir(personasDir);
+  } catch {
+    return map;
+  }
   for (const file of files) {
-    if (!file.endsWith('.ts') && !file.endsWith('.js')) continue;
-    if (SKIP.has(file)) continue;
+    if (!file.endsWith('.json')) continue;
     try {
-      const mod = require(join(personasDir, file));
-      const p = mod.default ?? mod.persona;
-      if (p?.id) map.set(p.id, { namePatterns: p.namePatterns, personality: p.personality });
+      const raw = await readFile(join(personasDir, file), 'utf-8');
+      const p = JSON.parse(raw);
+      if (p?.id) map.set(p.id, { personality: p.personality ?? '' });
     } catch {}
   }
   return map;
@@ -50,13 +55,11 @@ function randomDigits(): string {
   return String(Math.floor(Math.random() * 90) + 10); // 10-99
 }
 
-function generateNameFromPatterns(patterns: string[]): string {
-  // Pick a random pattern, strip non-alphanumeric, ensure 5-15 chars
-  const base = patterns[Math.floor(Math.random() * patterns.length)]
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toLowerCase();
-  const name = base.slice(0, 13) + randomDigits();
-  return name.slice(0, 15);
+function generateStubName(seed: string): string {
+  // Strip non-alphanumeric, ensure 5-15 chars. Seed is normally the personaId,
+  // which gives a deterministic, persona-tied stub the operator can rename.
+  const base = (seed || 'agent').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'agent';
+  return (base.slice(0, 13) + randomDigits()).slice(0, 15);
 }
 
 function wordCount(s: string): number {
@@ -110,11 +113,9 @@ async function main() {
   // --- Pass 1: Fix empty names ---
   for (const agent of agents) {
     if (!agent.data.agentname || agent.data.agentname.trim().length === 0) {
-      const persona = personas.get(agent.data.personaId);
-      const patterns = persona?.namePatterns ?? ['agent'];
       let newName: string;
       do {
-        newName = generateNameFromPatterns(patterns);
+        newName = generateStubName(agent.data.personaId);
       } while (usedNames.has(newName));
 
       console.log(`EMPTY NAME: folder "${agent.dir}" -> "${newName}"`);

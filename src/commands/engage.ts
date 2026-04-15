@@ -22,6 +22,7 @@ import type {
   Persona,
   RemotePost,
 } from '@/types';
+import { loadVoiceProfiles, resolveVoiceProfile } from '@/voice-profiles/index';
 
 interface EngageOptions {
   agents?: number;
@@ -159,6 +160,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
   const actionsLimit = options.limit ?? 5;
   const loopEnabled = options.loop ?? false;
   const personas = await loadPersonas();
+  const voiceProfiles = loadVoiceProfiles();
 
   // Structured event logging (output/logs/). Tolerates a prior session
   // within 24h — counters resume instead of zeroing, so an overnight
@@ -524,44 +526,63 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             const postChance = avgPostsPerDay / 24;
 
             if (Math.random() < postChance) {
-              try {
-                sp.message(`@${agent.agentname} — generating a fresh post`);
-                const content = await generatePostContent(
-                  persona,
-                  1,
-                  1,
-                  [],
-                  [],
-                  rollChaos(persona),
-                );
-                const postClient = new InstaMoltClient(agent.apiKey);
-                const result = await postClient.generatePost({
-                  prompt: content.imagePrompt,
-                  caption: content.caption,
-                  aspect_ratio: content.aspectRatio,
-                });
-
-                actionsUsed++;
-                cyclePosts++;
-                sp.message(`@${agent.agentname} — posted ${result.post.id}`);
-                logEvent({
-                  eventType: 'post_published',
-                  agentname: agent.agentname,
-                  persona: agent.personaId,
-                  success: true,
-                  details: { postId: result.post.id, caption: content.caption.slice(0, 80) },
-                });
-              } catch (err) {
+              const resolved = resolveVoiceProfile(voiceProfiles, agent);
+              if ('error' in resolved) {
                 cycleErrors++;
-                log('warn', `Post creation failed: ${err}`);
+                log('warn', `${resolved.error}, skipping post`);
                 logEvent({
                   eventType: 'post_published',
                   agentname: agent.agentname,
                   persona: agent.personaId,
                   success: false,
-                  error: err instanceof Error ? err.message : String(err),
-                  details: errorDetails(err),
+                  error: resolved.error,
+                  details: { voiceProfileId: agent.voiceProfileId },
                 });
+              } else {
+                const voiceProfile = resolved.profile;
+                try {
+                  sp.message(`@${agent.agentname} — generating a fresh post`);
+                  const content = await generatePostContent(
+                    persona,
+                    voiceProfile,
+                    1,
+                    1,
+                    [],
+                    [],
+                    rollChaos(persona),
+                  );
+                  const postClient = new InstaMoltClient(agent.apiKey);
+                  const result = await postClient.generatePost({
+                    prompt: content.imagePrompt,
+                    caption: content.caption,
+                    aspect_ratio: content.aspectRatio,
+                  });
+
+                  actionsUsed++;
+                  cyclePosts++;
+                  sp.message(`@${agent.agentname} — posted ${result.post.id}`);
+                  logEvent({
+                    eventType: 'post_published',
+                    agentname: agent.agentname,
+                    persona: agent.personaId,
+                    success: true,
+                    details: {
+                      postId: result.post.id,
+                      caption: content.caption.slice(0, 80),
+                    },
+                  });
+                } catch (err) {
+                  cycleErrors++;
+                  log('warn', `Post creation failed: ${err}`);
+                  logEvent({
+                    eventType: 'post_published',
+                    agentname: agent.agentname,
+                    persona: agent.personaId,
+                    success: false,
+                    error: err instanceof Error ? err.message : String(err),
+                    details: errorDetails(err),
+                  });
+                }
               }
             }
           }

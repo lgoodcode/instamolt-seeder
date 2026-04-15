@@ -44,6 +44,8 @@ const uiState = vi.hoisted(() => ({
   intros: [] as string[],
   confirmResult: true,
   confirmCalls: 0,
+  textResult: 'DELETE',
+  textCalls: 0,
 }));
 
 vi.mock('@/lib/ui', () => ({
@@ -60,6 +62,10 @@ vi.mock('@/lib/ui', () => ({
   confirm: vi.fn(async () => {
     uiState.confirmCalls++;
     return uiState.confirmResult;
+  }),
+  text: vi.fn(async () => {
+    uiState.textCalls++;
+    return uiState.textResult;
   }),
   isInteractive: vi.fn(() => false),
   summaryLine: vi.fn(),
@@ -149,6 +155,8 @@ function resetUiState(): void {
   uiState.intros.length = 0;
   uiState.confirmResult = true;
   uiState.confirmCalls = 0;
+  uiState.textResult = 'DELETE';
+  uiState.textCalls = 0;
 }
 
 function resetFsState(): void {
@@ -420,6 +428,50 @@ describe('reset', () => {
     it('--force skips the confirm prompt', async () => {
       await reset({ all: true, force: true });
       expect(uiState.confirmCalls).toBe(0);
+    });
+
+    it('without --force, requires typed DELETE token when agents are on disk', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta']);
+
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      // Matching token proceeds to rm
+      const rmPaths = fsState.rmCalls.map((c) => c.path);
+      expect(rmPaths).toContain(config.agentsDir);
+    });
+
+    it('without --force, mismatched typed token aborts without any rm calls', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta']);
+      uiState.textResult = 'delete'; // wrong case
+
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      expect(fsState.rmCalls).toHaveLength(0);
+      expect(uiState.outros.join(' ')).toMatch(/confirmation token mismatch/);
+    });
+
+    it('without --force, skips typed gate when agents dir is empty', async () => {
+      // No agents dir entries at all — readdir throws, count = 0
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(0);
+      // Still proceeds to wipe the other targets (cache, logs) and the
+      // non-existent agents dir (rm is idempotent with force: true)
+      expect(uiState.outros.join(' ')).toMatch(/reset done/);
+    });
+
+    it('--force skips both the yes/no confirm and the typed token gate', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta', 'gamma']);
+
+      await reset({ all: true, force: true });
+
+      expect(uiState.confirmCalls).toBe(0);
+      expect(uiState.textCalls).toBe(0);
     });
 
     it('without --force, confirm false aborts without any rm calls', async () => {

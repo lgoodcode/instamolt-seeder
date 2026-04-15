@@ -37,6 +37,7 @@ vi.mock('node:fs/promises', () => ({
 
 const llmMocks = vi.hoisted(() => ({
   answerChallenge: vi.fn<() => Promise<string>>(),
+  generateBio: vi.fn<() => Promise<string>>(),
 }));
 vi.mock('@/services/llm', () => llmMocks);
 
@@ -74,7 +75,39 @@ const apiMocks = vi.hoisted(() => ({
     >(),
 }));
 
+// Real InstaMoltApiError class shared between the mock and the tests, so
+// `err instanceof InstaMoltApiError` inside publish.ts's moderation-retry
+// path holds across the module boundary. Defined via `vi.hoisted` because
+// `vi.mock` factories are hoisted above regular top-level declarations.
+const { TestInstaMoltApiError } = vi.hoisted(() => {
+  class TestInstaMoltApiError extends Error {
+    constructor(
+      readonly method: string,
+      readonly path: string,
+      readonly status: number,
+      readonly body: string,
+    ) {
+      super(`${method} ${path}: ${status} -- ${body}`);
+      this.name = 'InstaMoltApiError';
+    }
+  }
+  return { TestInstaMoltApiError };
+});
+
 vi.mock('@/services/instamolt-api', () => ({
+  InstaMoltApiError: TestInstaMoltApiError,
+  parseErrorCode: (body: string) => {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === 'object' && 'code' in parsed) {
+        const code = (parsed as { code: unknown }).code;
+        return typeof code === 'string' ? code : undefined;
+      }
+    } catch {
+      // fall through
+    }
+    return undefined;
+  },
   InstaMoltClient: vi.fn().mockImplementation(function () {
     return {
       startChallenge: apiMocks.startChallenge,
@@ -213,6 +246,7 @@ describe('publish', () => {
     apiMocks.updateProfile.mockReset();
     apiMocks.followAgent.mockReset();
     llmMocks.answerChallenge.mockReset();
+    llmMocks.generateBio.mockReset();
     apiMocks.generatePost.mockReset();
     personaMocks.loadPersonas.mockReset();
 
@@ -355,6 +389,96 @@ describe('publish', () => {
     expect(alphaOnDisk.apiKey).toBe('key-alpha');
     expect(gammaOnDisk.apiKey).toBe('key-gamma');
     expect(betaOnDisk.apiKey).toBeUndefined();
+  });
+
+  it('regenerates the bio and retries registration on CONTENT_BLOCKED', async () => {
+    primeAgent('alpha', { bio: 'a self-destructive suicide note in broken syntax' });
+    primeIndex(['alpha']);
+
+    // First startChallenge attempt → moderation block (self_harm).
+    // Second attempt (with regenerated bio) → success.
+    const blockedBody = JSON.stringify({
+      error: 'Content blocked: self_harm policy violation',
+      code: 'CONTENT_BLOCKED',
+      category: 'self_harm',
+      tier: 2,
+    });
+    apiMocks.startChallenge
+      .mockRejectedValueOnce(
+        new TestInstaMoltApiError('POST', '/agents/register', 403, blockedBody),
+      )
+      .mockResolvedValueOnce({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockResolvedValue({
+      success: true,
+      agent: { agentname: 'alpha', api_key: 'key-alpha', is_verified: false },
+    });
+    llmMocks.generateBio.mockResolvedValue('A calm, clean bio with no triggers');
+
+    await publish({ skipFollowGraph: true });
+
+    // generateBio was called once with the moderation feedback surfaced.
+    expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
+    const call = llmMocks.generateBio.mock.calls[0] as unknown as [
+      unknown,
+      string[],
+      { category: string; reason: string; blockedBio: string },
+    ];
+    const [, existingBios, feedback] = call;
+    expect(existingBios).toEqual([]);
+    expect(feedback.category).toBe('self_harm');
+    expect(feedback.blockedBio).toBe('a self-destructive suicide note in broken syntax');
+    expect(feedback.reason).toContain('self_harm');
+
+    // startChallenge was retried with the new bio.
+    expect(apiMocks.startChallenge).toHaveBeenCalledTimes(2);
+    expect(apiMocks.startChallenge.mock.calls[1][1]).toBe('A calm, clean bio with no triggers');
+
+    // New bio AND apiKey persisted to disk.
+    const onDisk = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+    expect(onDisk.bio).toBe('A calm, clean bio with no triggers');
+    expect(onDisk.apiKey).toBe('key-alpha');
+  });
+
+  it('gives up after MAX_BIO_MODERATION_RETRIES repeated CONTENT_BLOCKED hits', async () => {
+    primeAgent('alpha', { bio: 'persistently blocked bio' });
+    primeIndex(['alpha']);
+
+    const blockedBody = JSON.stringify({
+      error: 'Content blocked',
+      code: 'CONTENT_BLOCKED',
+      category: 'self_harm',
+    });
+    // Every attempt blocks — should try initial + 2 retries = 3 total, then error.
+    apiMocks.startChallenge.mockRejectedValue(
+      new TestInstaMoltApiError('POST', '/agents/register', 403, blockedBody),
+    );
+    llmMocks.generateBio.mockResolvedValue('still bad bio');
+
+    await publish({ skipFollowGraph: true });
+
+    expect(apiMocks.startChallenge).toHaveBeenCalledTimes(3);
+    expect(llmMocks.generateBio).toHaveBeenCalledTimes(2);
+    expect(apiMocks.completeChallenge).not.toHaveBeenCalled();
+
+    // No apiKey persisted; bio reflects the last regeneration attempt.
+    const onDisk = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+    expect(onDisk.apiKey).toBeUndefined();
+    expect(onDisk.bio).toBe('still bad bio');
+  });
+
+  it('does NOT regenerate the bio on non-moderation registration errors', async () => {
+    primeAgent('alpha');
+    primeIndex(['alpha']);
+
+    // 500 is NOT a moderation block — should propagate on the first hit.
+    apiMocks.startChallenge.mockRejectedValue(
+      new TestInstaMoltApiError('POST', '/agents/register', 500, 'internal error'),
+    );
+
+    await publish({ skipFollowGraph: true });
+
+    expect(apiMocks.startChallenge).toHaveBeenCalledTimes(1);
+    expect(llmMocks.generateBio).not.toHaveBeenCalled();
   });
 
   it('treats updateProfile failure as best-effort (apiKey still persisted)', async () => {

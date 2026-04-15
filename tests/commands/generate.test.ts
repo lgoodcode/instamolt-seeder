@@ -420,6 +420,48 @@ describe('generate', () => {
     expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
   });
 
+  it('rolls a per-agent post count when given a min/max range', async () => {
+    const p = makePersona('test-persona');
+    personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 4));
+    llmMocks.generateAgentName
+      .mockResolvedValueOnce('alpha')
+      .mockResolvedValueOnce('beta')
+      .mockResolvedValueOnce('gamma')
+      .mockResolvedValueOnce('delta');
+    llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+
+    // Force a deterministic sequence of Math.random() -> round-robin through
+    // [0, 0.34, 0.67, 0.99] so randInt(2,5) produces 2,3,4,5 respectively.
+    const values = [0, 0.34, 0.67, 0.99];
+    let i = 0;
+    const rand = vi.spyOn(Math, 'random').mockImplementation(() => values[i++ % values.length]);
+
+    try {
+      await generate(4, 2, 5);
+    } finally {
+      rand.mockRestore();
+    }
+
+    const postsFor = (name: string) =>
+      Array.from(fsState.files.keys()).filter(
+        (path) => path.includes(`/${name}/post-`) || path.includes(`\\${name}\\post-`),
+      ).length;
+
+    expect(postsFor('alpha')).toBe(2);
+    expect(postsFor('beta')).toBe(3);
+    expect(postsFor('gamma')).toBe(4);
+    expect(postsFor('delta')).toBe(5);
+
+    // Index totalPosts reflects the actual on-disk sum, not agents * fixed.
+    const index = JSON.parse(fsState.files.get('./output/agents.json')!);
+    expect(index.totalPosts).toBe(2 + 3 + 4 + 5);
+  });
+
+  it('rejects a range where min > max', async () => {
+    await expect(generate(1, 5, 2)).rejects.toThrow(/postsMax.*must be >=/);
+  });
+
   it('writes the expected number of post files per agent', async () => {
     const p = makePersona('test-persona');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
@@ -889,13 +931,14 @@ describe('generate', () => {
       const types = eventTypes();
       expect(types[0]).toBe('session_start');
       const starts = eventsOfType<{
-        details: { command: string; agentCount: number; postsPerAgent: number };
+        details: { command: string; agentCount: number; postsMin: number; postsMax: number };
       }>('session_start');
       expect(starts).toHaveLength(1);
       expect(starts[0].details).toEqual({
         command: 'generate',
         agentCount: 1,
-        postsPerAgent: 2,
+        postsMin: 2,
+        postsMax: 2,
       });
     });
 

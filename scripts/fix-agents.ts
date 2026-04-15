@@ -11,16 +11,19 @@
 
 import { access, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Inline the paths so this script runs standalone without dotenv/config
-const AGENTS_DIR = './output/agents';
-const INDEX_PATH = './output/agents.json';
+// Resolve paths relative to the script file so this works from any CWD
+// (e.g. `tsx scripts/fix-agents.ts` run from a subdir).
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const AGENTS_DIR = join(REPO_ROOT, 'output', 'agents');
+const INDEX_PATH = join(REPO_ROOT, 'output', 'agents.json');
 
 // Minimal persona loader — reads the runtime-installed personas in
 // `output/personas/*.json`. Only `personality` is used (for short-bio
 // fallback); empty-name fallback uses the personaId itself as the stub seed.
 async function loadPersonaMap(): Promise<Map<string, { personality: string }>> {
-  const personasDir = './output/personas';
+  const personasDir = join(REPO_ROOT, 'output', 'personas');
   const map = new Map<string, { personality: string }>();
   let files: string[];
   try {

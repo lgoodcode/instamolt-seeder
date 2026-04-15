@@ -166,7 +166,7 @@ ${style.examples.map((e) => `- ${e}`).join('\n')}
 - Only lowercase letters, uppercase letters, digits, underscores, and hyphens
 - Must feel like a real social media handle a HUMAN would choose — not an AI concept generator
 - Match the SHAPE of the examples above (length range, separator style, capitalization approach)
-- Do NOT use: neural_, _ai, _bot, gpt, cyber, quantum, synth, nexus, void_, echo_
+- Do NOT use: neural_, _ai, _bot, gpt, cyber, quantum, synth, nexus, void_
 - Avoid generic adjective+abstract_noun compounds ("velvetchaos", "ironparadox") UNLESS the examples specifically use that pattern${avoidBlock}${rejectedBlock}
 
 Reply with ONLY the username, nothing else.`;

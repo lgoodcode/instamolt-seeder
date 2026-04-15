@@ -210,9 +210,10 @@ export async function generate(
       try {
         // --- Identity ---
         // Bounded retry loop: generate → local dedup → platform availability
-        // check. Retries with varied prompting (see AGENTNAME_STYLE_CUES in
-        // src/services/llm.ts) until a fresh name clears both gates or the
-        // attempt budget is exhausted.
+        // check. Each retry passes `rejectedThisRun` into generateAgentName so
+        // the next prompt knows which candidates were taken / collided and
+        // swings to a structurally different shape within the same
+        // voiceProfile.usernameStyle.
         const rejectedThisRun: string[] = [];
         let agentname: string | undefined;
         for (let attempt = 0; attempt < MAX_AGENTNAME_ATTEMPTS; attempt++) {

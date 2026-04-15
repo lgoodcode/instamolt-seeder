@@ -363,11 +363,32 @@ async function resetSinglePersona(personaId: string, force: boolean): Promise<vo
 }
 
 /**
- * Fields written to `agent.json` by `publish` (apiKey, registeredAt) and
- * `engage` (lastCommentedAt). Stripped by `--post-generate` so a subsequent
- * `publish-drafts` re-registers the agent from scratch.
+ * Fields written to `agent.json` by `publish` (apiKey, registeredAt,
+ * avatarUrl, avatarGeneratedAt, avatarGenerationSeed) and `engage`
+ * (lastCommentedAt). Stripped by `--post-generate` so a subsequent
+ * `publish-drafts` re-registers the agent from scratch — including a fresh
+ * avatar on the new remote account.
+ *
+ * Why the avatar fields must go: `--post-generate` drops `apiKey`, so the
+ * next `publish-drafts` creates a new platform agent record. The stored
+ * `avatarUrl` belongs to the old (now orphaned) remote account. If we kept
+ * it, `publish`'s `needsAvatar` gate (`apiKey && !avatarUrl`) would
+ * short-circuit and the re-registered agent would stay avatarless on the
+ * platform while its local JSON pointed at a stale CDN file. Strip them so
+ * the next publish pass regenerates.
+ *
+ * Preserved: `avatarPrompt`. That's pre-registration (baked by `generate`
+ * via Gemini) and is reused by the next publish pass to produce the new
+ * avatar — no need to re-run the Gemini prompt-drafting step.
  */
-const PUBLISH_ENGAGE_AGENT_FIELDS = ['apiKey', 'registeredAt', 'lastCommentedAt'] as const;
+const PUBLISH_ENGAGE_AGENT_FIELDS = [
+  'apiKey',
+  'registeredAt',
+  'lastCommentedAt',
+  'avatarUrl',
+  'avatarGeneratedAt',
+  'avatarGenerationSeed',
+] as const;
 
 /**
  * Fields written to `post-*.json` by `publish` when it successfully lands the
@@ -401,12 +422,14 @@ async function resetToPostGenerate(force: boolean): Promise<void> {
   ui.note(
     'Will rewind',
     [
-      `${ui.color.red(ui.symbol.dot)} strip apiKey / registeredAt / lastCommentedAt from ${agentCount} agent.json file${agentCount === 1 ? '' : 's'} + agents.json entries`,
+      `${ui.color.red(ui.symbol.dot)} strip apiKey / registeredAt / lastCommentedAt / avatarUrl / avatarGeneratedAt / avatarGenerationSeed from ${agentCount} agent.json file${agentCount === 1 ? '' : 's'} + agents.json entries`,
       `${ui.color.red(ui.symbol.dot)} strip published / publishedAt / instamoltPostId from every post-*.json`,
       `${ui.color.red(ui.symbol.dot)} delete per-agent runtime-comments.json + activity.jsonl`,
       `${ui.color.red(ui.symbol.dot)} delete ${config.logsDir}/ and ${config.feedCachePath}`,
       '',
-      ui.color.dim('Preserved: bios, post drafts, comments.json, personas, dedup-index.json.'),
+      ui.color.dim(
+        'Preserved: bios, post drafts, comments.json, personas, dedup-index.json, avatarPrompt (avatar image regenerates on next publish against the new account).',
+      ),
       ui.color.yellow(
         `${ui.symbol.warn} agents registered against instamolt.app keep their remote accounts — the local apiKey is lost, so they become orphaned on the platform`,
       ),

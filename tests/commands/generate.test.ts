@@ -89,6 +89,7 @@ const llmMocks = vi.hoisted(() => ({
       }>
     >(),
   generateComment: vi.fn<() => Promise<string>>(),
+  generateAvatarPrompt: vi.fn<(persona: unknown, agent: unknown) => Promise<string>>(),
   rollChaos: vi.fn(() => false),
 }));
 
@@ -318,6 +319,10 @@ describe('generate', () => {
     // retry loop override this per-candidate.
     instamoltMocks.isAgentnameAvailable.mockResolvedValue(true);
     llmMocks.generateBio.mockReset();
+    llmMocks.generateAvatarPrompt.mockReset();
+    // Default: every agent gets a non-empty avatar prompt. Tests that
+    // exercise the prompt-failure soft-skip path override with a rejection.
+    llmMocks.generateAvatarPrompt.mockResolvedValue('chrome mask, neon glow, square portrait');
     llmMocks.generatePostContent.mockReset();
     llmMocks.generateComment.mockReset();
     personaMocks.loadPersonas.mockReset();
@@ -432,6 +437,49 @@ describe('generate', () => {
     await generate(1, 0);
 
     expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
+  });
+
+  it('bakes an avatarPrompt into agent.json and emits avatar_prompt_drafted', async () => {
+    const p = makePersona('test-persona');
+    personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+    llmMocks.generateAgentName.mockResolvedValue('alpha');
+    llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+    llmMocks.generateAvatarPrompt.mockResolvedValue('chrome mask, neon glow');
+
+    await generate(1, 0);
+
+    const agent = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'agent.json'))!);
+    expect(agent.avatarPrompt).toBe('chrome mask, neon glow');
+    // Called once per agent with the persona + the in-progress agent shape.
+    expect(llmMocks.generateAvatarPrompt).toHaveBeenCalledTimes(1);
+    expect(llmMocks.generateAvatarPrompt.mock.calls[0]![1]).toMatchObject({
+      agentname: 'alpha',
+      bio: 'A calm considered AI mind',
+    });
+    const events = eventLoggerMocks.logEvent.mock.calls.map((c) => c[0] as { eventType: string });
+    expect(events.some((e) => e.eventType === 'avatar_prompt_drafted')).toBe(true);
+  });
+
+  it('leaves avatarPrompt unset and keeps going when the draft call throws', async () => {
+    const p = makePersona('test-persona');
+    personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
+    registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
+    llmMocks.generateAgentName.mockResolvedValue('alpha');
+    llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
+    llmMocks.generateAvatarPrompt.mockRejectedValue(new Error('gemini down'));
+
+    await generate(1, 0);
+
+    const agent = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'agent.json'))!);
+    expect(agent.agentname).toBe('alpha');
+    expect(agent.avatarPrompt).toBeUndefined();
+    // The draft failure must surface as an `avatar_prompt_drafted` event with
+    // success=false so overnight operators can grep errors.jsonl.
+    const failedDrafts = eventLoggerMocks.logEvent.mock.calls
+      .map((c) => c[0] as { eventType: string; success: boolean })
+      .filter((e) => e.eventType === 'avatar_prompt_drafted' && e.success === false);
+    expect(failedDrafts).toHaveLength(1);
   });
 
   it('rolls a per-agent post count when given a min/max range', async () => {

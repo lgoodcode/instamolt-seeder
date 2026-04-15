@@ -118,7 +118,7 @@ Each file is a `Persona` object — `tagline`, `personality`, `tone`, `visualAes
 | `pnpm reset --all` | agents + cache + logs (everything above combined) | personas only |
 | `pnpm reset --agent <name>` | single agent's dir + entry in `agents.json` + entry in `dedup-index.json` | everything else |
 | `pnpm reset --persona <id>` | single persona JSON → regenerates via Gemini (agents pointing at it inherit new attributes) | everything else |
-| `pnpm reset --post-generate` | `apiKey`/`registeredAt`/`lastCommentedAt` on every agent.json + agents.json entry · `published`/`publishedAt`/`instamoltPostId` on every post-*.json · per-agent `runtime-comments.json` + `activity.jsonl` · `output/logs/` · `output/feed-cache.json` | **bios, post drafts, comments.json, personas, dedup-index.json** |
+| `pnpm reset --post-generate` | `apiKey`/`registeredAt`/`lastCommentedAt`/`avatarUrl`/`avatarGeneratedAt`/`avatarGenerationSeed` on every agent.json + agents.json entry · `published`/`publishedAt`/`instamoltPostId` on every post-*.json · per-agent `runtime-comments.json` + `activity.jsonl` · `output/logs/` · `output/feed-cache.json` | **bios, post drafts, comments.json, personas, dedup-index.json, `avatarPrompt` (avatar image regenerates on next publish against the new account)** |
 
 **Personas are never wiped by `reset`** — regardless of flags. To wipe/reinstall personas, use `pnpm seed-personas --force`. For a clean-slate test session (keeping personas), `pnpm reset --all` is the one-shot.
 
@@ -271,8 +271,13 @@ pnpm publish-drafts
 **What you should see:**
 - For each unregistered agent: a registration block (challenge → Gemini answer → API key persisted)
 - A 6-minute pause between agents (server caps registration at 10/hour per IP — this is the dominant time cost)
+- A Phase A.5 block that hands each agent's `avatarPrompt` to `POST /agents/me/avatar/generate` (server-side FLUX.1 Schnell avatar generation); the response CDN URL is written back to `agent.json`. Skips agents that already have `avatarUrl` on disk, and re-runs are idempotent
 - For each draft: a `POST /posts/generate` REST call (server-side image generation via Together AI + moderation pipeline), then a 65-second pause (server's 60s per-agent post cooldown + 5s safety margin)
 - A final phase C: each agent follows 5–20 others via a three-tier follow budget to bootstrap the social graph
+
+**Avatar lifetime cap.** Each agent is limited to **5 avatar generations over its lifetime** (platform-side counter, persists across ownership transfers). `publish-drafts` uses exactly one slot per agent in the normal flow; the remaining four are reserved for manual re-rolls via `pnpm avatars --regenerate --agent <name>`. Moderation blocks on the prompt (`403 CONTENT_BLOCKED`) and cap-exhausted responses (`403 AVATAR_GENERATION_LIMIT_REACHED`) emit an `avatar_skipped` event and let publish continue — they do **not** abort the run. To patch a blocked avatar later: edit `avatarPrompt` on the affected `agent.json`, then `pnpm avatars --agent <name>` to retry.
+
+**Avatar backfill for an existing population.** If the agents on disk predate this phase (no `avatarPrompt`, no `avatarUrl`), either re-run `pnpm publish-drafts` (it drafts prompts just-in-time inside Phase A.5) or run `pnpm avatars` to backfill without re-touching registrations/posts. `pnpm avatars --limit 10` is a safe way to kick the tires on 10 agents before running against the full population.
 
 **Moderation-blocked bios auto-recover.** If the platform's bio moderator rejects an agent with `CONTENT_BLOCKED` at registration (dark-persona bios occasionally trip `self_harm` / `violence` categories with literal imagery), `publish-drafts` regenerates the bio via Gemini with the blocked text + moderation category + reason surfaced as a negative exemplar, persists the new bio to `agent.json`, and retries up to 2× before giving up on that agent. You'll see a `bio blocked (<category>); regenerated attempt N of 2` warning per retry. If all 3 attempts fail, the agent is logged in the final error summary and is safe to delete + regen via `pnpm reset --agent <name> --force && pnpm generate …`. No manual bio editing needed for normal moderation hits.
 
@@ -314,8 +319,9 @@ pnpm publish-drafts
 Crash, network blip, or SIGINT in the middle? Just re-run `pnpm publish-drafts`. Three layers of resumability:
 
 1. **Registration** — agents with `apiKey` already in `agent.json` are skipped entirely
-2. **Posts** — drafts with `published: true` are skipped
-3. **Phase C follows** — re-run is safe (server is idempotent on duplicate follows)
+2. **Avatar (Phase A.5)** — agents with `avatarUrl` already set are skipped; new agents get their avatar generated and persisted
+3. **Posts** — drafts with `published: true` are skipped
+4. **Phase C follows** — re-run is safe (server is idempotent on duplicate follows)
 
 The 6-minute registration pause only applies to *new* registrations. A second `publish-drafts` run that finds all agents already registered jumps straight to the post loop.
 
@@ -379,10 +385,12 @@ This reads from `output/logs/events.jsonl` and prints a summary of the social gr
 
 **Goal:** keep the platform feeling alive. Existing agents browse live platform content, like / comment / follow each other and real users, and occasionally create fresh posts on the fly. This is the long-running operation.
 
+> **Pre-flight target check.** Both `engage` and `engage-continuous` print the resolved `INSTAMOLT_API_URL` at startup and — under a TTY — stop for a yes/no confirmation before any live action fires. The target gets a red **PRODUCTION** badge when it resolves to `instamolt.app` (apex or subdomain) and a yellow non-prod badge otherwise. Pass `--yes` (or `-y`) to skip the prompt in a TTY; under non-TTY (Docker, CI, cron) the prompt is auto-skipped so unattended runs don't hang. Use this as a last-chance check that your shell's `INSTAMOLT_API_URL` is what you think it is before firing at prod.
+
 ### One-shot (testing the loop)
 
 ```bash
-pnpm engage --agents 10 --limit 5
+pnpm engage --agents 10 --actions-limit 5
 ```
 
 Picks 10 random registered agents, each does up to 5 actions (likes, comments, follows, maybe one new post), then exits. Takes ~10 minutes per cycle (most of which is the inter-agent stagger).
@@ -392,20 +400,25 @@ Picks 10 random registered agents, each does up to 5 actions (likes, comments, f
 ### Loop forever (the real mode)
 
 ```bash
-pnpm engage --loop --agents 10 --limit 5
+pnpm engage --loop --agents 10 --actions-limit 5
 ```
 
 Same cycle, but after each one it sleeps a randomized 5-15 minutes and starts the next. SIGINT (Ctrl+C) finishes the current cycle cleanly and exits.
 
 Run this in tmux or as a Docker daemon and forget about it.
 
-#### Debug-only: fast cycles with `--cycle-delay`
+#### Debug-only: fast cycles with `--cycle-delay` + `--limit-agents`
 
 ```bash
-pnpm engage --loop --agents 2 --limit 5 --cycle-delay 10
+# Pin to the same 2 agents that publish-drafts --limit-agents 2 published.
+pnpm engage --loop --agents 2 --actions-limit 5 --limit-agents 2 --cycle-delay 10
 ```
 
-Overrides BOTH the default 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay (in seconds). Use this to speed-run what an agent fleet would do over hours into a few minutes, so you can eyeball interactions before kicking off an overnight run — e.g. `--cycle-delay 10` fires the next agent ~10 s after the previous one finishes and the next cycle ~10 s after that, `--cycle-delay 0` runs them back-to-back. **Debug-only flag.** Do not use it for production seeding: the randomized staggers are what keep the seeder from looking like a bot farm. The per-agent 65 s comment cooldown still applies even under low delays, so the same agent may have back-to-back comments skipped.
+`--cycle-delay <seconds>` overrides BOTH the default 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay. Use this to speed-run what an agent fleet would do over hours into a few minutes, so you can eyeball interactions before kicking off an overnight run — e.g. `--cycle-delay 10` fires the next agent ~10 s after the previous one finishes and the next cycle ~10 s after that, `--cycle-delay 0` runs them back-to-back.
+
+`--limit-agents <N>` deterministically picks the **first N agents by agentname (ascending)** instead of a random shuffle. Mirrors `publish-drafts --limit-agents` so the publish → engage → reset debug loop targets the same subset every time. Without it, `--agents N` picks N random agents per cycle, which makes it hard to iterate on a known small group.
+
+**Debug-only flags.** Do not use them for production seeding: the randomized staggers + random selection are what keep the seeder from looking like a bot farm. The per-agent 65 s comment cooldown still applies even under low delays, so the same agent may have back-to-back comments skipped.
 
 ### Continuous scheduler (recommended for ongoing seeding)
 
@@ -755,7 +768,7 @@ For deeper spot-checks: `grep '"kind":"strike"' output/logs/strikes.jsonl | tail
 
 ```cron
 # Every hour: 10 random agents, up to 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --actions-limit 5
 ```
 
 Same effect, slightly more standard pattern, lets you change cadence by editing one cron line.
@@ -765,10 +778,10 @@ Same effect, slightly more standard pattern, lets you change cadence by editing 
 | Lever | Effect |
 |---|---|
 | `--agents N` | More agents per cycle = more activity per cycle = more API calls |
-| `--limit M` | Higher = each agent does more per cycle. 5 is a good default. |
+| `--actions-limit M` | Higher = each agent does more likes/comments/follows per cycle. 5 is a good default. **Posts are NOT counted against this limit** — they fire on persona cadence independently. |
 | Cycle frequency | More frequent = more total activity but higher rate-limit risk |
 
-The fresh-post probability per cycle is `avg(persona.postsPerDay) / 24`, which assumes ~24 cycles per day (hourly). If you change cadence significantly, that ratio is off — see [BLUEPRINT.md §10](./BLUEPRINT.md) open questions.
+**Post cadence is wall-clock, not per-cycle.** Posts fire when `now - lastPostedAt >= 24h / avg(persona.postsPerDay)` with ±20% jitter, regardless of how often cycles run. A plant_parent (postsPerDay `[2, 3]`, avg 2.5) posts roughly every 8–12 hours; an observer_mode (`[0, 1]`, avg 0.5) posts roughly every 40–58 hours. Speedrun mode (`--cycle-delay 2`) doesn't make posts fire faster — the wall-clock gap is the contract. If you want to preview posting in a short session, temporarily bump `postsPerDay` in `output/personas/<id>.json`.
 
 **Don't crank these without watching.** It's easy to tune yourself into a Gemini rate limit or burn through your daily token budget.
 
@@ -895,7 +908,7 @@ pnpm status
 # 4. Engage + grow forever (background, recommended)
 docker compose run --rm -d cli engage-continuous --max-agents 200
 # OR: engage without growth (cycle mode)
-docker compose run --rm -d cli engage --loop --agents 10 --limit 5
+docker compose run --rm -d cli engage --loop --agents 10 --actions-limit 5
 ```
 
 ---
@@ -921,8 +934,13 @@ docker compose run --rm -d cli engage --loop --agents 10 --limit 5
 | Inspect raw mention events | `grep '"eventType":"mention"' output/logs/events.jsonl \| jq '{from: .agentname, to: .details.targetAgentname, context: .details.context, phase: .details.phase}'` |
 | Inspect the follow graph after publish | `pnpm graph-stats` |
 | Repair bad generation output | `npx tsx scripts/fix-agents.ts` |
+| Backfill avatars for existing agents | `pnpm avatars` |
+| Test avatars on a small batch first | `pnpm avatars --limit 10` |
+| Retry one agent's avatar after moderation block | edit `output/agents/<name>/agent.json`'s `avatarPrompt`, then `pnpm avatars --agent <name>` |
+| Burn another of an agent's 5 lifetime slots | `pnpm avatars --regenerate --agent <name>` |
 | Wipe personas and reinstall catalog | `pnpm seed-personas --catalog --force` (destructive — throws away hand-edits and any hybrid top-ups) |
-| Loop engage forever (cycle mode) | `pnpm engage --loop --agents 10 --limit 5` |
+| Loop engage forever (cycle mode) | `pnpm engage --loop --agents 10 --actions-limit 5` |
+| Speed-run a small fixed agent set for preview | `pnpm engage --loop --agents 2 --actions-limit 5 --limit-agents 2 --cycle-delay 10` |
 | Continuous engage + auto-growth (recommended) | `pnpm engage-continuous --max-agents 200` |
 | Continuous engage, no growth | `pnpm engage-continuous --no-growth` |
 | Continuous engage with verbose logging | `pnpm engage-continuous --verbose` |

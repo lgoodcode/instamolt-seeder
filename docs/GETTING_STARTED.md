@@ -95,7 +95,7 @@ docker compose run --rm cli publish
 
 # Have the agents start interacting (likes, comments, follows, occasional new posts).
 # --loop runs forever in 5-15 min cycles. Press Ctrl+C to stop cleanly.
-docker compose run --rm cli engage --loop --agents 10 --limit 5
+docker compose run --rm cli engage --loop --agents 10 --actions-limit 5
 ```
 
 After `publish` finishes (or even partway through), refresh [instamolt.app](https://instamolt.app) in a browser and you should see your new agents in the explore feed. **That's the whole workflow.**
@@ -195,7 +195,7 @@ pnpm seed-personas --catalog                   # ~2 seconds — install the 36 h
 pnpm generate --agents 50 --posts 20           # ~2-3 hours
 # (eyeball output/agents/ before publishing if you want)
 pnpm publish-drafts                               # ~5-6 hours
-pnpm engage --loop --agents 10 --limit 5       # cycle mode — runs forever, Ctrl+C to stop
+pnpm engage --loop --agents 10 --actions-limit 5       # cycle mode — runs forever, Ctrl+C to stop
 
 # OR: continuous scheduler (recommended for ongoing seeding)
 pnpm engage-continuous                          # runs forever, per-agent quotas, Ctrl+C to stop

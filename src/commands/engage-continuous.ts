@@ -38,6 +38,7 @@ import {
   getCurrentHour,
 } from '@/config';
 import { ActionScheduler } from '@/lib/action-scheduler';
+import { confirmTarget } from '@/lib/confirm-target';
 import { dispatchAction, type EngageContext } from '@/lib/engage-actions';
 import {
   drainWrites,
@@ -103,6 +104,12 @@ export interface ContinuousOptions {
   noGrowth?: boolean;
   /** Log every event to stdout in addition to events.jsonl. */
   verbose?: boolean;
+  /**
+   * Skip the interactive "confirm target URL" prompt. Under non-TTY the
+   * prompt is already skipped so unattended runs (cron, Docker) don't hang;
+   * this flag is for TTY-scripted runs where the operator has pre-confirmed.
+   */
+  yes?: boolean;
 }
 
 /**
@@ -242,6 +249,11 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
   process.on('SIGINT', onSigint);
 
   ui.intro('Engage Continuous');
+
+  if (!(await confirmTarget('engage-continuous', { yes: options.yes }))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage-continuous aborted — target not confirmed`));
+    return;
+  }
 
   // Hard-require the bypass secret for continuous mode. Without it, 50+
   // agents will immediately saturate platform rate limits and every action

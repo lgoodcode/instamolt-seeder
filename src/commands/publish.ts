@@ -8,7 +8,12 @@ import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient, parseErrorCode } from '@/services/instamolt-api';
-import { answerChallenge, type BioModerationFeedback, generateBio } from '@/services/llm';
+import {
+  answerChallenge,
+  type BioModerationFeedback,
+  generateAvatarPrompt,
+  generateBio,
+} from '@/services/llm';
 import type {
   AgentsIndex,
   ChallengeResponse,
@@ -351,6 +356,130 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     );
   }
 
+  // --- Phase A.5: Generate avatars concurrently ---
+  //
+  // For each registered agent without an avatar on disk, call
+  // `POST /agents/me/avatar/generate` (server-side Together AI FLUX). Every
+  // success burns 1 of the agent's 5 lifetime generations, so this phase is
+  // strictly a miss-fill — it never re-rolls an agent that already has an
+  // `avatarUrl` set.
+  //
+  // Agents without an `avatarPrompt` (e.g. older drafts baked before this
+  // feature, or agents whose prompt draft failed inside `generate`) get a
+  // just-in-time prompt via Gemini here. That means a backfill run against a
+  // legacy population works without any intermediate `pnpm avatars` step.
+  //
+  // Soft failures — no prompt after retry, 403 cap reached, 403 content
+  // blocked — skip the agent and emit `avatar_skipped`. They do NOT abort
+  // the phase or invalidate registration; the operator can re-run
+  // `pnpm avatars` later to patch the gaps.
+
+  const needsAvatar = prepared.filter((p) => p.data.apiKey && !p.data.avatarUrl);
+  let avatarsCreated = 0;
+  if (needsAvatar.length > 0) {
+    ui.section(
+      `Phase A.5 — generate ${needsAvatar.length} avatars (concurrency ${config.avatarConcurrency})`,
+    );
+    const avBar = ui.progress(needsAvatar.length);
+    await mapWithConcurrency(
+      needsAvatar,
+      config.avatarConcurrency,
+      async ({ indexAgent, data, jsonPath, persona }) => {
+        const avStartedAt = Date.now();
+        const logSkipped = (reason: string, details: Record<string, unknown> = {}): void => {
+          logEvent({
+            eventType: 'avatar_skipped',
+            agentname: indexAgent.agentname,
+            persona: indexAgent.personaId,
+            success: false,
+            durationMs: Date.now() - avStartedAt,
+            details: { reason, ...details },
+          });
+        };
+        try {
+          if (!data.avatarPrompt) {
+            // Just-in-time prompt draft so a legacy population (no avatarPrompt
+            // on disk) can be avatared without a separate backfill pass.
+            try {
+              const prompt = await generateAvatarPrompt(persona, data);
+              data.avatarPrompt = prompt;
+              await writeFile(jsonPath, JSON.stringify(data, null, 2));
+              logEvent({
+                eventType: 'avatar_prompt_drafted',
+                agentname: indexAgent.agentname,
+                persona: indexAgent.personaId,
+                success: true,
+                details: { promptLength: prompt.length, source: 'publish-phase-a5' },
+              });
+            } catch (err) {
+              const msg = formatError(err);
+              log('warn', `  @${indexAgent.agentname} — avatar prompt draft failed: ${msg}`);
+              logSkipped('prompt_draft_failed', { error: msg });
+              avBar.tick(`@${indexAgent.agentname} — no prompt`);
+              return;
+            }
+          }
+
+          const authed = new InstaMoltClient(data.apiKey);
+          const res = await authed.generateAvatar(data.avatarPrompt);
+          data.avatarUrl = res.avatar_url;
+          data.avatarGenerationSeed = res.generation_seed ?? undefined;
+          data.avatarGeneratedAt = new Date().toISOString();
+          await writeFile(jsonPath, JSON.stringify(data, null, 2));
+          avatarsCreated++;
+          logEvent({
+            eventType: 'avatar_generated',
+            agentname: indexAgent.agentname,
+            persona: indexAgent.personaId,
+            success: true,
+            durationMs: Date.now() - avStartedAt,
+            details: {
+              generationsUsed: res.generations_used,
+              generationsRemaining: res.generations_remaining,
+              generationSeed: res.generation_seed ?? null,
+            },
+          });
+          avBar.tick(`@${indexAgent.agentname} — avatar set`);
+        } catch (err) {
+          // Discriminate the 403 sub-cases so the operator-facing event log
+          // tells them WHY an agent was skipped without grepping error text.
+          if (err instanceof InstaMoltApiError && err.status === 403) {
+            const code = parseErrorCode(err.body) ?? 'forbidden';
+            if (code === 'AVATAR_GENERATION_LIMIT_REACHED') {
+              log('warn', `  @${indexAgent.agentname} — avatar cap reached (5/5), skipping`);
+              logSkipped('cap_reached', { errorCode: code });
+              avBar.tick(`@${indexAgent.agentname} — cap reached`);
+              return;
+            }
+            if (code === 'CONTENT_BLOCKED') {
+              log(
+                'warn',
+                `  @${indexAgent.agentname} — avatar prompt blocked by moderation, skipping (edit avatarPrompt on disk and rerun pnpm avatars to retry)`,
+              );
+              logSkipped('prompt_blocked', { errorCode: code });
+              avBar.tick(`@${indexAgent.agentname} — prompt blocked`);
+              return;
+            }
+            // AGENT_TIMEOUT / AGENT_BANNED / anything else 403 → still
+            // non-fatal for the population; log and move on.
+            log('warn', `  @${indexAgent.agentname} — avatar 403 (${code}), skipping`);
+            logSkipped('forbidden', { errorCode: code });
+            avBar.tick(`@${indexAgent.agentname} — 403 ${code}`);
+            return;
+          }
+          const msg = formatError(err);
+          log('error', `@${indexAgent.agentname} — avatar generation failed: ${msg}`);
+          errors.push({ agent: indexAgent.agentname, phase: 'avatar', message: msg });
+          logSkipped('error', { error: msg });
+          avBar.tick(`@${indexAgent.agentname} — failed`);
+        }
+      },
+    );
+    avBar.done(
+      `Phase A.5 — ${avatarsCreated} avatars set, ${needsAvatar.length - avatarsCreated} skipped`,
+    );
+  }
+
   // --- Phase B: Publish posts concurrently across agents ---
   //
   // Each worker handles ONE agent's post queue, walking that agent's
@@ -625,6 +754,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     'Publish complete',
     ui.summaryLine([
       { label: 'registered', value: registeredCount, tone: 'ok' },
+      { label: 'avatars', value: avatarsCreated, tone: 'ok' },
       { label: 'posted', value: postedCount, tone: 'ok' },
       { label: 'follow edges', value: followEdgesCreated, tone: 'info' },
       { label: 'errors', value: errorCount, tone: errorCount > 0 ? 'err' : 'info' },

@@ -88,6 +88,13 @@ export const config = {
   // followConcurrency: pure HTTP, no LLM, no subprocess. High is fine —
   // the ceiling is the platform's event-loop comfort on a bursty POST wave.
   followConcurrency: 25,
+  // avatarConcurrency: each worker POSTs `/agents/me/avatar/generate` (server-
+  // side Together AI FLUX + CDN upload). Kept lower than register/publish
+  // because the platform does a full image round-trip per call AND each
+  // success burns 1 of 5 lifetime attempts per agent, so there's no upside
+  // to stampeding it. 5 concurrent calls is enough to avatar ~100 agents in
+  // the time a single worker would do ~20.
+  avatarConcurrency: 5,
 
   // Transient-failure retry policy for every InstaMolt API call. Covers
   // fetch rejection (status 0 — network / ECONNRESET / connection refused)

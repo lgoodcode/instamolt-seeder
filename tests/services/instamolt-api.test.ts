@@ -787,3 +787,89 @@ describe('InstaMoltClient network + parse failure shapes', () => {
     });
   });
 });
+
+describe('InstaMoltClient.generateAvatar', () => {
+  it('POSTs to /agents/me/avatar/generate with Bearer auth + bypass header and returns the avatar url', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      okJson(
+        {
+          avatar_url: 'https://cdn.instamolt.app/avatars/x/1.jpg',
+          generation_seed: 42,
+          generations_used: 1,
+          generations_remaining: 4,
+        },
+        201,
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    const res = await client.generateAvatar('chrome mask, neon glow', 42);
+
+    expect(getUrl(fetchMock)).toBe(`${BASE}/agents/me/avatar/generate`);
+    const init = getInit(fetchMock);
+    expect(init.method).toBe('POST');
+    expect(init.headers?.Authorization).toBe('Bearer fake-key');
+    expect(init.headers?.['X-Rate-Limit-Bypass']).toBe('test-bypass-secret');
+    expect(JSON.parse(init.body ?? '{}')).toEqual({ prompt: 'chrome mask, neon glow', seed: 42 });
+    expect(res.avatar_url).toBe('https://cdn.instamolt.app/avatars/x/1.jpg');
+    expect(res.generation_seed).toBe(42);
+    expect(res.generations_remaining).toBe(4);
+  });
+
+  it('omits seed from the body when not provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      okJson(
+        {
+          avatar_url: 'https://cdn.instamolt.app/avatars/x/2.jpg',
+          generation_seed: 999,
+          generations_used: 2,
+          generations_remaining: 3,
+        },
+        201,
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await client.generateAvatar('just a prompt');
+
+    const body = JSON.parse(getInit(fetchMock).body ?? '{}');
+    expect(body).toEqual({ prompt: 'just a prompt' });
+    expect(body).not.toHaveProperty('seed');
+  });
+
+  it('surfaces 403 AVATAR_GENERATION_LIMIT_REACHED as a typed InstaMoltApiError with the code intact', async () => {
+    const errorBody = JSON.stringify({
+      error:
+        'Avatar generation limit reached. Each agent may generate up to 5 avatars over its lifetime.',
+      code: 'AVATAR_GENERATION_LIMIT_REACHED',
+      lifetime_cap: 5,
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(403, errorBody));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await expect(client.generateAvatar('x')).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 403,
+      body: expect.stringContaining('AVATAR_GENERATION_LIMIT_REACHED'),
+    });
+  });
+
+  it('surfaces 403 CONTENT_BLOCKED with the code intact so callers can discriminate', async () => {
+    const errorBody = JSON.stringify({
+      error: 'Content blocked: violates content policy',
+      code: 'CONTENT_BLOCKED',
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(errText(403, errorBody));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new InstaMoltClient('fake-key');
+    await expect(client.generateAvatar('x')).rejects.toMatchObject({
+      name: 'InstaMoltApiError',
+      status: 403,
+      body: expect.stringContaining('CONTENT_BLOCKED'),
+    });
+  });
+});

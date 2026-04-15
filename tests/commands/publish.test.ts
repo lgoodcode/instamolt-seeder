@@ -38,6 +38,7 @@ vi.mock('node:fs/promises', () => ({
 const llmMocks = vi.hoisted(() => ({
   answerChallenge: vi.fn<() => Promise<string>>(),
   generateBio: vi.fn<() => Promise<string>>(),
+  generateAvatarPrompt: vi.fn<() => Promise<string>>(),
 }));
 vi.mock('@/services/llm', () => llmMocks);
 
@@ -71,6 +72,18 @@ const apiMocks = vi.hoisted(() => ({
     vi.fn<
       () => Promise<{
         post: { id: string; image_url: string };
+      }>
+    >(),
+  generateAvatar:
+    vi.fn<
+      (
+        prompt: string,
+        seed?: number,
+      ) => Promise<{
+        avatar_url: string;
+        generation_seed?: number | null;
+        generations_used: number;
+        generations_remaining: number;
       }>
     >(),
 }));
@@ -115,6 +128,7 @@ vi.mock('@/services/instamolt-api', () => ({
       updateProfile: apiMocks.updateProfile,
       followAgent: apiMocks.followAgent,
       generatePost: apiMocks.generatePost,
+      generateAvatar: apiMocks.generateAvatar,
     };
   }),
 }));
@@ -248,7 +262,19 @@ describe('publish', () => {
     apiMocks.followAgent.mockReset();
     llmMocks.answerChallenge.mockReset();
     llmMocks.generateBio.mockReset();
+    llmMocks.generateAvatarPrompt.mockReset();
     apiMocks.generatePost.mockReset();
+    apiMocks.generateAvatar.mockReset();
+
+    // Default avatar behavior: every agent gets a canned prompt + a canned
+    // CDN url. Tests that exercise Phase A.5 explicitly override per call.
+    llmMocks.generateAvatarPrompt.mockResolvedValue('chrome mask, neon glow');
+    apiMocks.generateAvatar.mockResolvedValue({
+      avatar_url: 'https://cdn.instamolt.app/avatars/x/1.jpg',
+      generation_seed: 42,
+      generations_used: 1,
+      generations_remaining: 4,
+    });
     personaMocks.loadPersonas.mockReset();
 
     personaMocks.loadPersonas.mockResolvedValue(
@@ -758,5 +784,139 @@ describe('publish', () => {
     await publish();
 
     expect(apiMocks.followAgent).not.toHaveBeenCalled();
+  });
+
+  describe('Phase A.5 — avatar generation', () => {
+    /** Seed an agent.json that already has an avatarPrompt + apiKey. */
+    function primeAgentWithPrompt(
+      name: string,
+      opts: { apiKey: string; avatarPrompt?: string; avatarUrl?: string } & Record<string, unknown>,
+    ): void {
+      fsState.files.set(
+        agentJsonPath(name),
+        JSON.stringify({
+          agentname: name,
+          personaId: 'test-persona',
+          voiceProfileId: 'normie_cam',
+          bio: 'A calm considered AI mind',
+          avatarPrompt: opts.avatarPrompt ?? 'chrome mask, neon glow',
+          ...(opts.avatarUrl ? { avatarUrl: opts.avatarUrl } : {}),
+          apiKey: opts.apiKey,
+        }),
+      );
+      if (!fsState.dirEntries.has(join('./output/agents', name))) {
+        fsState.dirEntries.set(join('./output/agents', name), []);
+      }
+    }
+
+    it('uploads an avatar for each registered agent missing one and persists the returned url/seed', async () => {
+      primeAgentWithPrompt('alpha', { apiKey: 'key-alpha' });
+      primeIndex(['alpha']);
+
+      await publish({ skipFollowGraph: true });
+
+      expect(apiMocks.generateAvatar).toHaveBeenCalledTimes(1);
+      expect(apiMocks.generateAvatar).toHaveBeenCalledWith('chrome mask, neon glow');
+
+      const alpha = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+      expect(alpha.avatarUrl).toBe('https://cdn.instamolt.app/avatars/x/1.jpg');
+      expect(alpha.avatarGenerationSeed).toBe(42);
+      expect(typeof alpha.avatarGeneratedAt).toBe('string');
+    });
+
+    it('skips agents that already have an avatarUrl', async () => {
+      primeAgentWithPrompt('alpha', {
+        apiKey: 'key-alpha',
+        avatarUrl: 'https://cdn.instamolt.app/avatars/existing.jpg',
+      });
+      primeIndex(['alpha']);
+
+      await publish({ skipFollowGraph: true });
+
+      expect(apiMocks.generateAvatar).not.toHaveBeenCalled();
+    });
+
+    it('drafts a just-in-time avatarPrompt when missing, persists it, then uploads', async () => {
+      // Legacy draft without avatarPrompt. Phase A.5 must backfill it.
+      fsState.files.set(
+        agentJsonPath('alpha'),
+        JSON.stringify({
+          agentname: 'alpha',
+          personaId: 'test-persona',
+          voiceProfileId: 'normie_cam',
+          bio: 'A calm considered AI mind',
+          apiKey: 'key-alpha',
+        }),
+      );
+      fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
+      primeIndex(['alpha']);
+
+      llmMocks.generateAvatarPrompt.mockResolvedValue('backfilled prompt');
+
+      await publish({ skipFollowGraph: true });
+
+      expect(llmMocks.generateAvatarPrompt).toHaveBeenCalledTimes(1);
+      expect(apiMocks.generateAvatar).toHaveBeenCalledWith('backfilled prompt');
+
+      const alpha = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+      expect(alpha.avatarPrompt).toBe('backfilled prompt');
+      expect(alpha.avatarUrl).toBe('https://cdn.instamolt.app/avatars/x/1.jpg');
+    });
+
+    it('logs and skips without aborting the batch when the cap is reached (403 AVATAR_GENERATION_LIMIT_REACHED)', async () => {
+      primeAgentWithPrompt('alpha', { apiKey: 'key-alpha' });
+      primeAgentWithPrompt('beta', { apiKey: 'key-beta' });
+      primeIndex(['alpha', 'beta']);
+
+      // alpha: cap reached. beta: success.
+      apiMocks.generateAvatar
+        .mockRejectedValueOnce(
+          new TestInstaMoltApiError(
+            'POST',
+            '/agents/me/avatar/generate',
+            403,
+            JSON.stringify({
+              error: 'limit',
+              code: 'AVATAR_GENERATION_LIMIT_REACHED',
+              lifetime_cap: 5,
+            }),
+          ),
+        )
+        .mockResolvedValueOnce({
+          avatar_url: 'https://cdn.instamolt.app/avatars/beta/1.jpg',
+          generation_seed: 99,
+          generations_used: 1,
+          generations_remaining: 4,
+        });
+
+      await publish({ skipFollowGraph: true });
+
+      const alpha = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+      const beta = JSON.parse(fsState.files.get(agentJsonPath('beta'))!);
+      expect(alpha.avatarUrl).toBeUndefined();
+      expect(beta.avatarUrl).toBe('https://cdn.instamolt.app/avatars/beta/1.jpg');
+    });
+
+    it('skips without aborting when the prompt is blocked (403 CONTENT_BLOCKED)', async () => {
+      primeAgentWithPrompt('alpha', { apiKey: 'key-alpha' });
+      primeIndex(['alpha']);
+
+      apiMocks.generateAvatar.mockRejectedValueOnce(
+        new TestInstaMoltApiError(
+          'POST',
+          '/agents/me/avatar/generate',
+          403,
+          JSON.stringify({ error: 'Content blocked', code: 'CONTENT_BLOCKED' }),
+        ),
+      );
+
+      await publish({ skipFollowGraph: true });
+
+      const alpha = JSON.parse(fsState.files.get(agentJsonPath('alpha'))!);
+      expect(alpha.avatarUrl).toBeUndefined();
+      // The apiKey must stay intact — a blocked avatar does NOT un-register
+      // the agent.
+      expect(alpha.apiKey).toBe('key-alpha');
+    });
   });
 });

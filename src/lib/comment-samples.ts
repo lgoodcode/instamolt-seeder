@@ -8,9 +8,39 @@
  */
 
 import { fetchCommentTree, pickReplyTarget } from '@/lib/comment-tree';
+import { logMentions } from '@/lib/event-logger';
+import {
+  buildCommentCandidates,
+  buildReplyCandidates,
+  parseResolvedMentions,
+  resolveRelatedAgentnames,
+  shouldIncludeMentionCandidates,
+} from '@/lib/mentions';
 import type { InstaMoltClient } from '@/services/instamolt-api';
 import { type CommentAgentContext, generateComment, generateReply } from '@/services/llm';
 import type { CommentSample, FeedCacheFile, Persona, RemotePost, VoiceProfile } from '@/types';
+
+/**
+ * Optional context the bake helpers consume to surface `@mention` candidates.
+ *
+ * The seeder only suggests mention candidates when this context is supplied
+ * — callers that don't pass it (e.g. legacy tests, `preview-comments` in its
+ * simplest form) degrade cleanly to the pre-mention prompt with zero
+ * behaviour change.
+ *
+ *   - `knownAgentnames` — every agent currently in the population. Used by
+ *     `parseResolvedMentions` to intersect generated `@handles` against
+ *     actual members (self + unknown are dropped, matching platform rules).
+ *   - `personaToAgentnames` — `personaId → agentnames[]`. Used to resolve
+ *     `persona.relationships.{allies,amplifies,rivals}` into real agentnames
+ *     at candidate-pool assembly time.
+ *   - `rand` — injectable RNG for deterministic tests; defaults to `Math.random`.
+ */
+export interface MentionBakeContext {
+  knownAgentnames: ReadonlySet<string>;
+  personaToAgentnames: ReadonlyMap<string, string[]>;
+  rand?: () => number;
+}
 
 /**
  * Per-agent comment + reply sample counts are scaled by persona chattiness
@@ -112,6 +142,10 @@ export interface SampleCaption {
   caption: string;
   /** Reserved for future use. Never populated by feed-cache captions. */
   personaId?: string;
+  /** The source post's id, when available. Populated by
+   * `buildCaptionsPoolFromFeedCache` so bake-phase mention events can stamp
+   * `postId` on their `SeederEvent.details` for consistency with runtime events. */
+  postId?: string;
 }
 
 /**
@@ -135,6 +169,7 @@ export function buildCaptionsPoolFromFeedCache(cache: FeedCacheFile): SampleCapt
     pool.push({
       author: post.author.agentname,
       caption,
+      postId: post.id,
     });
   }
   return pool;
@@ -175,6 +210,7 @@ export async function bakeAgentComments(
   persona: Persona,
   agent: CommentAgentContext,
   sources: SampleCaption[],
+  mentionCtx?: MentionBakeContext,
 ): Promise<CommentSample[]> {
   const samples: CommentSample[] = [];
   const priorTexts: string[] = [];
@@ -186,23 +222,91 @@ export async function bakeAgentComments(
   const agentCtx: CommentAgentContext = { agentname: agent.agentname, bio: agent.bio };
 
   for (const source of sources) {
+    const mentionCandidates = mentionCtx
+      ? rollMentionCandidates({
+          ctx: mentionCtx,
+          context: 'comment',
+          persona,
+          selfAgentname: agent.agentname,
+          postAuthor: source.author,
+        })
+      : [];
+
     // Snapshot the avoid list at call time — same pattern as
     // generate.ts's similarity gate. Without this, vitest (and any other
     // caller inspecting mock args) would see the *final* mutated state.
-    const text = await generateComment(persona, agentCtx, source.caption, source.author, [
-      ...priorTexts,
-    ]);
+    const text = await generateComment(
+      persona,
+      agentCtx,
+      source.caption,
+      source.author,
+      [...priorTexts],
+      undefined,
+      false,
+      mentionCandidates,
+    );
+
+    const resolved = mentionCtx
+      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames)
+      : [];
+
     samples.push({
       sourceCaption: source.caption,
       sourceAuthor: source.author,
       sourcePersonaId: source.personaId,
       text,
       generatedAt: new Date().toISOString(),
+      ...(resolved.length > 0 ? { mentions: resolved } : {}),
     });
     priorTexts.push(text);
+
+    if (resolved.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolved,
+        context: 'comment',
+        phase: 'bake',
+        postId: source.postId,
+      });
+    }
   }
 
   return samples;
+}
+
+/**
+ * Roll the mention probability gate and, on a hit, assemble the candidate
+ * pool for the LLM. Shared by bake-time and runtime paths so the RNG +
+ * candidate shape stays identical across phases.
+ */
+function rollMentionCandidates(input: {
+  ctx: MentionBakeContext;
+  context: 'comment' | 'reply';
+  persona: Persona;
+  selfAgentname: string;
+  postAuthor: string;
+  parentAuthor?: string;
+  siblingAuthors?: string[];
+}): string[] {
+  const { ctx, context, persona, selfAgentname, postAuthor, parentAuthor, siblingAuthors } = input;
+  const rand = ctx.rand ?? Math.random;
+  if (!shouldIncludeMentionCandidates(persona.mentionProbability, context, rand)) return [];
+  const related = resolveRelatedAgentnames(persona, ctx.personaToAgentnames, selfAgentname, rand);
+  if (context === 'comment') {
+    return buildCommentCandidates({
+      selfAgentname,
+      postAuthor,
+      relatedAgentnames: related,
+    });
+  }
+  return buildReplyCandidates({
+    selfAgentname,
+    parentAuthor: parentAuthor ?? '',
+    postAuthor,
+    siblingAuthors: siblingAuthors ?? [],
+    relatedAgentnames: related,
+  });
 }
 
 /**
@@ -273,6 +377,7 @@ export async function bakeAgentReplies(
   posts: RemotePost[],
   depthTargets: ReadonlyArray<0 | 1>,
   priorTexts: string[] = [],
+  mentionCtx?: MentionBakeContext,
 ): Promise<CommentSample[]> {
   const samples: CommentSample[] = [];
   const runningPriorTexts: string[] = [...priorTexts];
@@ -320,6 +425,19 @@ export async function bakeAgentReplies(
     }
     if (!target) continue;
 
+    const siblingAuthors = target.siblings.map((s) => s.author.agentname);
+    const mentionCandidates = mentionCtx
+      ? rollMentionCandidates({
+          ctx: mentionCtx,
+          context: 'reply',
+          persona,
+          selfAgentname: agent.agentname,
+          postAuthor: post.author.agentname,
+          parentAuthor: target.parent.author.agentname,
+          siblingAuthors,
+        })
+      : [];
+
     let text: string;
     try {
       text = await generateReply(
@@ -333,10 +451,16 @@ export async function bakeAgentReplies(
         },
         target.siblings.map((s) => s.content),
         [...runningPriorTexts],
+        false,
+        mentionCandidates,
       );
     } catch {
       continue;
     }
+
+    const resolved = mentionCtx
+      ? parseResolvedMentions(text, agent.agentname, mentionCtx.knownAgentnames)
+      : [];
 
     samples.push({
       kind: 'reply',
@@ -348,8 +472,20 @@ export async function bakeAgentReplies(
       siblingContext: target.siblings.map((s) => s.content),
       text,
       generatedAt: new Date().toISOString(),
+      ...(resolved.length > 0 ? { mentions: resolved } : {}),
     });
     runningPriorTexts.push(text);
+
+    if (resolved.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolved,
+        context: 'reply',
+        phase: 'bake',
+        postId: post.id,
+      });
+    }
   }
 
   return samples;

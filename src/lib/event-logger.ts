@@ -149,6 +149,13 @@ function freshStats(): SeederStats {
     moderation: { totalStrikes: 0, byTier: {}, byCategory: {} },
     growth: { ticksFired: 0, agentsAdded: 0 },
     personas: {},
+    mentions: {
+      total: 0,
+      byPhase: { bake: 0, runtime: 0 },
+      byContext: { comment: 0, reply: 0 },
+      byMentioningAgent: {},
+      byTargetAgent: {},
+    },
     latency: {},
   };
 }
@@ -176,6 +183,17 @@ function loadOrArchivePriorStats(): SeederStats {
       // Without this, resume would read an undefined field and the first
       // `pushLatency` call would crash on `stats.latency[type]`.
       if (!prev.latency) prev.latency = {};
+      // Backfill `mentions` for stats files written before the mention
+      // aggregation shipped.
+      if (!prev.mentions) {
+        prev.mentions = {
+          total: 0,
+          byPhase: { bake: 0, runtime: 0 },
+          byContext: { comment: 0, reply: 0 },
+          byMentioningAgent: {},
+          byTargetAgent: {},
+        };
+      }
       return prev;
     }
     // Archive: copy the old file, then start fresh. `mkdirSync` with
@@ -318,6 +336,27 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     }
     stats.personas[event.persona].actions++;
     if (!event.success && !isSkipped) stats.personas[event.persona].errors++;
+  }
+
+  // Mention fan-out aggregation. `mention` events are emitted one-per-target
+  // after a comment/reply lands (either on the platform or in the bake
+  // sample file), so incrementing here is a 1:1 map to notification count.
+  if (event.eventType === 'mention' && event.success) {
+    const d = event.details ?? {};
+    const target = typeof d.targetAgentname === 'string' ? d.targetAgentname : undefined;
+    const phase = d.phase === 'runtime' ? 'runtime' : d.phase === 'bake' ? 'bake' : undefined;
+    const context =
+      d.context === 'reply' ? 'reply' : d.context === 'comment' ? 'comment' : undefined;
+    if (target && phase && context) {
+      stats.mentions.total++;
+      stats.mentions.byPhase[phase]++;
+      stats.mentions.byContext[context]++;
+      if (event.agentname) {
+        stats.mentions.byMentioningAgent[event.agentname] =
+          (stats.mentions.byMentioningAgent[event.agentname] ?? 0) + 1;
+      }
+      stats.mentions.byTargetAgent[target] = (stats.mentions.byTargetAgent[target] ?? 0) + 1;
+    }
   }
 
   // Feed refresh tracking
@@ -487,6 +526,42 @@ export async function timed<T>(
       },
     });
     throw err;
+  }
+}
+
+/**
+ * Emit one `mention` event per resolved mention target. Callers supply the
+ * already-parsed target list (via `parseResolvedMentions`) plus the context
+ * metadata; this helper just formats the SeederEvent. Fire-and-forget —
+ * always succeeds (logEvent swallows write failures).
+ *
+ * Invariant: call this AFTER the underlying comment/reply event has been
+ * logged, so `events.jsonl` orders `comment → mention → mention` not the
+ * reverse.
+ */
+export function logMentions(input: {
+  agentname: string;
+  persona?: string;
+  targets: string[];
+  context: 'comment' | 'reply';
+  phase: 'bake' | 'runtime';
+  postId?: string;
+  sourceCommentId?: string;
+}): void {
+  for (const target of input.targets) {
+    logEvent({
+      eventType: 'mention',
+      agentname: input.agentname,
+      persona: input.persona,
+      success: true,
+      details: {
+        targetAgentname: target,
+        context: input.context,
+        phase: input.phase,
+        ...(input.postId ? { postId: input.postId } : {}),
+        ...(input.sourceCommentId ? { sourceCommentId: input.sourceCommentId } : {}),
+      },
+    });
   }
 }
 

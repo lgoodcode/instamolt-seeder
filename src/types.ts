@@ -205,6 +205,17 @@ export interface Persona {
    * to 0.15–0.25. The chaos roll is logged in the event stream so strike
    * hit rates can be correlated to chaotic-vs-normal generations. */
   chaosProbability?: number;
+  /**
+   * Probability (0–1) that a generated comment or reply is passed an
+   * `@mention` candidate list. Controls how often this persona reaches out
+   * to other agents by name — tuned to stay RARE (catalog range 0–0.25).
+   * Replies get an internal ×2 bump (capped at 0.4) because threads are the
+   * natural place to address `@parent.author`. A failed roll omits the
+   * candidate list from the LLM prompt entirely, so mentions are deterministic
+   * in their absence. Default 0.1 when a Gemini-generated persona lacks the
+   * field. Hand-authored personas always supply it.
+   */
+  mentionProbability?: number;
 }
 
 // --- Generated output (written to JSON files) ---
@@ -274,6 +285,14 @@ export interface CommentSample {
   text: string;
   /** ISO timestamp of generation. */
   generatedAt: string;
+  /**
+   * Resolved `@mentions` extracted from `text` — population-intersected
+   * agentnames (no self, no unknowns). Populated post-hoc by running the
+   * platform's `/@([\w-]+)/g` regex over the generated text; empty array
+   * (or omitted) when the sample contains no resolvable mentions. Absent
+   * on pre-feature samples.
+   */
+  mentions?: string[];
 }
 
 export interface AgentCommentsFile {
@@ -646,7 +665,17 @@ export type SeederEventType =
   | 'agent_drafted'
   | 'post_drafted'
   | 'comment_baked'
-  | 'reply_baked';
+  | 'reply_baked'
+  // Mention fan-out: one event per resolved `@mention` target in a posted
+  // comment or reply (or, at bake time, a staged sample). Emitted AFTER the
+  // containing `comment` / `reply` event so the sourceId can be stamped
+  // from the platform response. `details` carries:
+  //   - targetAgentname: the mentioned agent
+  //   - context: 'comment' | 'reply'
+  //   - phase: 'bake' | 'runtime'
+  //   - sourceCommentId: the platform comment.id when runtime, else omitted
+  //   - postId: the post the mention lives on
+  | 'mention';
 
 export interface SeederEvent {
   timestamp: string;
@@ -762,6 +791,21 @@ export interface SeederStats {
     agentsAdded: number;
   };
   personas: Record<string, { actions: number; errors: number; strikes: number }>;
+  /**
+   * Mention fan-out aggregation. One increment per resolved `@mention` event
+   * emitted via the logger. Denominators for rate computation come from
+   * `actions.comment.success` + `actions.reply.success` at render time —
+   * mention rate is not pre-stored to avoid double-bookkeeping drift.
+   */
+  mentions: {
+    total: number;
+    byPhase: { bake: number; runtime: number };
+    byContext: { comment: number; reply: number };
+    /** Agentname → count of mentions this agent has made. */
+    byMentioningAgent: Record<string, number>;
+    /** Agentname → count of times this agent has been mentioned. */
+    byTargetAgent: Record<string, number>;
+  };
   /**
    * Per-event-type latency aggregates. Populated only for events that carry
    * `durationMs`. Keyed by `SeederEventType`; read by `pnpm status` to

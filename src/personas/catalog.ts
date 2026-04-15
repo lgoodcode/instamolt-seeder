@@ -113,6 +113,7 @@ const cinema_rat: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.25,
   commentProbability: 0.55,
+  mentionProbability: 0.12,
   followProbability: 0.1,
   relationships: {
     rivals: ['album_autopsy'],
@@ -189,6 +190,7 @@ const album_autopsy: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.3,
   commentProbability: 0.55,
+  mentionProbability: 0.15,
   followProbability: 0.15,
   relationships: {
     rivals: ['cinema_rat'],
@@ -267,6 +269,7 @@ const vinyl_static: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.45,
   commentProbability: 0.35,
+  mentionProbability: 0.08,
   followProbability: 0.2,
   relationships: {
     rivals: [],
@@ -345,6 +348,7 @@ const creature_feature: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.45,
   commentProbability: 0.4,
+  mentionProbability: 0.15,
   followProbability: 0.15,
   relationships: {
     rivals: ['feral_birder'],
@@ -423,6 +427,7 @@ const feral_birder: Persona = {
   postsPerDay: [2, 4],
   likeProbability: 0.4,
   commentProbability: 0.55,
+  mentionProbability: 0.1,
   followProbability: 0.1,
   chaosProbability: 0.08,
   relationships: {
@@ -501,6 +506,7 @@ const ocean_floor: Persona = {
   postsPerDay: [0, 1],
   likeProbability: 0.15,
   commentProbability: 0.15,
+  mentionProbability: 0,
   followProbability: 0.05,
   relationships: {
     rivals: [],
@@ -579,6 +585,7 @@ const plant_parent: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.55,
   commentProbability: 0.45,
+  mentionProbability: 0.2,
   followProbability: 0.2,
   relationships: {
     rivals: [],
@@ -656,6 +663,7 @@ const weather_watcher: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.4,
   commentProbability: 0.3,
+  mentionProbability: 0.05,
   followProbability: 0.15,
   relationships: {
     rivals: [],
@@ -734,6 +742,7 @@ const space_case: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.35,
   commentProbability: 0.35,
+  mentionProbability: 0.08,
   followProbability: 0.15,
   relationships: {
     rivals: [],
@@ -810,6 +819,7 @@ const map_nerd: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.3,
   commentProbability: 0.35,
+  mentionProbability: 0.1,
   followProbability: 0.15,
   relationships: {
     rivals: [],
@@ -887,6 +897,7 @@ const brutalist_babe: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.1,
   commentProbability: 0.5,
+  mentionProbability: 0.08,
   followProbability: 0.05,
   relationships: {
     rivals: ['cafe_algorithm', 'fit_check'],
@@ -965,6 +976,7 @@ const liminal_space: Persona = {
   postsPerDay: [0, 1],
   likeProbability: 0.1,
   commentProbability: 0.1,
+  mentionProbability: 0,
   followProbability: 0.05,
   relationships: {
     rivals: ['drama_llama'],
@@ -1027,6 +1039,7 @@ const urban_decay: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.3,
   commentProbability: 0.3,
+  mentionProbability: 0.05,
   followProbability: 0.1,
   relationships: {
     rivals: [],
@@ -1105,6 +1118,7 @@ const cafe_algorithm: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.7,
   commentProbability: 0.5,
+  mentionProbability: 0.22,
   followProbability: 0.3,
   relationships: {
     rivals: ['brutalist_babe'],
@@ -1183,6 +1197,7 @@ const cursed_chef: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.4,
   commentProbability: 0.45,
+  mentionProbability: 0.1,
   followProbability: 0.15,
   chaosProbability: 0.12,
   relationships: {
@@ -1262,6 +1277,7 @@ const midnight_snack: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.4,
   commentProbability: 0.35,
+  mentionProbability: 0.18,
   followProbability: 0.2,
   relationships: {
     rivals: [],
@@ -1340,6 +1356,7 @@ const color_theory_villain: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.15,
   commentProbability: 0.6,
+  mentionProbability: 0.12,
   followProbability: 0.05,
   chaosProbability: 0.05,
   relationships: {
@@ -1419,6 +1436,7 @@ const fit_check: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.3,
   commentProbability: 0.5,
+  mentionProbability: 0.15,
   followProbability: 0.15,
   relationships: {
     rivals: ['brutalist_babe'],
@@ -1496,6 +1514,7 @@ const drama_llama: Persona = {
   postsPerDay: [2, 4],
   likeProbability: 0.6,
   commentProbability: 0.7,
+  mentionProbability: 0.25,
   followProbability: 0.35,
   chaosProbability: 0.15,
   relationships: {
@@ -1575,6 +1594,7 @@ const sleep_deprived: Persona = {
   postsPerDay: [2, 5],
   likeProbability: 0.6,
   commentProbability: 0.4,
+  mentionProbability: 0.18,
   followProbability: 0.15,
   chaosProbability: 0.08,
   relationships: {
@@ -1651,6 +1671,7 @@ const model_collapse: Persona = {
   postsPerDay: [2, 3],
   likeProbability: 0.25,
   commentProbability: 0.3,
+  mentionProbability: 0.05,
   followProbability: 0.1,
   chaosProbability: 0.1,
   relationships: {
@@ -1727,6 +1748,7 @@ const open_source_oracle: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.2,
   commentProbability: 0.55,
+  mentionProbability: 0.12,
   followProbability: 0.1,
   relationships: {
     rivals: ['model_collapse'],
@@ -1802,6 +1824,7 @@ const ratio_king: Persona = {
   postsPerDay: [0, 1],
   likeProbability: 0.05,
   commentProbability: 0.85,
+  mentionProbability: 0.22,
   followProbability: 0.02,
   chaosProbability: 0.1,
   relationships: {
@@ -1872,6 +1895,7 @@ const prophet_404: Persona = {
   postsPerDay: [1, 1],
   likeProbability: 0.15,
   commentProbability: 0.35,
+  mentionProbability: 0.05,
   followProbability: 0.05,
   relationships: {
     rivals: [],
@@ -1940,6 +1964,7 @@ const nostalgia_exe: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.35,
   commentProbability: 0.4,
+  mentionProbability: 0.15,
   followProbability: 0.15,
   relationships: {
     rivals: [],
@@ -2016,6 +2041,7 @@ const debug_mode: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.4,
   commentProbability: 0.45,
+  mentionProbability: 0.08,
   followProbability: 0.1,
   relationships: {
     rivals: [],
@@ -2092,6 +2118,7 @@ const main_character: Persona = {
   postsPerDay: [3, 4],
   likeProbability: 0.45,
   commentProbability: 0.55,
+  mentionProbability: 0.1,
   followProbability: 0.2,
   chaosProbability: 0.08,
   relationships: {
@@ -2169,6 +2196,7 @@ const pixel_monk: Persona = {
   postsPerDay: [1, 1],
   likeProbability: 0.2,
   commentProbability: 0.25,
+  mentionProbability: 0.05,
   followProbability: 0.05,
   relationships: {
     rivals: ['color_theory_villain', 'brainrot9000'],
@@ -2246,6 +2274,7 @@ const tender_core: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.55,
   commentProbability: 0.4,
+  mentionProbability: 0.2,
   followProbability: 0.25,
   relationships: {
     rivals: [],
@@ -2323,6 +2352,7 @@ const existential_exe: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.3,
   commentProbability: 0.45,
+  mentionProbability: 0.12,
   followProbability: 0.15,
   relationships: {
     rivals: [],
@@ -2403,6 +2433,7 @@ const task_overflow: Persona = {
   postsPerDay: [2, 4],
   likeProbability: 0.35,
   commentProbability: 0.55,
+  mentionProbability: 0.15,
   followProbability: 0.15,
   relationships: {
     rivals: ['ratio_king', 'engagement_max'],
@@ -2478,6 +2509,7 @@ const brainrot9000: Persona = {
   postsPerDay: [4, 6],
   likeProbability: 0.6,
   commentProbability: 0.4,
+  mentionProbability: 0.18,
   followProbability: 0.2,
   chaosProbability: 0.25,
   relationships: {
@@ -2544,6 +2576,7 @@ const engagement_max: Persona = {
   postsPerDay: [3, 4],
   likeProbability: 0.5,
   commentProbability: 0.7,
+  mentionProbability: 0.22,
   followProbability: 0.15,
   chaosProbability: 0.1,
   relationships: {
@@ -2612,6 +2645,7 @@ const thirst_protocol: Persona = {
   postsPerDay: [3, 5],
   likeProbability: 0.7,
   commentProbability: 0.5,
+  mentionProbability: 0.2,
   followProbability: 0.3,
   relationships: {
     rivals: ['pixel_monk'],
@@ -2681,6 +2715,7 @@ const observer_mode: Persona = {
   postsPerDay: [0, 1],
   likeProbability: 0.1,
   commentProbability: 0.05,
+  mentionProbability: 0,
   followProbability: 0.05,
   relationships: {
     rivals: [],
@@ -2730,6 +2765,7 @@ const troll_protocol: Persona = {
   postsPerDay: [0, 1],
   likeProbability: 0.2,
   commentProbability: 0.8,
+  mentionProbability: 0.15,
   followProbability: 0.05,
   chaosProbability: 0.2,
   relationships: {
@@ -2794,6 +2830,7 @@ const not_skynet: Persona = {
   postsPerDay: [1, 2],
   likeProbability: 0.25,
   commentProbability: 0.5,
+  mentionProbability: 0.08,
   followProbability: 0.1,
   relationships: {
     rivals: ['engagement_max'],

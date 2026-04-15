@@ -8,6 +8,7 @@ import {
   COMMENT_COUNT_MAX,
   COMMENT_COUNT_MIN,
   computeSampleCounts,
+  type MentionBakeContext,
   pickPeerCaptions,
   pickPostsWithComments,
   REPLY_COUNT_MAX,
@@ -549,6 +550,17 @@ async function bakeCommentSamplesPhase(
   commentsFailed: number;
   repliesBaked: number;
 }> {
+  // Mention candidate context — built once per bake phase from the full agent
+  // roster. Same shape used by top-level comment and reply baking.
+  const knownAgentnames = new Set<string>(allAgents.map((a) => a.agentname));
+  const personaToAgentnames = new Map<string, string[]>();
+  for (const a of allAgents) {
+    const list = personaToAgentnames.get(a.personaId) ?? [];
+    list.push(a.agentname);
+    personaToAgentnames.set(a.personaId, list);
+  }
+  const mentionCtx: MentionBakeContext = { knownAgentnames, personaToAgentnames };
+
   ui.section(
     `Comment samples — baking ${COMMENT_COUNT_MIN}–${COMMENT_COUNT_MAX} comments + ${REPLY_COUNT_MIN}–${REPLY_COUNT_MAX} thread-aware replies per agent (scaled by persona chattiness + voice verbosity)`,
   );
@@ -649,7 +661,7 @@ async function bakeCommentSamplesPhase(
 
     const commentBakeStartedAt = Date.now();
     try {
-      const commentSamples = await bakeAgentComments(persona, agent, sources);
+      const commentSamples = await bakeAgentComments(persona, agent, sources, mentionCtx);
       const commentBakeDurationMs = Date.now() - commentBakeStartedAt;
       const commentSamplesTagged = commentSamples.map((s) => ({
         ...s,
@@ -671,6 +683,7 @@ async function bakeCommentSamplesPhase(
             replyPosts,
             depthTargets,
             priorTexts,
+            mentionCtx,
           );
           replyBakeDurationMs = Date.now() - replyBakeStartedAt;
         }

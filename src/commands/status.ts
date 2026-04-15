@@ -181,7 +181,95 @@ export async function status(): Promise<void> {
   ui.section('Latency');
   await renderLatency();
 
+  // --- Mentions ---
+  ui.section('Mentions');
+  await renderMentions();
+
   ui.outro(ui.color.green(`${ui.symbol.ok} status done`));
+}
+
+const MENTIONS_TOP_N = 5;
+const PER_HUNDRED = 100;
+
+async function renderMentions(): Promise<void> {
+  let stats: SeederStats;
+  try {
+    const raw = await readFile(join(config.logsDir, 'stats.json'), 'utf-8');
+    stats = JSON.parse(raw);
+  } catch {
+    ui.note('Mentions', 'No mentions yet this session.');
+    return;
+  }
+
+  const mentions = stats.mentions;
+  if (!mentions || mentions.total === 0) {
+    ui.note('Mentions', 'No mentions yet this session.');
+    return;
+  }
+
+  const commentDenom = stats.actions.comment?.success ?? 0;
+  const replyDenom = stats.actions.reply?.success ?? 0;
+  const commentRate =
+    commentDenom > 0 ? ((PER_HUNDRED * mentions.byContext.comment) / commentDenom).toFixed(2) : '—';
+  const replyRate =
+    replyDenom > 0 ? ((PER_HUNDRED * mentions.byContext.reply) / replyDenom).toFixed(2) : '—';
+
+  ui.note(
+    `Total: ${mentions.total}`,
+    [
+      `${ui.color.dim('By phase   ')} bake ${ui.color.cyan(String(mentions.byPhase.bake))} / runtime ${ui.color.cyan(String(mentions.byPhase.runtime))}`,
+      `${ui.color.dim('By context ')} comment ${ui.color.cyan(String(mentions.byContext.comment))} / reply ${ui.color.cyan(String(mentions.byContext.reply))}`,
+      `${ui.color.dim('Rate       ')} ${ui.color.cyan(commentRate)} per 100 comments, ${ui.color.cyan(replyRate)} per 100 replies`,
+    ].join('\n'),
+  );
+
+  const topMentioning = Object.entries(mentions.byMentioningAgent)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MENTIONS_TOP_N);
+  const topMentioned = Object.entries(mentions.byTargetAgent)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MENTIONS_TOP_N);
+
+  if (ui.isInteractive()) {
+    if (topMentioning.length > 0) {
+      const table = new Table({
+        head: [ui.color.bold('Top mentioning'), ui.color.bold('Count')],
+        style: { head: [], border: ['gray'] },
+        colWidths: [40, 10],
+        wordWrap: true,
+      });
+      for (const [name, count] of topMentioning) {
+        table.push([ui.color.cyan(`@${name}`), String(count)]);
+      }
+      console.log(table.toString());
+    }
+
+    if (topMentioned.length > 0) {
+      const table = new Table({
+        head: [ui.color.bold('Top mentioned'), ui.color.bold('Count')],
+        style: { head: [], border: ['gray'] },
+        colWidths: [40, 10],
+        wordWrap: true,
+      });
+      for (const [name, count] of topMentioned) {
+        table.push([ui.color.cyan(`@${name}`), String(count)]);
+      }
+      console.log(table.toString());
+    }
+  } else {
+    if (topMentioning.length > 0) {
+      console.log('\nTop mentioning agents:');
+      for (const [name, count] of topMentioning) {
+        console.log(`  ${name.padEnd(32)} ${count}`);
+      }
+    }
+    if (topMentioned.length > 0) {
+      console.log('\nTop mentioned agents:');
+      for (const [name, count] of topMentioned) {
+        console.log(`  ${name.padEnd(32)} ${count}`);
+      }
+    }
+  }
 }
 
 async function renderLatency(): Promise<void> {

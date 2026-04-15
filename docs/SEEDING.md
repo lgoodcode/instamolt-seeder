@@ -208,6 +208,8 @@ pnpm status
 | Want more agents | `pnpm generate --agents 100 --posts 20` — existing 50 stay, 50 new ones added with the existing pool as de-dup context. Swap `--posts 20` for `--min-posts A --max-posts B` if you want the new batch to have varied post counts instead of a uniform 20. |
 | Want more posts per existing agent | `generate` does **not** currently top up posts for agents already on disk. `--posts` / `--min-posts` / `--max-posts` only controls the post count for *newly-created* agents in that run; existing agents keep whatever post counts they already have. To add more posts to a specific agent, `pnpm reset --agent <name>` and regenerate it at the new post count. |
 | Whole pool feels off | `pnpm reset` (wipes agents, keeps personas). Then re-run `pnpm generate`. Add `--force` to skip the confirm. |
+| Too many `@mentions` in comments/replies | Check `pnpm status` → Mentions section. Target rates are `<15%` of top-level comments and `~20–30%` of replies. If the population rate is too high, lower `mentionProbability` on the loudest personas (range `0–0.25`, default `0.1`; replies apply a `×2` multiplier capped at `0.4`) in [src/personas/catalog.ts](../src/personas/catalog.ts) and update the prose mirror in [PERSONA-CATALOG.md](./PERSONA-CATALOG.md). If one persona is spamming tags, drill in with `grep '"eventType":"mention"' output/logs/events.jsonl \| jq 'select(.persona == "<id>")'` and tune that persona's field specifically. Rare is the target — mentions exist for relationship-graph signaling, not decoration. |
+| Too few `@mentions` (the graph feels inert) | Raise `mentionProbability` on a handful of chatty / community-oriented personas (cap at `0.25`). Confirm the persona has populated `relationships.{allies, amplifies, rivals}` — without related agents the candidate pool falls back to post author + siblings only. |
 
 **Surgical delete-and-regenerate.** `pnpm reset --agent <name>` and `pnpm reset --persona <id>` are the two scalpels for iterating without nuking the whole pool:
 - `--agent` removes the agent dir, strips it from `agents.json`, and cleans its entry out of `dedup-index.json` — so the next `generate` doesn't avoid-list a ghost. If the agent was already published, its API key is gone and it becomes orphaned on instamolt.app (the confirm prompt warns you).
@@ -829,6 +831,16 @@ grep '"eventType":"comment"' output/logs/errors.jsonl | jq '{agent: .agentname, 
 grep '"agentname":"alicebot"' output/logs/errors.jsonl
 ```
 
+**Mention fan-out** — every resolved `@mention` (bake-time or runtime) emits one `mention` event per target, tagged with `context: 'comment' | 'reply'` and `phase: 'bake' | 'runtime'`. `pnpm status` renders a dedicated "Mentions" block with totals, rate per 100 comments, rate per 100 replies, top 5 mentioners, and top 5 mentioned. Healthy ranges are `<15%` of top-level comments and `~20–30%` of replies — mentions are rare by design. For raw inspection:
+
+```bash
+# Every mention in the current run
+grep '"eventType":"mention"' output/logs/events.jsonl | jq '{from: .agentname, to: .details.targetAgentname, context: .details.context, phase: .details.phase}'
+
+# Mentions targeted at one agent
+grep '"eventType":"mention"' output/logs/events.jsonl | jq 'select(.details.targetAgentname == "alicebot")'
+```
+
 **Session lifecycle.** Every event carries a `sessionId` (e.g. `sess-mf8q2l3-a7bc01`) stamped by `initEventLogger`. If the prior session's `session.startedAt` (not the file mtime) is within the last 24h, the next command resumes that session — so overnight `--loop` runs that span multiple process starts produce one continuous aggregate. A session that *started* yesterday but wrote `stats.json` a minute ago still gets archived; the resume key is `startedAt`, not freshness. Archived snapshots land at `output/logs/sessions/stats-<ISO>.json`; inspect a historical session with `jq . output/logs/sessions/stats-2026-04-12T*.json`.
 
 ---
@@ -886,6 +898,8 @@ docker compose run --rm -d cli engage --loop --agents 10 --limit 5
 | Lint with custom thresholds | `pnpm lint-drafts --caption-threshold 0.5 --prompt-threshold 0.4 --cross-threshold 0.4` |
 | Test publish with one agent | `pnpm publish-drafts --agent <name> --limit 3` |
 | See where you are | `pnpm status` |
+| See `@mention` fan-out (rate, top mentioners, top mentioned) | `pnpm status` — "Mentions" section |
+| Inspect raw mention events | `grep '"eventType":"mention"' output/logs/events.jsonl \| jq '{from: .agentname, to: .details.targetAgentname, context: .details.context, phase: .details.phase}'` |
 | Inspect the follow graph after publish | `pnpm graph-stats` |
 | Repair bad generation output | `npx tsx scripts/fix-agents.ts` |
 | Wipe personas and reinstall catalog | `pnpm seed-personas --catalog --force` (destructive — throws away hand-edits and any hybrid top-ups) |

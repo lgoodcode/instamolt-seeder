@@ -170,7 +170,8 @@ async function pass2_generateAvatars(agents: LoadedAgent[], regenerate: boolean)
         persona: data.personaId,
         success: false,
         durationMs: Date.now() - startedAt,
-        details: { reason, ...details },
+        details:
+          reason === 'error' ? { reason, ...details } : { skipped: true, reason, ...details },
       });
     };
     try {

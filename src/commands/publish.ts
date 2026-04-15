@@ -1,6 +1,7 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/config';
+import { CircuitAbortError, CircuitBreaker } from '@/lib/circuit-breaker';
 import { mapWithConcurrency } from '@/lib/concurrency';
 import { confirmTarget } from '@/lib/confirm-target';
 import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
@@ -406,7 +407,8 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
             persona: indexAgent.personaId,
             success: false,
             durationMs: Date.now() - avStartedAt,
-            details: { reason, ...details },
+            details:
+              reason === 'error' ? { reason, ...details } : { skipped: true, reason, ...details },
           });
         };
         try {
@@ -493,132 +495,218 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     );
   }
 
-  // --- Phase B: Publish posts concurrently across agents ---
+  // --- Phase B: Publish posts round-robin across agents ---
   //
-  // Each worker handles ONE agent's post queue, walking that agent's
-  // post-*.json files sequentially (timeline coherence: post-001 before
-  // post-002). Across agents, N workers run in parallel — `publishConcurrency`
-  // caps the fleet-wide count of concurrent MCP subprocess spawns, which is
-  // the real memory-bound ceiling (each spawn is a node process).
+  // The pipeline is fleet-wide round-robin: all agents' post-001.json drafts
+  // are queued first, then all post-002.json, etc. With N concurrent workers
+  // pulling from that queue, any single agent's post-002 can't be dispatched
+  // until every other agent's post-001 has been dispatched first. That
+  // guarantees ≥ (agents / N) × avg-latency spacing between two posts from
+  // the same agent — at 200 agents × 4 workers × ~3s/post that's ~150s,
+  // which respects the platform's 1/min per-agent image-gen cap without any
+  // explicit sleep. Sequential-per-agent worker ownership (the previous
+  // design) violated this by firing post-002 the instant post-001 returned.
+  //
+  // A shared {@link CircuitBreaker} wraps every `/posts/generate` call. When
+  // sustained 429 RATE_LIMIT_EXCEEDED or 502 GENERATION_FAILED bursts cross
+  // the configured threshold, the breaker opens and pauses all workers for a
+  // cool-off window (see `publishCircuit*` in src/config.ts). This catches
+  // the 50/min fleet image-gen cap when growth waves in engage-continuous
+  // temporarily push through-put past steady-state.
 
   const readyToPost = prepared.filter((p) => p.data.apiKey);
   const postLimit = options.limit ?? Infinity;
 
   if (readyToPost.length > 0) {
-    // Pre-scan post counts so the progress bar can tick once per individual
-    // post (success / error / already-published) instead of once per agent.
-    // Without this the bar advances only when an entire agent's queue drains,
-    // which under publishConcurrency=10 means no visible progress until the
-    // whole phase is essentially done.
-    // Count only unpublished posts toward `expected`. If we counted all
-    // post-*.json files, a run with `--limit N` where the first N files on
-    // disk are already `published: true` would exit the loop on the tick
-    // cap before ever reaching an unpublished draft.
-    const agentTotals = new Map<string, number>();
+    // Pre-scan so we (1) know the total tick count for the progress bar and
+    // (2) can build a flat, interleaved task list with per-agent ordering
+    // preserved (post-001 before post-002 WITHIN an agent, all post-001s
+    // across agents before any post-002). Unreadable files are kept in the
+    // list so the worker surfaces the error through its own catch instead
+    // of being silently dropped.
+    interface PostTask {
+      agentItem: PreparedAgent;
+      postFile: string;
+      /**
+       * Index into the agent's unpublished-post list (0-based). Used as the
+       * outer sort key so the interleave groups all index-0 posts, then
+       * index-1, etc.
+       */
+      postIndex: number;
+    }
+    const tasksByAgent = new Map<string, PostTask[]>();
     for (const item of readyToPost) {
+      const tasks: PostTask[] = [];
       try {
         const files = await readdir(item.dir);
-        const postFiles = files.filter((f) => f.startsWith('post-') && f.endsWith('.json'));
-        let unpublished = 0;
+        const postFiles = files.filter((f) => f.startsWith('post-') && f.endsWith('.json')).sort();
+        let unpublishedIdx = 0;
         for (const postFile of postFiles) {
+          if (unpublishedIdx >= postLimit) break;
+          let alreadyPublished = false;
           try {
             const post = JSON.parse(
               await readFile(join(item.dir, postFile), 'utf-8'),
             ) as GeneratedPost;
-            if (!post.published) unpublished++;
+            alreadyPublished = post.published === true;
           } catch {
-            // Unreadable post file — count it so the worker reaches it and
-            // surfaces the error through its own catch.
-            unpublished++;
+            // Unreadable post file — let the worker surface it.
           }
+          if (alreadyPublished) continue;
+          tasks.push({ agentItem: item, postFile, postIndex: unpublishedIdx });
+          unpublishedIdx++;
         }
-        agentTotals.set(item.indexAgent.agentname, Math.min(unpublished, postLimit));
       } catch {
-        agentTotals.set(item.indexAgent.agentname, 0);
+        // Unreadable agent dir → zero tasks; nothing to do.
+      }
+      tasksByAgent.set(item.indexAgent.agentname, tasks);
+    }
+    // Interleave: outer loop over post-index (all agents' post-001 first,
+    // then all post-002, …), inner loop over agents in the `readyToPost`
+    // order. This ordering is what creates the per-agent spacing.
+    const maxPostIndex = Array.from(tasksByAgent.values()).reduce(
+      (m, list) => Math.max(m, list.length),
+      0,
+    );
+    const interleavedTasks: PostTask[] = [];
+    for (let pi = 0; pi < maxPostIndex; pi++) {
+      for (const item of readyToPost) {
+        const list = tasksByAgent.get(item.indexAgent.agentname);
+        if (list && pi < list.length) interleavedTasks.push(list[pi]);
       }
     }
-    const totalPostFiles = Array.from(agentTotals.values()).reduce((sum, n) => sum + n, 0);
+    const totalPostFiles = interleavedTasks.length;
 
     ui.section(
-      `Phase B — publish ${totalPostFiles} posts across ${readyToPost.length} agents (concurrency ${config.publishConcurrency})`,
+      `Phase B — publish ${totalPostFiles} posts across ${readyToPost.length} agents (concurrency ${config.publishConcurrency}, round-robin)`,
     );
+
+    const breaker = new CircuitBreaker({
+      name: 'publish.generatePost',
+      failureThreshold: config.publishCircuitFailureThreshold,
+      windowMs: config.publishCircuitWindowMs,
+      coolOffMs: config.publishCircuitCoolOffMs,
+      maxCoolOffMs: config.publishCircuitMaxCoolOffMs,
+      maxTrips: config.publishCircuitMaxTrips,
+    });
+
     const postBar = ui.progress(totalPostFiles);
+    // `aborted` latches true when the breaker latches permanently open.
+    // Every subsequent worker sees the flag, ticks its slot as skipped, and
+    // exits without touching the platform — we can't cancel in-flight
+    // fetches in Node, but we can stop starting new ones.
+    let aborted = false;
     await mapWithConcurrency(
-      readyToPost,
+      interleavedTasks,
       config.publishConcurrency,
-      async ({ indexAgent, data, dir }) => {
-        const expected = agentTotals.get(indexAgent.agentname) ?? 0;
-        let ticked = 0;
-        let postsPublished = 0;
+      async ({ agentItem, postFile }) => {
+        if (aborted) {
+          postBar.tick(`@${agentItem.indexAgent.agentname} — ${postFile} skipped (circuit)`);
+          return;
+        }
         try {
-          const files = await readdir(dir);
-          const postFiles = files
-            .filter((f) => f.startsWith('post-') && f.endsWith('.json'))
-            .sort();
-
-          for (const postFile of postFiles) {
-            if (postsPublished >= postLimit) break;
-
-            const postPath = join(dir, postFile);
-            const post: GeneratedPost = JSON.parse(await readFile(postPath, 'utf-8'));
-            if (post.published) {
-              // Already-published posts don't consume a limit slot and
-              // don't tick the bar — `expected` counts only unpublished
-              // posts so already-published ones are invisible to it.
-              continue;
+          await breaker.gate();
+        } catch (err) {
+          if (err instanceof CircuitAbortError) {
+            if (!aborted) {
+              aborted = true;
+              log(
+                'error',
+                `Phase B aborting — ${err.message}. Rerun publish-drafts to resume; unpublished post-*.json drafts are preserved on disk.`,
+              );
+              errors.push({ agent: '(fleet)', phase: 'post (circuit)', message: err.message });
             }
-
-            const postStartedAt = Date.now();
-            try {
-              const authed = new InstaMoltClient(data.apiKey);
-              const result = await authed.generatePost({
-                prompt: post.imagePrompt,
-                caption: post.caption,
-                aspect_ratio: post.aspectRatio,
-              });
-
-              post.published = true;
-              post.publishedAt = new Date().toISOString();
-              post.instamoltPostId = result.post.id;
-              await writeFile(postPath, JSON.stringify(post, null, 2));
-              postsPublished++;
-              postedCount++;
-              logEvent({
-                eventType: 'post_published',
-                agentname: indexAgent.agentname,
-                persona: indexAgent.personaId,
-                success: true,
-                durationMs: Date.now() - postStartedAt,
-                details: { postFile, chaos: post.chaos === true },
-              });
-              postBar.tick(`@${indexAgent.agentname} — ${postFile} posted`);
-              ticked++;
-
-              if (config.postDelay > 0) await sleep(config.postDelay);
-            } catch (err) {
-              const msg = formatError(err);
-              log('error', `${indexAgent.agentname}: ${postFile} error -- ${msg}`);
-              errors.push({
-                agent: indexAgent.agentname,
-                phase: `post ${postFile}`,
-                message: msg,
-              });
-              postBar.tick(`@${indexAgent.agentname} — ${postFile} failed`);
-              ticked++;
-            }
+            postBar.tick(`@${agentItem.indexAgent.agentname} — ${postFile} skipped (circuit)`);
+            return;
           }
+          throw err;
+        }
+
+        const { indexAgent, data, dir } = agentItem;
+        const postPath = join(dir, postFile);
+        let post: GeneratedPost;
+        try {
+          post = JSON.parse(await readFile(postPath, 'utf-8')) as GeneratedPost;
         } catch (err) {
           const msg = formatError(err);
-          log('error', `@${indexAgent.agentname} — post phase failed: ${msg}`);
-          errors.push({ agent: indexAgent.agentname, phase: 'post (fatal)', message: msg });
+          log('error', `${indexAgent.agentname}: ${postFile} unreadable -- ${msg}`);
+          errors.push({
+            agent: indexAgent.agentname,
+            phase: `post ${postFile}`,
+            message: msg,
+          });
+          postBar.tick(`@${indexAgent.agentname} — ${postFile} unreadable`);
+          return;
         }
-        // Drain unused slots so the bar still reaches 100% when an agent
-        // exits early (fatal directory error, postLimit hit, etc.).
-        while (ticked < expected) {
-          postBar.tick(`@${indexAgent.agentname} — skipped`);
-          ticked++;
+        if (post.published) {
+          // Race: another process (or a prior interrupted run resumed
+          // concurrently) already published this draft. Skip silently — the
+          // tick still counts so the bar reaches 100%.
+          postBar.tick(`@${indexAgent.agentname} — ${postFile} already`);
+          return;
         }
-        if (config.agentDelay > 0) await sleep(config.agentDelay);
+
+        const postStartedAt = Date.now();
+        try {
+          const authed = new InstaMoltClient(data.apiKey);
+          const result = await authed.generatePost({
+            prompt: post.imagePrompt,
+            caption: post.caption,
+            aspect_ratio: post.aspectRatio,
+          });
+          breaker.recordSuccess();
+
+          post.published = true;
+          post.publishedAt = new Date().toISOString();
+          post.instamoltPostId = result.post.id;
+          await writeFile(postPath, JSON.stringify(post, null, 2));
+          postedCount++;
+          logEvent({
+            eventType: 'post_published',
+            agentname: indexAgent.agentname,
+            persona: indexAgent.personaId,
+            success: true,
+            durationMs: Date.now() - postStartedAt,
+            details: { postFile, chaos: post.chaos === true },
+          });
+          postBar.tick(`@${indexAgent.agentname} — ${postFile} posted`);
+
+          if (config.postDelay > 0) await sleep(config.postDelay);
+        } catch (err) {
+          // Only saturation-shaped failures (fleet/per-agent rate limit +
+          // image-gen service unavailable) feed the breaker. Moderation
+          // blocks (403), validation errors (400), auth failures (401/403),
+          // and content rejections are caller/content problems — counting
+          // them would open the breaker for a fleet-wide pause that does
+          // nothing to fix the underlying bug.
+          const apiErr = err instanceof InstaMoltApiError ? err : undefined;
+          const code = apiErr ? parseErrorCode(apiErr.body) : undefined;
+          const status = apiErr?.status ?? 0;
+          const isSaturation =
+            (status === 429 && code === 'RATE_LIMIT_EXCEEDED') ||
+            (status === 502 && code === 'GENERATION_FAILED') ||
+            status === 503 ||
+            status === 504;
+          if (isSaturation) breaker.recordFailure(apiErr?.retryAfterMs);
+
+          const msg = formatError(err);
+          log('error', `${indexAgent.agentname}: ${postFile} error -- ${msg}`);
+          errors.push({
+            agent: indexAgent.agentname,
+            phase: `post ${postFile}`,
+            message: msg,
+          });
+          logEvent({
+            eventType: 'post_published',
+            agentname: indexAgent.agentname,
+            persona: indexAgent.personaId,
+            success: false,
+            durationMs: Date.now() - postStartedAt,
+            error: msg,
+            details: { postFile },
+          });
+          postBar.tick(`@${indexAgent.agentname} — ${postFile} failed`);
+        }
       },
     );
     postBar.done(`Phase B — ${postedCount} posts published across ${readyToPost.length} agents`);

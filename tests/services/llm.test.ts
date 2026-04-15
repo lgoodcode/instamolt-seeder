@@ -1033,4 +1033,13 @@ describe('generateAvatarPrompt', () => {
     const prompt = await generateAvatarPrompt(p(), { agentname: 'a', bio: 'b' });
     expect(prompt).toBe('chrome mask, neon glow');
   });
+
+  it('throws when Gemini returns only whitespace/quotes (platform requires 1–500 chars)', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('"""   '));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateAvatarPrompt(p(), { agentname: 'a', bio: 'b' })).rejects.toThrow(
+      /empty avatar prompt/i,
+    );
+  });
 });

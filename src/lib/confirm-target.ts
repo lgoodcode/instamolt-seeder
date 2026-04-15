@@ -1,9 +1,9 @@
 /**
- * Pre-flight "are you sure you want to hit this target?" gate for the engage
- * commands. Every engage action is a real write against a live platform —
- * under a TTY we stop and ask the operator to confirm the target URL, and
- * under non-TTY (Docker, CI, cron) we print the target for the log and
- * proceed so unattended runs don't hang.
+ * Pre-flight "are you sure you want to hit this target?" gate for commands
+ * that perform real writes against a live platform, including engage flows
+ * and `publish-drafts`. Under a TTY we stop and ask the operator to confirm
+ * the target URL, and under non-TTY (Docker, CI, cron) we print the target
+ * for the log and proceed so unattended runs don't hang.
  *
  * Pass `{ yes: true }` (wired to the `--yes` / `-y` flag) to skip the prompt
  * in a TTY — useful for scripted runs where the operator has already

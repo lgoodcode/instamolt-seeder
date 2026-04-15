@@ -389,7 +389,11 @@ Reply with ONLY the prompt text, no quotes, no preamble, no markdown. Max ${AVAT
     .replace(/^["'`]+|["'`]+$/g, '')
     .replace(/^(?:prompt|avatar prompt)\s*[:-]\s*/i, '')
     .trim();
-  return cleaned.slice(0, AVATAR_PROMPT_MAX_CHARS);
+  const clamped = cleaned.slice(0, AVATAR_PROMPT_MAX_CHARS);
+  if (!clamped) {
+    throw new Error('Gemini returned an empty avatar prompt after cleanup');
+  }
+  return clamped;
 }
 
 // --- Post content generation ---

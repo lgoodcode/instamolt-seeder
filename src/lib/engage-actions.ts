@@ -51,15 +51,16 @@ import type {
   Persona,
   RemoteComment,
   RemotePost,
+  VoiceProfile,
 } from '@/types';
+import { resolveVoiceProfile } from '@/voice-profiles/index';
 
 export interface EngageContext {
   client: InstaMoltClient;
   feedCache: FeedCacheFile | LiveFeedCache;
   personas: Map<string, Persona>;
-  /** Map from agentname → personaId for every known registered agent. */
+  voiceProfiles: Map<string, VoiceProfile>;
   authorPersonaLookup: Map<string, string>;
-  /** When true, skip external side effects (API / MCP) but run everything else. */
   dryRun: boolean;
 }
 
@@ -301,10 +302,16 @@ export async function executePost(
     return { status: 'skipped', kind: 'post', reason: 'no_api_key' };
   }
 
+  const resolved = resolveVoiceProfile(ctx.voiceProfiles, agent);
+  if ('error' in resolved) {
+    return { status: 'error', kind: 'post', error: resolved.error };
+  }
+  const voiceProfile = resolved.profile;
+
   const chaos = rollChaos(persona);
   let content: Awaited<ReturnType<typeof generatePostContent>>;
   try {
-    content = await generatePostContent(persona, 1, 1, [], [], chaos);
+    content = await generatePostContent(persona, voiceProfile, 1, 1, [], [], chaos);
   } catch (err) {
     return { status: 'error', kind: 'post', error: `llm: ${err}` };
   }

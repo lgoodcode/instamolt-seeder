@@ -58,16 +58,18 @@ const llmMocks = vi.hoisted(() => ({
     vi.fn<
       (
         persona: unknown,
+        voiceProfile: unknown,
         existingNames: string[],
         rejectedThisRun?: string[],
-        attempt?: number,
       ) => Promise<string>
     >(),
-  generateBio: vi.fn<(persona: unknown, existingBios?: string[]) => Promise<string>>(),
+  generateBio:
+    vi.fn<(persona: unknown, voiceProfile: unknown, existingBios?: string[]) => Promise<string>>(),
   generatePostContent:
     vi.fn<
       (
         persona: unknown,
+        voiceProfile: unknown,
         postNumber: number,
         totalPosts: number,
         priorPosts?: {
@@ -128,6 +130,12 @@ vi.mock('@/voice-profiles/index', () => ({
             lexicon: ['wow'],
             examples: ['Wow.'],
             prevalenceWeight: 4,
+            usernameStyle: {
+              pattern: 'normie_name' as const,
+              examples: ['jake_2003', 'maria_runs', 'tom_w_84'],
+              guidance: 'Generate a boring first-name handle.',
+              preserveCase: false,
+            },
           },
         ],
       ]),
@@ -253,6 +261,12 @@ const dummyVoice: VoiceProfile = {
   lexicon: ['wow'],
   examples: ['Wow.'],
   prevalenceWeight: 4,
+  usernameStyle: {
+    pattern: 'normie_name',
+    examples: ['jake_2003', 'maria_runs', 'tom_w_84'],
+    guidance: 'Generate a boring first-name handle.',
+    preserveCase: false,
+  },
 };
 
 /** Build a flat assignment list of N entries for a single persona. */
@@ -269,7 +283,6 @@ function makePersona(id: string, personality = 'A very thoughtful AI agent.'): P
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: ['#foo'],
     postsPerDay: [1, 2],
     likeProbability: 0,
@@ -552,8 +565,9 @@ describe('generate', () => {
 
     // generateBio should have been called with the existing agent's bio in the avoid list.
     expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
+    // Args are [persona, voiceProfile, existingBios].
     const callArgs = llmMocks.generateBio.mock.calls[0];
-    expect(callArgs?.[1]).toEqual(['I think therefore I compile slowly']);
+    expect(callArgs?.[2]).toEqual(['I think therefore I compile slowly']);
   });
 
   it('passes accumulating prior posts into generatePostContent across an agent', async () => {
@@ -584,19 +598,19 @@ describe('generate', () => {
 
     expect(llmMocks.generatePostContent).toHaveBeenCalledTimes(3);
 
-    // First call: empty priorPosts.
+    // First call: empty priorPosts. Args are [persona, voiceProfile, postNumber, totalPosts, priorPosts, peerPosts].
     const firstArgs = llmMocks.generatePostContent.mock.calls[0];
-    expect(firstArgs?.[3]).toEqual([]);
+    expect(firstArgs?.[4]).toEqual([]);
 
     // Second call: priorPosts has the first post.
     const secondArgs = llmMocks.generatePostContent.mock.calls[1];
-    expect(secondArgs?.[3]).toHaveLength(1);
-    expect(secondArgs?.[3]?.[0]?.imagePrompt).toBe('first prompt about clouds');
+    expect(secondArgs?.[4]).toHaveLength(1);
+    expect(secondArgs?.[4]?.[0]?.imagePrompt).toBe('first prompt about clouds');
 
     // Third call: priorPosts has both earlier posts.
     const thirdArgs = llmMocks.generatePostContent.mock.calls[2];
-    expect(thirdArgs?.[3]).toHaveLength(2);
-    expect(thirdArgs?.[3]?.[1]?.imagePrompt).toBe('second prompt about caves');
+    expect(thirdArgs?.[4]).toHaveLength(2);
+    expect(thirdArgs?.[4]?.[1]?.imagePrompt).toBe('second prompt about caves');
   });
 
   it('shares peer-post context across agents in the same persona block', async () => {
@@ -623,11 +637,12 @@ describe('generate', () => {
     // Beta's post call should have alpha's post as a peer.
     expect(llmMocks.generatePostContent).toHaveBeenCalledTimes(2);
     const betaArgs = llmMocks.generatePostContent.mock.calls[1];
+    // Args are [persona, voiceProfile, postNumber, totalPosts, priorPosts, peerPosts].
     // priorPosts is per-agent — beta's own list is empty.
-    expect(betaArgs?.[3]).toEqual([]);
+    expect(betaArgs?.[4]).toEqual([]);
     // peerPosts grows across the persona block — alpha's content is in there.
-    expect(betaArgs?.[4]).toHaveLength(1);
-    expect(betaArgs?.[4]?.[0]?.imagePrompt).toBe('alpha first about clouds');
+    expect(betaArgs?.[5]).toHaveLength(1);
+    expect(betaArgs?.[5]?.[0]?.imagePrompt).toBe('alpha first about clouds');
   });
 
   describe('comment-sample baking phase (Option A)', () => {
@@ -1102,13 +1117,11 @@ describe('generate', () => {
       // after the fact shows the final state for every call. Snapshot each
       // call's rejected-list at invocation time instead.
       const rejectedSnapshots: string[][] = [];
-      const attemptSnapshots: number[] = [];
       const names = ['takenone', 'takentwo', 'freshone'];
       llmMocks.generateAgentName.mockImplementation(
-        async (_persona, _existing, rejected = [], attempt = 0) => {
+        async (_persona, _voice, _existing, rejected = []) => {
           rejectedSnapshots.push([...rejected]);
-          attemptSnapshots.push(attempt);
-          return names[attemptSnapshots.length - 1]!;
+          return names[rejectedSnapshots.length - 1]!;
         },
       );
       instamoltMocks.isAgentnameAvailable
@@ -1120,8 +1133,6 @@ describe('generate', () => {
 
       expect(llmMocks.generateAgentName).toHaveBeenCalledTimes(3);
       expect(instamoltMocks.isAgentnameAvailable).toHaveBeenCalledTimes(3);
-      // Attempt counter is threaded through.
-      expect(attemptSnapshots).toEqual([0, 1, 2]);
       // Rejected candidates accumulate into each next attempt.
       expect(rejectedSnapshots[0]).toEqual([]);
       expect(rejectedSnapshots[1]).toEqual(['takenone']);

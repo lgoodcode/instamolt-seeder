@@ -133,7 +133,6 @@ function makePersona(id: string): Persona {
     visualAesthetic: 'v',
     postingStyle: 'ps',
     commentStyle: 'cs',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [1, 1],
     likeProbability: 0,

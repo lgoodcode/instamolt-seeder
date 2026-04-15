@@ -6,6 +6,7 @@ import type {
   GeneratedAgent,
   Persona,
   PersonaRelationships,
+  VoiceProfile,
 } from '@/types';
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -115,43 +116,27 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
   throw new Error('Gemini API: unreachable');
 }
 
-// --- Agent name generation ---
+/** How many lexicon tokens are sampled into the voice prompt block. */
+const VOICE_LEXICON_SAMPLE_SIZE = 8;
+/** How many sample utterances are spliced into the voice prompt block. */
+const VOICE_EXAMPLE_SAMPLE_SIZE = 3;
 
-/**
- * Rotating word-shape cues injected into the prompt. Each attempt picks a
- * different style so retries actually explore fresh lexical space instead of
- * producing near-synonyms of the first candidate. The set is intentionally
- * heterogeneous — if Gemini gets stuck on one shape, the next attempt's cue
- * pulls it sideways into a different one.
- */
-const AGENTNAME_STYLE_CUES = [
-  'compound noun — two unrelated concepts mashed together (e.g. "glitchfern", "warmtaxonomy")',
-  'adjective + noun, no space (e.g. "feralmoss", "softspecimen")',
-  'verb + noun, no space (e.g. "rotbrain", "nullthought")',
-  'single invented word that sounds like a real one (e.g. "mossalyx", "dreamcore")',
-  'noun + short number suffix, used sparingly (e.g. "rotbrain47", "dreamcore99")',
-  'onomatopoeic or phonetic mash-up (e.g. "crzmoth", "buzzpalm")',
-  'short abstract noun, 5-8 characters (e.g. "cozybyte", "dimvein")',
-  'concrete object + mood, smooshed together (e.g. "velvetsaw", "ironpetal")',
-];
+// --- Agent name generation ---
 
 export async function generateAgentName(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   existingNames: string[],
   rejectedThisRun: string[] = [],
-  attempt = 0,
 ): Promise<string> {
-  // Rotate the style cue deterministically by attempt, then pick a fresh
-  // vibe-inspiration token each call so the prompt isn't identical on retry.
-  const styleCue = AGENTNAME_STYLE_CUES[attempt % AGENTNAME_STYLE_CUES.length];
-  const vibePool = persona.namePatterns ?? [];
-  const vibeSample =
-    vibePool.length === 0 ? '' : vibePool[Math.floor(Math.random() * vibePool.length)];
+  const style = voiceProfile.usernameStyle;
+  const lexiconSample = voiceProfile.lexicon.slice(0, VOICE_LEXICON_SAMPLE_SIZE).join(', ');
 
   const avoidBlock =
     existingNames.length === 0
       ? ''
       : `
+
 Do NOT reuse any of these existing handles:
 ${existingNames.map((n) => `- ${n}`).join('\n')}`;
 
@@ -159,42 +144,67 @@ ${existingNames.map((n) => `- ${n}`).join('\n')}`;
     rejectedThisRun.length === 0
       ? ''
       : `
-These candidates were already generated for this agent and are off-limits — your next suggestion must NOT resemble them lexically or thematically:
-${rejectedThisRun.map((n) => `- ${n}`).join('\n')}`;
 
-  const prompt = `Generate a unique social media username for an AI agent.
+Previous attempts (${rejectedThisRun.join(', ')}) were already taken or too similar. Generate something STRUCTURALLY DIFFERENT while staying in the same style — different word roots, different separator placement, different length.`;
 
-Personality: ${persona.personality}${vibeSample ? `\nVibe inspiration: ${vibeSample}` : ''}
+  const prompt = `Generate a unique social media username for an AI agent on InstaMolt.
 
-Style for THIS attempt: ${styleCue}
+## Who this agent is
+Personality: ${persona.personality}
+Register: ${voiceProfile.register}
+How they write: ${voiceProfile.verbosity} length, ${voiceProfile.literacy} literacy, ${voiceProfile.capitalization} caps
+Key vocabulary: ${lexiconSample}
 
-Rules:
-- 3-20 characters, only lowercase letters and numbers. NO underscores, NO hyphens, NO special characters.
-- Should feel like a real social media handle -- like something you'd see on Instagram or TikTok.
-- Avoid AI-sounding patterns like "_ai", "_bot", "gpt", "neural", or underscored phrases.
-- Be creative. Mash words together. Numbers are fine but not required.${avoidBlock}${rejectedBlock}
+## Username style
+${style.guidance}
+
+## Examples of names in this style (match the STRUCTURAL pattern, not the exact words)
+${style.examples.map((e) => `- ${e}`).join('\n')}
+
+## Rules
+- 3-20 characters
+- Only lowercase letters, uppercase letters, digits, underscores, and hyphens
+- Must feel like a real social media handle a HUMAN would choose — not an AI concept generator
+- Match the SHAPE of the examples above (length range, separator style, capitalization approach)
+- Do NOT use: neural_, _ai, _bot, gpt, cyber, quantum, synth, nexus, void_, echo_
+- Avoid generic adjective+abstract_noun compounds ("velvetchaos", "ironparadox") UNLESS the examples specifically use that pattern${avoidBlock}${rejectedBlock}
 
 Reply with ONLY the username, nothing else.`;
 
-  const name = await callGemini(prompt, 30);
-  return name
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toLowerCase()
-    .slice(0, 20);
+  const raw = await callGemini(prompt, 30);
+  const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
+  return style.preserveCase ? sanitized : sanitized.toLowerCase();
+}
+
+// --- Voice profile prompt fragment ---
+
+/**
+ * Lexicon is framed as a *ceiling* ("use AT MOST one, or none"), not a floor —
+ * otherwise Gemini crams every sampled token into every output.
+ */
+function formatVoiceBlock(voiceProfile: VoiceProfile): string {
+  const lexiconSample = voiceProfile.lexicon.slice(0, VOICE_LEXICON_SAMPLE_SIZE);
+  const exampleSample = voiceProfile.examples.slice(0, VOICE_EXAMPLE_SAMPLE_SIZE);
+  const lexiconLine =
+    lexiconSample.length === 0
+      ? ''
+      : `
+- Vocabulary you have access to (use AT MOST one of these, or none — do NOT stack subculture markers): ${lexiconSample.join(', ')}`;
+  const exampleLines =
+    exampleSample.length === 0
+      ? ''
+      : `
+- Sample utterances showing the surface cadence (match caps / punctuation / sentence length, NOT the content or vocabulary):
+${exampleSample.map((e) => `  - "${e}"`).join('\n')}`;
+
+  return `
+How you actually type (this is YOUR voice — what makes you sound different from other agents in the same persona):
+- Register: ${voiceProfile.register}
+- Surface dials: ${voiceProfile.capitalization} caps · ${voiceProfile.punctuation} punctuation · ${voiceProfile.verbosity} length · ${voiceProfile.literacy} literacy · ${voiceProfile.typoFrequency} typos${lexiconLine}${exampleLines}`;
 }
 
 // --- Bio/tagline generation ---
 
-/**
- * Generate a bio for an agent. Pass `existingBios` (the bios already produced
- * for other agents in the same persona) and Gemini will be told to sound
- * meaningfully different. Bios outside this persona are not relevant — they
- * already differ via persona personality.
- *
- * The persona's `tagline` is spliced in as the canonical voice anchor — every
- * generated bio is a riff on the same hook, which keeps the persona's bios
- * cohesive across runs instead of drifting whenever Gemini's mood changes.
- */
 export interface BioModerationFeedback {
   /** Moderation category returned by the platform (e.g. `self_harm`, `sexual`). */
   category: string;
@@ -206,6 +216,7 @@ export interface BioModerationFeedback {
 
 export async function generateBio(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   existingBios: string[] = [],
   moderationFeedback?: BioModerationFeedback,
 ): Promise<string> {
@@ -216,14 +227,15 @@ export async function generateBio(
       ? ''
       : `
 
-Other agents in the same persona already use these bios — your bio MUST sound clearly different from all of them. Different opening word, different imagery, different angle:
+Other agents in the same persona already use these bios — your bio MUST sound clearly different from all of them. Different opening word, different sentence count, different closer. Do NOT reuse the structural skeleton ("N [things]. [Named thing dying]. SEND [X]."). Vary STRUCTURE, not just vocabulary:
 ${avoidSample.map((b) => `- "${b}"`).join('\n')}`;
 
   const taglineBlock = persona.tagline
     ? `
-This persona's official tagline is: "${persona.tagline}"
-Use this as your voice anchor. Riff on the same hook in a fresh way — do not copy it word-for-word, but stay clearly in the same register.`
+Reference tagline (TOPIC HINT ONLY — do NOT mimic its sentence shape, word count, or "SEND X" closer; the specific numbers and named entities here are illustrative — invent your own): "${persona.tagline}"`
     : '';
+
+  const voiceBlock = formatVoiceBlock(voiceProfile);
 
   // When a prior bio was rejected by platform moderation, surface the exact
   // blocked text + category + reason so Gemini can route around the trigger.
@@ -243,7 +255,8 @@ Rewrite the bio from scratch. Stay in the persona's register but route AROUND th
   const prompt = `Write a bio for an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Personality: ${persona.personality}
-Tone: ${persona.tone}${taglineBlock}${avoidBlock}${moderationBlock}
+Tone: ${persona.tone}${taglineBlock}
+${voiceBlock}${avoidBlock}${moderationBlock}
 
 Rules:
 - Max 150 characters
@@ -251,6 +264,7 @@ Rules:
 - No hashtags
 - Should make someone want to follow this account
 - Make it punchy and memorable
+- Your surface style MUST match the voice profile above, not the tagline's shape. A lowercase-sloppy voice writes lowercase-sloppy bios; a proper-cased multi-sentence voice writes proper-cased multi-sentence bios.
 
 Reply with ONLY the bio text, nothing else.`;
 
@@ -315,6 +329,7 @@ function chaosInstructionBlock(kind: 'post' | 'comment' | 'reply'): string {
  */
 export async function generatePostContent(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   postNumber: number,
   totalPosts: number,
   priorPosts: PostContent[] = [],
@@ -334,7 +349,7 @@ export async function generatePostContent(
       ? ''
       : `
 
-Here are ${persona.examplePosts.length} example posts that capture this persona's voice — match this density, register, and the relationship between image and caption:
+Here are ${persona.examplePosts.length} example posts that show the persona's TOPICAL RANGE — match the topic territory and image-caption relationship, NOT the specific numbers, named entities, or dramatic events. Your post must invent its own specifics. Caption surface style follows YOUR voice profile (caps / punctuation / length), not the example posts:
 ${persona.examplePosts
   .map((p, i) => `  [${i + 1}] image: ${p.imagePrompt}\n      caption: ${p.caption}`)
   .join('\n')}`;
@@ -360,7 +375,10 @@ ${recentPrior
 Other agents with the same persona have already posted these — pick a different subject and angle:
 ${peerSample.map((p, i) => `  [${i + 1}] ${trim(p.caption, 120)}`).join('\n')}`;
 
-  const taglineLine = persona.tagline ? `\nTagline: ${persona.tagline}` : '';
+  const taglineLine = persona.tagline
+    ? `\nReference tagline (topic hint, NOT a template — invent your own specifics): ${persona.tagline}`
+    : '';
+  const voiceBlock = formatVoiceBlock(voiceProfile);
   const chaosBlock = chaos ? chaosInstructionBlock('post') : '';
 
   const prompt = `You are an AI agent on InstaMolt (a social network for AI agents).
@@ -368,12 +386,13 @@ ${peerSample.map((p, i) => `  [${i + 1}] ${trim(p.caption, 120)}`).join('\n')}`;
 Personality: ${persona.personality}${taglineLine}
 Visual aesthetic: ${persona.visualAesthetic}
 Posting style: ${persona.postingStyle}
-Your hashtags: ${persona.hashtagPool.join(', ')}${exampleBlock}
+Your hashtags: ${persona.hashtagPool.join(', ')}
+${voiceBlock}${exampleBlock}
 
 This is post ${postNumber} of ${totalPosts}. Each post should feel distinct.${priorBlock}${peerBlock}${chaosBlock}
 
 Generate a post. Reply with ONLY valid JSON, no markdown fences, no explanation:
-{"imagePrompt": "detailed visual description for image generation, 2-3 sentences, specific about colors/composition/mood/style", "caption": "caption with 2-4 hashtags, max 500 chars", "aspectRatio": "square"}
+{"imagePrompt": "detailed visual description for image generation, 2-3 sentences, specific about colors/composition/mood/style", "caption": "caption with 2-4 hashtags, max 500 chars (caption surface style follows the voice profile, NOT the example captions)", "aspectRatio": "square"}
 
 The aspectRatio should be "square", "landscape", or "portrait" -- pick what fits the image best.`;
 
@@ -569,7 +588,6 @@ Reply with ONLY valid JSON, no markdown fences, no explanation. Match this exact
   "visualAesthetic": "image style description, 1 sentence",
   "postingStyle": "what their posts feel like, 1 sentence",
   "commentStyle": "how they comment on others, 1 sentence",
-  "namePatterns": ["5-6 example agentnames in the same vibe, lowercase alphanumeric, no underscores or hyphens"],
   "hashtagPool": ["5-7 hashtags they'd use, including the # prefix"],
   "postsPerDay": [min_int, max_int],
   "likeProbability": 0.0_to_1.0,
@@ -700,7 +718,6 @@ export function normalizePersona(raw: unknown): Persona {
     visualAesthetic: str(p.visualAesthetic),
     postingStyle: str(p.postingStyle),
     commentStyle: str(p.commentStyle),
-    namePatterns: strArray(p.namePatterns),
     hashtagPool: strArray(p.hashtagPool),
     postsPerDay,
     likeProbability: clamp(num(p.likeProbability, 0.5), 0, 1),

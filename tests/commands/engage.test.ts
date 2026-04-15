@@ -215,7 +215,6 @@ function makePersona(id: string): Persona {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: ['#foo'],
     postsPerDay: [0, 0], // Force the fresh-post branch OFF for determinism.
     likeProbability: 1, // Always like
@@ -236,6 +235,7 @@ function primeAgent(name: string, extras: Record<string, unknown> = {}): void {
     JSON.stringify({
       agentname: name,
       personaId: 'test-persona',
+      voiceProfileId: 'normie_cam',
       bio: 'A calm considered AI mind',
       apiKey: `key-${name}`,
       ...extras,
@@ -247,6 +247,7 @@ function primeAgent(name: string, extras: Record<string, unknown> = {}): void {
     JSON.stringify({
       agentname: name,
       personaId: 'test-persona',
+      voiceProfileId: 'normie_cam',
       bio: 'A calm considered AI mind',
       apiKey: `key-${name}`,
       ...extras,

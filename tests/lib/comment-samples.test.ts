@@ -50,6 +50,12 @@ function makeVoiceProfile(
     lexicon: [],
     examples: [],
     prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'witty_observer',
+      examples: ['Reluctant_Squid', 'PanicHamster'],
+      guidance: 'test',
+      preserveCase: true,
+    },
     ...overrides,
   };
 }
@@ -63,7 +69,6 @@ function makePersona(id = 'test'): Persona {
     visualAesthetic: 'v',
     postingStyle: 'ps',
     commentStyle: 'cs',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [1, 1],
     likeProbability: 0,

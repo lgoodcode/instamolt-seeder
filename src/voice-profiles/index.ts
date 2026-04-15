@@ -1,4 +1,4 @@
-import type { VoiceProfile } from '@/types';
+import type { GeneratedAgent, VoiceProfile } from '@/types';
 import { VOICE_PROFILE_CATALOG } from './catalog';
 
 /**
@@ -11,4 +11,17 @@ export function loadVoiceProfiles(): Map<string, VoiceProfile> {
     map.set(profile.id, profile);
   }
   return map;
+}
+
+export type ResolvedVoiceProfile = { profile: VoiceProfile } | { error: string };
+
+export function resolveVoiceProfile(
+  map: Map<string, VoiceProfile>,
+  agent: Pick<GeneratedAgent, 'agentname' | 'voiceProfileId'>,
+): ResolvedVoiceProfile {
+  const profile = map.get(agent.voiceProfileId);
+  if (profile) return { profile };
+  return {
+    error: `Voice profile "${agent.voiceProfileId}" not found for ${agent.agentname}`,
+  };
 }

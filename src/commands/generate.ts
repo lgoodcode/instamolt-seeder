@@ -43,6 +43,7 @@ import type {
   GeneratedAgent,
   GeneratedPost,
   Persona,
+  VoiceProfile,
 } from '@/types';
 import { loadVoiceProfiles } from '@/voice-profiles/index';
 
@@ -56,6 +57,12 @@ import { loadVoiceProfiles } from '@/voice-profiles/index';
  */
 const BIO_PROMPT_SAMPLE_K = 12;
 const PEER_POST_PROMPT_SAMPLE_K = 6;
+
+const MIN_BIO_WORD_COUNT = 3;
+
+function wordCount(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
+}
 
 /**
  * Similarity threshold above which a freshly-generated post is considered
@@ -216,7 +223,12 @@ export async function generate(
             (n) => n,
             AGENTNAME_PROMPT_SAMPLE_K,
           );
-          const candidate = await generateAgentName(persona, avoidSample, rejectedThisRun, attempt);
+          const candidate = await generateAgentName(
+            persona,
+            spec.voiceProfile,
+            avoidSample,
+            rejectedThisRun,
+          );
 
           if (!candidate || candidate.length < 3) {
             rejectedThisRun.push(candidate || '<empty>');
@@ -261,14 +273,13 @@ export async function generate(
           (b) => b,
           BIO_PROMPT_SAMPLE_K,
         );
-        let bio = await generateBio(persona, personaBiosSnapshot);
+        let bio = await generateBio(persona, spec.voiceProfile, personaBiosSnapshot);
 
         // Guarantee bio has at least 3 words; retry once, then fall back to persona.personality.
-        const wordCount = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
-        if (wordCount(bio) < 3) {
-          bio = await generateBio(persona, personaBiosSnapshot);
+        if (wordCount(bio) < MIN_BIO_WORD_COUNT) {
+          bio = await generateBio(persona, spec.voiceProfile, personaBiosSnapshot);
         }
-        if (wordCount(bio) < 3) {
+        if (wordCount(bio) < MIN_BIO_WORD_COUNT) {
           const match = persona.personality.match(/^[^.!?]+[.!?]/);
           const fallback = (match ? match[0] : persona.personality).trim().slice(0, 150);
           log('warn', `  ${agentname}: bio too short, using personality fallback`);
@@ -315,6 +326,7 @@ export async function generate(
           );
           const content = await generatePostWithSimilarityGate(
             persona,
+            spec.voiceProfile,
             p,
             postsForAgent,
             [...priorPosts],
@@ -713,6 +725,7 @@ async function bakeCommentSamplesPhase(
  */
 async function generatePostWithSimilarityGate(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   postNumber: number,
   totalPosts: number,
   priorPosts: PostContent[],
@@ -725,6 +738,7 @@ async function generatePostWithSimilarityGate(
   if (chaos) {
     const candidate = await generatePostContent(
       persona,
+      voiceProfile,
       postNumber,
       totalPosts,
       priorPosts,
@@ -742,6 +756,7 @@ async function generatePostWithSimilarityGate(
   for (let attempt = 0; attempt < MAX_POST_ATTEMPTS; attempt++) {
     const candidate = await generatePostContent(
       persona,
+      voiceProfile,
       postNumber,
       totalPosts,
       priorPosts,

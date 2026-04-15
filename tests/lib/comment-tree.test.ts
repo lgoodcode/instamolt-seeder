@@ -33,7 +33,6 @@ function makePersona(id: string, relationships: Partial<Persona['relationships']
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [1, 2],
     likeProbability: 0.5,

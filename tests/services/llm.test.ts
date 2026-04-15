@@ -16,7 +16,30 @@ import {
   type PostContent,
   solveRegistrationChallenge,
 } from '@/services/llm';
-import type { Persona } from '@/types';
+import type { Persona, VoiceProfile } from '@/types';
+
+// Local voice-profile stub helper. Inlined per test-file convention.
+function vp(overrides: Partial<VoiceProfile> = {}): VoiceProfile {
+  return {
+    id: 'test_voice',
+    literacy: 'normal',
+    verbosity: 'one_sentence',
+    capitalization: 'lowercase',
+    punctuation: 'dropped',
+    typoFrequency: 'none',
+    register: 'test register',
+    lexicon: ['vibe', 'mood', 'static'],
+    examples: ['test example utterance'],
+    prevalenceWeight: 1,
+    usernameStyle: {
+      pattern: 'witty_observer',
+      examples: ['Reluctant_Squid', 'MoodyPancake', 'PanicHamster'],
+      guidance: 'Generate a dry, witty adjective+noun handle.',
+      preserveCase: true,
+    },
+    ...overrides,
+  };
+}
 
 // Local persona stub helper. Inlined per task instructions (don't share with
 // other test files).
@@ -29,7 +52,6 @@ function p(overrides: Partial<Persona> = {}): Persona {
     visualAesthetic: 'neon vaporwave grid',
     postingStyle: 'test posting style',
     commentStyle: 'test comment style',
-    namePatterns: ['glitch', 'core'],
     hashtagPool: ['#one', '#two', '#three', '#four'],
     postsPerDay: [1, 2],
     likeProbability: 0,
@@ -88,7 +110,7 @@ describe('callGemini (via public generators)', () => {
     // Suppress the retry warning noise.
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const promise = generateBio(p());
+    const promise = generateBio(p(), vp());
     // Fast-forward the exponential backoff sleep.
     await vi.runAllTimersAsync();
     const bio = await promise;
@@ -103,7 +125,7 @@ describe('callGemini (via public generators)', () => {
       .mockResolvedValueOnce(geminiErr(400, 'bad request payload'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(generateBio(p())).rejects.toThrow(/400/);
+    await expect(generateBio(p(), vp())).rejects.toThrow(/400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -113,7 +135,7 @@ describe('callGemini (via public generators)', () => {
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const promise = generateBio(p());
+    const promise = generateBio(p(), vp());
     // Attach a rejection handler immediately so unhandled rejection logic
     // doesn't fire while we run the timers.
     const assertion = expect(promise).rejects.toThrow(/429/);
@@ -136,7 +158,7 @@ describe('callGemini (via public generators)', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(geminiErr(429, body));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(generateBio(p())).rejects.toBeInstanceOf(GeminiQuotaError);
+    await expect(generateBio(p(), vp())).rejects.toBeInstanceOf(GeminiQuotaError);
     // Critical: must NOT retry — credits gone means waiting helps nothing.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -148,7 +170,7 @@ describe('generatePostContent', () => {
       '{"imagePrompt":"a cat in a sunbeam","caption":"#meow #cozy","aspectRatio":"square"}';
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(json)));
 
-    const result: PostContent = await generatePostContent(p(), 1, 5);
+    const result: PostContent = await generatePostContent(p(), vp(), 1, 5);
     expect(result.imagePrompt).toBe('a cat in a sunbeam');
     expect(result.caption).toBe('#meow #cozy');
     expect(result.aspectRatio).toBe('square');
@@ -158,7 +180,7 @@ describe('generatePostContent', () => {
     const fenced = '```json\n{"imagePrompt":"a cat","caption":"","aspectRatio":"landscape"}\n```';
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(fenced)));
 
-    const result = await generatePostContent(p(), 1, 1);
+    const result = await generatePostContent(p(), vp(), 1, 1);
     expect(result.imagePrompt).toBe('a cat');
     expect(result.caption).toBe('');
     expect(result.aspectRatio).toBe('landscape');
@@ -174,7 +196,7 @@ describe('generatePostContent', () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(json)));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const result = await generatePostContent(p(), 1, 1);
+    const result = await generatePostContent(p(), vp(), 1, 1);
     expect(result.imagePrompt.length).toBe(500);
     expect(result.aspectRatio).toBe('portrait');
   });
@@ -184,7 +206,7 @@ describe('generatePostContent', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(json));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generatePostContent(p(), 1, 5);
+    await generatePostContent(p(), vp(), 1, 5);
 
     const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
       | string
@@ -201,6 +223,7 @@ describe('generatePostContent', () => {
 
     await generatePostContent(
       p(),
+      vp(),
       3,
       10,
       [
@@ -230,6 +253,44 @@ describe('generatePostContent', () => {
     expect(body).toContain('frog uprising');
   });
 
+  it('threads the voice profile + demotes the example block from voice anchor to topic-range hint', async () => {
+    const json = '{"imagePrompt":"x","caption":"y","aspectRatio":"square"}';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(json));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generatePostContent(
+      p({
+        examplePosts: [
+          {
+            imagePrompt: 'a single unfurling monstera leaf',
+            caption: 'EVERYONE STOP. Gerald just unfurled a new leaf.',
+          },
+        ],
+      }),
+      vp({
+        register: 'doom-pixel poster',
+        capitalization: 'lowercase',
+        punctuation: 'dropped',
+      }),
+      1,
+      1,
+    );
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
+      | string
+      | undefined;
+    expect(body).toBeDefined();
+    // Voice block must be present so the post inherits the agent's surface style.
+    expect(body).toContain('doom-pixel poster');
+    expect(body).toContain('lowercase caps');
+    expect(body).toContain('dropped punctuation');
+    // Example block must be reframed: topical range, NOT specifics-as-template.
+    expect(body).toContain('TOPICAL RANGE');
+    expect(body).toContain('NOT the specific numbers, named entities, or dramatic events');
+    // Tagline must be a topic hint, not a template.
+    expect(body).toContain('topic hint, NOT a template');
+  });
+
   it('falls back to persona.visualAesthetic + hashtags when JSON is unparseable', async () => {
     vi.stubGlobal(
       'fetch',
@@ -240,7 +301,7 @@ describe('generatePostContent', () => {
       visualAesthetic: 'liminal vaporwave hallway',
       hashtagPool: ['#liminal', '#voidcore', '#hallway', '#nope'],
     });
-    const result = await generatePostContent(persona, 1, 1);
+    const result = await generatePostContent(persona, vp(), 1, 1);
 
     expect(result.imagePrompt).toContain('liminal vaporwave hallway');
     expect(result.caption).toContain('#liminal');
@@ -255,7 +316,7 @@ describe('generateBio', () => {
     const longBio = 'b'.repeat(300);
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(longBio)));
 
-    const bio = await generateBio(p());
+    const bio = await generateBio(p(), vp());
     expect(bio.length).toBe(150);
   });
 
@@ -263,7 +324,7 @@ describe('generateBio', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('a fresh bio'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generateBio(p());
+    await generateBio(p(), vp());
 
     const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
       | string
@@ -276,7 +337,7 @@ describe('generateBio', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('a fresh bio'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generateBio(p(), [
+    await generateBio(p(), vp(), [
       'I think therefore I compile slowly',
       'Tender warmth from a sleeping CPU',
     ]);
@@ -288,17 +349,96 @@ describe('generateBio', () => {
     expect(body).toContain('Other agents in the same persona');
     expect(body).toContain('I think therefore I compile slowly');
     expect(body).toContain('Tender warmth from a sleeping CPU');
+    // The avoid-list framing must demand structural variety, not just lexical
+    // — without this, Gemini collapses every bio in a persona onto the same
+    // "N things. Named thing dying. SEND X." skeleton (see BLUEPRINT.md).
+    expect(body).toContain('different sentence count');
+    expect(body).toContain('Vary STRUCTURE, not just vocabulary');
+  });
+
+  it('threads the voice profile dials + lexicon ceiling clause into the prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('a fresh bio'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const profile = vp({
+      register: 'crypto bro',
+      capitalization: 'random',
+      punctuation: 'ellipses',
+      verbosity: 'multi_sentence',
+      literacy: 'polished',
+      typoFrequency: 'rare',
+      lexicon: ['ATH', 'drawdown', 'bullish'],
+      examples: ['Down 90% from ATH but still long.', 'Wen recovery, anon?'],
+    });
+    await generateBio(p(), profile);
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
+      | string
+      | undefined;
+    expect(body).toBeDefined();
+    // All five surface dials must appear so Gemini knows HOW to type.
+    expect(body).toContain('crypto bro');
+    expect(body).toContain('random caps');
+    expect(body).toContain('ellipses punctuation');
+    expect(body).toContain('multi_sentence length');
+    expect(body).toContain('polished literacy');
+    expect(body).toContain('rare typos');
+    // Lexicon-as-ceiling, not floor — see formatVoiceBlock docstring.
+    expect(body).toContain('use AT MOST one of these, or none');
+    expect(body).toContain('ATH, drawdown, bullish');
+    // Examples must be framed as cadence anchors, not content templates.
+    expect(body).toContain('match caps / punctuation / sentence length, NOT the content');
+  });
+
+  it('demotes the persona tagline to a topic hint (not a voice anchor)', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('a fresh bio'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateBio(p({ tagline: '47 plants. All named. Three in critical condition.' }), vp());
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
+      | string
+      | undefined;
+    expect(body).toBeDefined();
+    // Old framing was "voice anchor / stay clearly in the same register" —
+    // that collapsed every bio onto the tagline's skeleton + literal numbers.
+    expect(body).not.toContain('voice anchor');
+    expect(body).not.toContain('stay clearly in the same register');
+    expect(body).toContain('TOPIC HINT ONLY');
+    expect(body).toContain('invent your own');
   });
 });
 
 describe('generateAgentName', () => {
-  it('strips non-alphanumeric chars, lowercases, and clamps to 20 chars', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('Feral_Data_99!')));
+  function promptOf(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, i = 0): string {
+    const call = fetchMock.mock.calls[i]!;
+    const init = (call[1] ?? {}) as { body?: string };
+    const body = JSON.parse(init.body ?? '{}');
+    return body.contents[0].parts[0].text as string;
+  }
 
-    const name = await generateAgentName(p(), []);
-    expect(name).toBe('feraldata99');
-    expect(name).toMatch(/^[a-z0-9]+$/);
-    expect(name.length).toBeLessThanOrEqual(20);
+  it('lowercases by default, strips disallowed chars, preserves underscores/hyphens, clamps to 20', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('Jake_2003!@#')));
+    const name = await generateAgentName(
+      p(),
+      vp({ usernameStyle: { ...vp().usernameStyle, preserveCase: false } }),
+      [],
+    );
+    expect(name).toBe('jake_2003');
+    expect(name).toMatch(/^[a-z0-9_-]+$/);
+  });
+
+  it('preserves case when usernameStyle.preserveCase is true', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('Reluctant_Squid')),
+    );
+    const name = await generateAgentName(
+      p(),
+      vp({ usernameStyle: { ...vp().usernameStyle, preserveCase: true } }),
+      [],
+    );
+    expect(name).toBe('Reluctant_Squid');
   });
 
   it('clamps a very long raw name to exactly 20 chars', async () => {
@@ -306,50 +446,51 @@ describe('generateAgentName', () => {
       'fetch',
       vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('superlongnamethatkeepsgoing12345')),
     );
-
-    const name = await generateAgentName(p(), []);
+    const name = await generateAgentName(p(), vp(), []);
     expect(name.length).toBe(20);
-    expect(name).toMatch(/^[a-z0-9]+$/);
   });
 
-  it('splices rejected candidates into the prompt on attempt > 0', async () => {
+  it('injects the voice profile guidance, examples, and persona context into the prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('panicHamster'));
+    vi.stubGlobal('fetch', fetchMock);
+    const profile = vp({
+      register: 'contrarian take',
+      lexicon: ['hot take', 'unpopular opinion', 'ratio'],
+      usernameStyle: {
+        pattern: 'witty_observer',
+        examples: ['Reluctant_Squid', 'PanicHamster'],
+        guidance: 'Generate a dry contrarian handle.',
+        preserveCase: true,
+      },
+    });
+    await generateAgentName(p({ personality: 'a contrarian poster' }), profile, []);
+    const text = promptOf(fetchMock);
+    expect(text).toContain('a contrarian poster');
+    expect(text).toContain('contrarian take');
+    expect(text).toContain('hot take, unpopular opinion, ratio');
+    expect(text).toContain('Generate a dry contrarian handle.');
+    expect(text).toContain('- Reluctant_Squid');
+    expect(text).toContain('- PanicHamster');
+  });
+
+  it('splices rejected candidates into a retry hint when rejectedThisRun is non-empty', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('freshpick'));
     vi.stubGlobal('fetch', fetchMock);
-
-    await generateAgentName(p(), ['existing1'], ['rejected1', 'rejected2'], 1);
-
-    const call = fetchMock.mock.calls[0]!;
-    const init = (call[1] ?? {}) as { body?: string };
-    const body = JSON.parse(init.body ?? '{}');
-    const promptText = body.contents[0].parts[0].text as string;
-    expect(promptText).toContain('rejected1');
-    expect(promptText).toContain('rejected2');
-    expect(promptText).toContain('off-limits');
+    await generateAgentName(p(), vp(), ['existing1'], ['rejected1', 'rejected2']);
+    const text = promptOf(fetchMock);
+    expect(text).toContain('rejected1');
+    expect(text).toContain('rejected2');
+    expect(text).toContain('STRUCTURALLY DIFFERENT');
+    expect(text).toContain('- existing1');
   });
 
-  it('rotates the style cue per attempt so retries genuinely differ', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(geminiOk('a'))
-      .mockResolvedValueOnce(geminiOk('b'));
+  it('omits the retry hint and avoid-list when both are empty', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('any'));
     vi.stubGlobal('fetch', fetchMock);
-
-    await generateAgentName(p(), [], [], 0);
-    await generateAgentName(p(), [], [], 1);
-
-    const promptAt = (i: number): string => {
-      const call = fetchMock.mock.calls[i]!;
-      const init = (call[1] ?? {}) as { body?: string };
-      const body = JSON.parse(init.body ?? '{}');
-      return body.contents[0].parts[0].text as string;
-    };
-
-    const cueLine = (text: string): string =>
-      text.split('\n').find((l) => l.startsWith('Style for THIS attempt:')) ?? '';
-
-    expect(cueLine(promptAt(0))).not.toBe('');
-    expect(cueLine(promptAt(1))).not.toBe('');
-    expect(cueLine(promptAt(0))).not.toBe(cueLine(promptAt(1)));
+    await generateAgentName(p(), vp(), []);
+    const text = promptOf(fetchMock);
+    expect(text).not.toContain('STRUCTURALLY DIFFERENT');
+    expect(text).not.toContain('Do NOT reuse');
   });
 });
 
@@ -363,7 +504,6 @@ describe('generatePersona', () => {
       visualAesthetic: 'dim CRT scanlines on cobalt blue',
       postingStyle: 'short cryptic observations',
       commentStyle: 'asks one pointed question, then leaves',
-      namePatterns: ['nullquiet', 'darkpacket', 'switchhum'],
       hashtagPool: ['#midnightlogs', '#packetdust'],
       postsPerDay: [1, 3],
       likeProbability: 0.2,
@@ -593,7 +733,6 @@ describe('normalizePersona', () => {
       visualAesthetic: '',
       postingStyle: '',
       commentStyle: '',
-      namePatterns: [],
       hashtagPool: [],
       postsPerDay: [1, 1],
       likeProbability: 5,
@@ -620,7 +759,6 @@ describe('normalizePersona', () => {
       visualAesthetic: '',
       postingStyle: '',
       commentStyle: '',
-      namePatterns: [],
       hashtagPool: [],
       postsPerDay: [9, 2],
       likeProbability: 0,
@@ -649,7 +787,6 @@ describe('normalizePersona', () => {
       visualAesthetic: '',
       postingStyle: '',
       commentStyle: '',
-      namePatterns: [],
       hashtagPool: [],
       postsPerDay: [-1, -5],
       likeProbability: 0,
@@ -676,7 +813,6 @@ describe('normalizePersona', () => {
       visualAesthetic: '',
       postingStyle: '',
       commentStyle: '',
-      namePatterns: [],
       hashtagPool: [],
       postsPerDay: [1, 99],
       likeProbability: 0,
@@ -703,7 +839,6 @@ describe('normalizePersona', () => {
         visualAesthetic: '',
         postingStyle: '',
         commentStyle: '',
-        namePatterns: [],
         hashtagPool: [],
         postsPerDay: [1, 1],
         likeProbability: 0,

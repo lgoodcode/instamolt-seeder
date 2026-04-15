@@ -96,7 +96,6 @@ function makePersona(id: string, weight = 1) {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [1, 3],
     likeProbability: 0.5,

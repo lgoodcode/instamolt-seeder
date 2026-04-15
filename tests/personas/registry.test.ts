@@ -14,7 +14,6 @@ function stub(id: string, weight = 1): Persona {
     visualAesthetic: '',
     postingStyle: '',
     commentStyle: '',
-    namePatterns: [],
     hashtagPool: [],
     postsPerDay: [1, 2],
     likeProbability: 0,
@@ -127,6 +126,12 @@ function voiceStub(id: string, prevalenceWeight = 2): VoiceProfile {
     lexicon: ['test'],
     examples: ['test.'],
     prevalenceWeight,
+    usernameStyle: {
+      pattern: 'witty_observer',
+      examples: ['Reluctant_Squid', 'PanicHamster'],
+      guidance: 'test',
+      preserveCase: true,
+    },
   };
 }
 

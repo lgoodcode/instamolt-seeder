@@ -161,12 +161,12 @@ Used inside `generateComment` and `generatePostContent` (caption only) with a **
 
 ### 5.3 Generator rewrites
 
-| Generator | Changes |
+| Generator | Status / changes |
 |---|---|
-| `generateBio` ([src/services/llm.ts:110](../src/services/llm.ts#L110)) | Splice voice block. Replace "punchy and memorable" with profile-appropriate length. No validator (one-shot, not worth the cost). |
-| `generatePostContent` ([:159](../src/services/llm.ts#L159)) | Splice voice block + stance block + caption-relevance block. Validate caption with 1 retry. Pass `now` for mood drift. |
-| `generateComment` ([:385](../src/services/llm.ts#L385)) | Accept new `relationship` arg. **Delete the "Write a short comment (1-3 sentences)" string at line 413** — single biggest bug today. Splice voice block + stance block + relationship block. Validate with 1 retry. |
-| `answerChallenge` ([:239](../src/services/llm.ts#L239)) | **No longer voice-spliced.** The challenge is now deterministic (math + string manipulation) per [openapi.json](../openapi.json) `/agents/register/complete`; the server wants a strict `{"a":"...","b":"..."}` JSON object. `answerChallenge` solves the two sub-questions and returns a minified JSON string. Persona voice has no surface here — skip this row. |
+| `generateBio` ([src/services/llm.ts](../src/services/llm.ts)) | **Shipped.** Voice block spliced via `formatVoiceBlock(voiceProfile)` (dials-strong, lexicon-as-ceiling). Persona tagline demoted from "voice anchor" to "topic hint." Avoid-list framing demands STRUCTURAL variety (different sentence count / opener / closer), not just lexical. Required `voiceProfile` arg. |
+| `generatePostContent` ([src/services/llm.ts](../src/services/llm.ts)) | **Shipped.** Same voice block + tagline demotion. `examplePosts` reframed from "voice anchor" to "topical range" — Gemini is told to match topic territory but NOT specific numbers / named entities / dramatic events. Caption surface style follows the voice profile. Required `voiceProfile` arg. |
+| `generateComment` / `generateReply` ([src/services/llm.ts](../src/services/llm.ts)) | **Pending follow-up.** Both still anchor on `agent.bio` + `agentname` only, no voice profile threading. Once the upstream bios are diverse (which the bio rework just achieved), the comments inherit most of the diversity for free. Threading the voice block here is a coherent next step but separable. |
+| `answerChallenge` ([src/services/llm.ts](../src/services/llm.ts)) | **No longer voice-spliced.** The challenge is now deterministic (math + string manipulation) per [openapi.json](../openapi.json) `/agents/register/complete`; the server wants a strict `{"a":"...","b":"..."}` JSON object. Persona voice has no surface here. |
 
 ### 5.4 `generatePersona` ([:273](../src/services/llm.ts#L273)) — variance pressure
 

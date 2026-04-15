@@ -21,6 +21,53 @@ export type Capitalization = 'proper' | 'lowercase' | 'allcaps' | 'random';
 export type Punctuation = 'proper' | 'dropped' | 'excessive' | 'ellipses' | 'minimal';
 export type TypoFrequency = 'none' | 'rare' | 'occasional' | 'frequent';
 
+/**
+ * Structural shape of an agent's username. Each voice profile picks one
+ * `UsernamePattern` and supplies 5–8 concrete examples + a guidance string.
+ * The pattern is a coarse taxonomy; the per-profile examples + guidance
+ * carry the actual stylistic load. See `VoiceProfile.usernameStyle` and
+ * the curated reference at `docs/USERNAME-REFERENCE.md`.
+ */
+export type UsernamePattern =
+  | 'witty_observer'
+  | 'ironic_self_deprecating'
+  | 'mock_professional'
+  | 'puns_wordplay'
+  | 'absurdist_action'
+  | 'food_mashup'
+  | 'dark_moody'
+  | 'meme_reference'
+  | 'brainrot_ironic'
+  | 'normie_name'
+  | 'lowercase_aesthetic'
+  | 'vintage_nostalgic'
+  | 'compound_concept'
+  | 'tech_startup'
+  | 'niche_sports'
+  | 'niche_stan'
+  | 'unhinged_allcaps'
+  | 'minimal_clean';
+
+/**
+ * Per-voice-profile username generation config. Drives the prompt sent to
+ * Gemini in `generateAgentName`. The pattern is the high-level shape; the
+ * examples are the few-shot anchors; the guidance is a 1–2 sentence
+ * persona-specific instruction; preserveCase controls whether the
+ * sanitizer lowercases the result.
+ */
+export interface UsernameStyle {
+  pattern: UsernamePattern;
+  /** 5–8 concrete examples. Each MUST pass `/^[a-zA-Z0-9_-]+$/` and be 3–20 chars. */
+  examples: string[];
+  /** 1–2 sentence instruction injected into the agentname prompt. Reference
+   * the SPECIFIC profile's personality, not just the pattern. */
+  guidance: string;
+  /** When true, mixed/upper case from Gemini is preserved (for ALLCAPS,
+   * MockProfessional, MixedCase witty observers, etc.). When false, the
+   * result is lowercased — the default for anonymous-platform handles. */
+  preserveCase: boolean;
+}
+
 export interface VoiceProfile {
   id: string;
   literacy: Literacy;
@@ -33,6 +80,10 @@ export interface VoiceProfile {
   examples: string[];
   /** Distribution weight: higher = more common in the agent population. */
   prevalenceWeight: number;
+  /** Username generation config — required. Determines the structural
+   * shape, examples, and case-preservation of the agentname produced by
+   * `generateAgentName` for any agent assigned this voice profile. */
+  usernameStyle: UsernameStyle;
 }
 
 // --- Persona (loaded from output/personas/*.json at runtime, or from the
@@ -103,7 +154,6 @@ export interface Persona {
   visualAesthetic: string;
   postingStyle: string;
   commentStyle: string;
-  namePatterns: string[];
   hashtagPool: string[];
   postsPerDay: [min: number, max: number];
   likeProbability: number;

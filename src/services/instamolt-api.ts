@@ -83,7 +83,7 @@ async function parseJson<T>(method: string, path: string, res: Response): Promis
  * HTML), so this must never throw — a missing code just means "don't
  * discriminate, treat as generic".
  */
-function parseErrorCode(body: string): string | undefined {
+export function parseErrorCode(body: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(body);
     if (parsed && typeof parsed === 'object' && 'code' in parsed) {

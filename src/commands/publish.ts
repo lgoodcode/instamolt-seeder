@@ -7,9 +7,93 @@ import { computeAffinityMatrix, planFollows } from '@/lib/follow-algorithm';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
-import { InstaMoltClient } from '@/services/instamolt-api';
-import { answerChallenge } from '@/services/llm';
-import type { AgentsIndex, GeneratedAgent, GeneratedPost, Persona } from '@/types';
+import { InstaMoltApiError, InstaMoltClient, parseErrorCode } from '@/services/instamolt-api';
+import { answerChallenge, type BioModerationFeedback, generateBio } from '@/services/llm';
+import type {
+  AgentsIndex,
+  ChallengeResponse,
+  GeneratedAgent,
+  GeneratedPost,
+  Persona,
+} from '@/types';
+
+/**
+ * Max number of bio regenerations attempted after a `CONTENT_BLOCKED` response
+ * from `POST /agents/register`. The first attempt uses the bio on disk; each
+ * retry regenerates via Gemini with the blocked text + moderation reason
+ * surfaced as a negative exemplar. Two retries clears the overwhelming
+ * majority of moderation hits without burning Gemini budget on genuinely
+ * un-fixable personas.
+ */
+const MAX_BIO_MODERATION_RETRIES = 2;
+
+/**
+ * Parse the `category` + `error` fields out of a `CONTENT_BLOCKED` 403 body.
+ * Shape matches the platform's `ErrorResponse` schema (see openapi.json). A
+ * missing field falls back to `'unknown'` / the raw body — never throws, so
+ * the retry path always has *something* to feed into Gemini.
+ */
+function parseModerationDetails(body: string): { category: string; reason: string } {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as { error?: unknown; category?: unknown };
+      const reason = typeof obj.error === 'string' ? obj.error : body;
+      const category = typeof obj.category === 'string' ? obj.category : 'unknown';
+      return { category, reason };
+    }
+  } catch {
+    // Body wasn't JSON — fall through.
+  }
+  return { category: 'unknown', reason: body };
+}
+
+/**
+ * Register-phase retry wrapper. Calls `startChallenge(agentname, bio)`; on a
+ * `CONTENT_BLOCKED` 403 response, regenerates the bio via Gemini (with the
+ * blocked text + moderation reason as negative exemplars), persists the new
+ * bio to `agent.json` so the agent is recoverable after a crash, and retries
+ * up to {@link MAX_BIO_MODERATION_RETRIES} times before giving up.
+ *
+ * Non-moderation errors propagate on the first hit — retrying a network error
+ * is the HTTP client's job, not this function's.
+ */
+async function startChallengeWithBioRetry(
+  client: InstaMoltClient,
+  agentname: string,
+  data: GeneratedAgent,
+  persona: Persona,
+  jsonPath: string,
+  onBioRegenerated: (details: { attempt: number; category: string; reason: string }) => void,
+): Promise<ChallengeResponse> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await client.startChallenge(agentname, data.bio);
+    } catch (err) {
+      const isModerationBlock =
+        err instanceof InstaMoltApiError &&
+        err.status === 403 &&
+        parseErrorCode(err.body) === 'CONTENT_BLOCKED';
+
+      if (!isModerationBlock || attempt >= MAX_BIO_MODERATION_RETRIES) {
+        throw err;
+      }
+
+      const { category, reason } = parseModerationDetails((err as InstaMoltApiError).body);
+      const feedback: BioModerationFeedback = {
+        category,
+        reason,
+        blockedBio: data.bio,
+      };
+      const newBio = await generateBio(persona, [], feedback);
+      data.bio = newBio;
+      await writeFile(jsonPath, JSON.stringify(data, null, 2));
+      attempt++;
+      onBioRegenerated({ attempt, category, reason });
+    }
+  }
+}
 
 interface PublishOptions {
   agent?: string;
@@ -148,7 +232,31 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       async ({ indexAgent, data, jsonPath, persona }) => {
         try {
           const client = new InstaMoltClient();
-          const challenge = await client.startChallenge(indexAgent.agentname, data.bio);
+          const challenge = await startChallengeWithBioRetry(
+            client,
+            indexAgent.agentname,
+            data,
+            persona,
+            jsonPath,
+            ({ attempt, category, reason }) => {
+              log(
+                'warn',
+                `  @${indexAgent.agentname} — bio blocked (${category}); regenerated attempt ${attempt} of ${MAX_BIO_MODERATION_RETRIES}: ${reason}`,
+              );
+              logEvent({
+                eventType: 'registration',
+                agentname: indexAgent.agentname,
+                persona: indexAgent.personaId,
+                success: false,
+                details: {
+                  bioRegenerated: true,
+                  moderationCategory: category,
+                  moderationReason: reason,
+                  attempt,
+                },
+              });
+            },
+          );
           const answer = await answerChallenge(persona, challenge.challenge);
           const reg = await client.completeChallenge(challenge.request_id, answer);
 

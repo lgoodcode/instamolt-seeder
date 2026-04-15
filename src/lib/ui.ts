@@ -81,6 +81,17 @@ export async function confirm(message: string, defaultValue = false): Promise<bo
   return result === true;
 }
 
+/**
+ * Free-text prompt. Under non-TTY, returns an empty string without prompting
+ * so unattended runs don't hang — callers must treat empty as "not confirmed".
+ */
+export async function text(message: string, placeholder?: string): Promise<string> {
+  if (!isInteractive()) return '';
+  const result = await clack.text({ message, placeholder });
+  if (clack.isCancel(result)) return '';
+  return typeof result === 'string' ? result : '';
+}
+
 export interface Progress {
   /** Advance the bar by one step. Optional label is shown on the right. */
   tick(label?: string): void;

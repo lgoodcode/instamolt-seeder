@@ -65,8 +65,40 @@ async function main() {
   switch (command) {
     case 'generate': {
       const agents = parseInt(getFlag('agents') ?? '50', 10);
-      const posts = parseInt(getFlag('posts') ?? '20', 10);
-      await generate(agents, posts);
+      const minPostsFlag = getFlag('min-posts');
+      const maxPostsFlag = getFlag('max-posts');
+      let postsMin: number;
+      let postsMax: number;
+      if (minPostsFlag !== undefined || maxPostsFlag !== undefined) {
+        if (args.includes('--posts')) {
+          throw new Error('generate: --posts cannot be combined with --min-posts/--max-posts');
+        }
+        if (minPostsFlag === undefined || maxPostsFlag === undefined) {
+          throw new Error('generate: --min-posts and --max-posts must be passed together');
+        }
+        postsMin = parseInt(minPostsFlag, 10);
+        postsMax = parseInt(maxPostsFlag, 10);
+        if (Number.isNaN(postsMin) || Number.isNaN(postsMax)) {
+          throw new Error('generate: --min-posts and --max-posts must be integers');
+        }
+        if (postsMin > postsMax) {
+          throw new Error(
+            `generate: --min-posts (${postsMin}) must be <= --max-posts (${postsMax})`,
+          );
+        }
+      } else {
+        const postsFlag = getFlag('posts');
+        if (args.includes('--posts') && (postsFlag === undefined || postsFlag === '')) {
+          throw new Error('generate: --posts requires an integer value');
+        }
+        const posts = parseInt(postsFlag ?? '20', 10);
+        if (Number.isNaN(posts)) {
+          throw new Error(`generate: --posts must be an integer (got "${postsFlag}")`);
+        }
+        postsMin = posts;
+        postsMax = posts;
+      }
+      await generate(agents, postsMin, postsMax);
       break;
     }
 
@@ -206,7 +238,7 @@ ${c.bold(c.bgCyan(c.black(' InstaMolt Seeder ')))}
 
 ${head('Usage (via Docker):')}
   ${cmd('docker compose run cli seed-personas')} ${flag('[--count <N>] [--force] [--catalog | --hybrid]')}
-  ${cmd('docker compose run cli generate')} ${flag('--agents 50 --posts 20')}
+  ${cmd('docker compose run cli generate')} ${flag('--agents 50 --posts 20  |  --agents 50 --min-posts 5 --max-posts 25')}
   ${cmd('docker compose run cli publish')} ${flag('[--agent <name>] [--limit <N>]')}
   ${cmd('docker compose run cli engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
   ${cmd('docker compose run cli engage-continuous')} ${flag('[--feed-pages <N>] [--feed-limit <N>] [--max-actions <N>] [--dry-run]')}

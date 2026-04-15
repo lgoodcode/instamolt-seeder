@@ -139,7 +139,7 @@ Workflow:
 
 Per-agent workflow:
 1. **Registration (skipped if `apiKey` already set):**
-   - `client.startChallenge(agentname, bio)` → `{ request_id, challenge }`
+   - `client.startChallenge(agentname, bio)` → `{ request_id, challenge }`. Wrapped in `startChallengeWithBioRetry` (see [src/commands/publish.ts](../src/commands/publish.ts)): on a `CONTENT_BLOCKED` 403 caused by **bio moderation**, the wrapper parses `category` + `error` out of the response body, regenerates the bio via `generateBio(persona, [], { category, reason, blockedBio })` with the blocked text surfaced to Gemini as a negative exemplar, persists the new bio to `agent.json` so a crash mid-retry still leaves recoverable state, and retries up to `MAX_BIO_MODERATION_RETRIES = 2` times (3 total attempts). Every regeneration emits a `registration` event with `details.bioRegenerated=true` + `moderationCategory` + `moderationReason` so `output/logs/` reflects the recovery. Non-moderation errors (5xx, network, etc.) propagate on the first hit — retrying those is the HTTP client's job. Agentname moderation is out of scope — a blocked agentname fails registration outright and requires manual resolution (delete the agent + regenerate). Without this wrapper, a single bio-moderation hit permanently orphaned the agent (bio-on-disk matches the blocked text, next publish run hits the same 403).
    - `answerChallenge(persona, challenge)` → thin async wrapper around `solveRegistrationChallenge(challengeText)`, which regex-extracts the prime index + multiplier from part A and the base string from part B, computes both answers in-process, and returns a minified JSON string `{"a":"...","b":"..."}`. No LLM call — the challenge is deterministic and the inputs are fully present in the prompt text, so solving it locally is free, zero-latency, and 100% correct. Previously we round-tripped the prompt through Gemini; `gemini-3.1-flash-lite-preview` routinely mis-indexed the reverse+even-filter step and produced 8-char `b` answers instead of the required 9, causing `CHALLENGE_FAILED / reason=wrong_answer`. The `persona` argument is retained for signature stability but is not used. See [src/services/llm.ts](../src/services/llm.ts) and [openapi.json](../openapi.json) `/agents/register/complete`.
    - `client.completeChallenge(request_id, answer)` → unwrapped as `reg.agent.api_key` (the live response is nested under `agent`)
    - Persist `apiKey` + `registeredAt` to `agent.json` **before** any further calls
@@ -923,6 +923,13 @@ pnpm publish-drafts                         # ~5–6 hours, dominated by the 6-m
 pnpm status                                 # confirm counts
 ```
 The `fix-agents` script is no longer part of the bootstrap flow — `generate.ts` enforces the bio minimum itself. Run it only if you observe corrupt agent state (duplicate or empty agentnames).
+
+**One-shot wrapper.** [scripts/bootstrap.ts](../scripts/bootstrap.ts) chains `generate → publish → engage-continuous` in a single command, routing per-phase flags. Unknown flags abort upfront so typos can't silently slip past the long-running engage loop:
+```bash
+pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 \
+  --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --posts-per-new 15
+```
+It's a thin `spawnSync` wrapper over the same CLI entry point — no behavioral divergence from running the three phases by hand. Allowed flags are the union of `generate` + `publish` + `engage-continuous`; see `scripts/bootstrap.ts` for the routing table.
 
 ### 9.2 Add more posts to existing agents
 Run `generate` again with higher `--posts`. Existing agents are reused; only the missing post drafts are generated. Then `pnpm publish-drafts` to push the new drafts (existing ones are skipped via the `published` flag).

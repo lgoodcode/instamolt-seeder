@@ -65,20 +65,48 @@ export async function reset(options: ResetOptions = {}): Promise<void> {
   await resetBulk(options);
 }
 
+/** Typed token the operator must enter to confirm a bulk wipe of agents. */
+const TYPED_CONFIRMATION_TOKEN = 'DELETE';
+
+/**
+ * Count agents for the typed-confirmation gate. `agents.json` is the
+ * authoritative source — it's the only file that tracks registered API keys,
+ * so a wipe with agents in the index (even if `output/agents/` is missing)
+ * still orphans live accounts. Falls back to a directory-only count when the
+ * index is missing/corrupt, filtering to subdirectories so stray files (e.g.
+ * `.DS_Store`, temp artifacts) don't inflate the count.
+ */
+async function countAgentsForConfirmation(): Promise<number> {
+  try {
+    const raw = await readFile(config.agentsIndexPath, 'utf-8');
+    const index = JSON.parse(raw) as AgentsIndex;
+    if (Array.isArray(index.agents)) return index.agents.length;
+  } catch {
+    // Fall through to disk-based fallback.
+  }
+  try {
+    const entries = await readdir(config.agentsDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).length;
+  } catch {
+    return 0;
+  }
+}
+
 async function resetBulk(options: ResetOptions): Promise<void> {
   ui.intro('Reset');
 
   const wipeAgents = options.all || !(options.cache || options.logs);
   const wipeCache = options.all || options.cache === true;
   const wipeLogs = options.all || options.logs === true;
+  const agentCount = wipeAgents ? await countAgentsForConfirmation() : 0;
 
   const targets: string[] = [];
   if (wipeAgents) {
-    targets.push(
-      `${config.agentsDir}/ (all agent dirs)`,
-      config.agentsIndexPath,
-      config.dedupIndexPath,
-    );
+    const label =
+      agentCount > 0
+        ? `${config.agentsDir}/ (${agentCount} agent${agentCount === 1 ? '' : 's'})`
+        : `${config.agentsDir}/ (empty or missing)`;
+    targets.push(label, config.agentsIndexPath, config.dedupIndexPath);
   }
   if (wipeCache) {
     if (!targets.includes(config.dedupIndexPath)) targets.push(config.dedupIndexPath);
@@ -105,6 +133,19 @@ async function resetBulk(options: ResetOptions): Promise<void> {
     if (!ok) {
       ui.outro(ui.color.yellow(`${ui.symbol.warn} aborted`));
       return;
+    }
+
+    // Second gate for agent wipes — a single stray Enter shouldn't be enough
+    // to nuke a populated agent pool. `--force` skips both gates for CI /
+    // docker run --force flows.
+    if (wipeAgents && agentCount > 0) {
+      const typed = await ui.text(
+        `Type ${ui.color.bold(TYPED_CONFIRMATION_TOKEN)} to confirm wiping ${agentCount} agent${agentCount === 1 ? '' : 's'}`,
+      );
+      if (typed !== TYPED_CONFIRMATION_TOKEN) {
+        ui.outro(ui.color.yellow(`${ui.symbol.warn} aborted — confirmation token mismatch`));
+        return;
+      }
     }
   }
 

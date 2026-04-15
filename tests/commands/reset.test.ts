@@ -18,12 +18,19 @@ vi.mock('node:fs/promises', () => ({
     }
     return content;
   }),
-  readdir: vi.fn(async (path: string) => {
+  readdir: vi.fn(async (path: string, options?: { withFileTypes?: boolean }) => {
     const entries = fsState.dirEntries.get(path);
     if (entries === undefined) {
       const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
       err.code = 'ENOENT';
       throw err;
+    }
+    if (options?.withFileTypes) {
+      return entries.map((name) => ({
+        name,
+        isDirectory: () => true,
+        isFile: () => false,
+      }));
     }
     return entries;
   }),
@@ -44,6 +51,8 @@ const uiState = vi.hoisted(() => ({
   intros: [] as string[],
   confirmResult: true,
   confirmCalls: 0,
+  textResult: 'DELETE',
+  textCalls: 0,
 }));
 
 vi.mock('@/lib/ui', () => ({
@@ -60,6 +69,10 @@ vi.mock('@/lib/ui', () => ({
   confirm: vi.fn(async () => {
     uiState.confirmCalls++;
     return uiState.confirmResult;
+  }),
+  text: vi.fn(async () => {
+    uiState.textCalls++;
+    return uiState.textResult;
   }),
   isInteractive: vi.fn(() => false),
   summaryLine: vi.fn(),
@@ -149,6 +162,8 @@ function resetUiState(): void {
   uiState.intros.length = 0;
   uiState.confirmResult = true;
   uiState.confirmCalls = 0;
+  uiState.textResult = 'DELETE';
+  uiState.textCalls = 0;
 }
 
 function resetFsState(): void {
@@ -420,6 +435,72 @@ describe('reset', () => {
     it('--force skips the confirm prompt', async () => {
       await reset({ all: true, force: true });
       expect(uiState.confirmCalls).toBe(0);
+    });
+
+    it('without --force, requires typed DELETE token when agents are on disk', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta']);
+
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      // Matching token proceeds to rm
+      const rmPaths = fsState.rmCalls.map((c) => c.path);
+      expect(rmPaths).toContain(config.agentsDir);
+    });
+
+    it('without --force, mismatched typed token aborts without any rm calls', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta']);
+      uiState.textResult = 'delete'; // wrong case
+
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      expect(fsState.rmCalls).toHaveLength(0);
+      expect(uiState.outros.join(' ')).toMatch(/confirmation token mismatch/);
+    });
+
+    it('counts agents from agents.json (authoritative) even if agents dir is empty', async () => {
+      fsState.files.set(
+        config.agentsIndexPath,
+        JSON.stringify({
+          agents: [
+            { agentname: 'alpha', personaId: 'p' },
+            { agentname: 'beta', personaId: 'p' },
+          ],
+          totalAgents: 2,
+          totalPosts: 0,
+        }),
+      );
+      // agents dir missing — index is what matters for the confirmation gate
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(1);
+      // Label reflects index-derived count (2 agents)
+      const note = uiState.notes.find((n) => n.title === 'Will delete');
+      expect(note?.body).toMatch(/2 agents/);
+    });
+
+    it('without --force, skips typed gate when agents dir is empty', async () => {
+      // No agents dir entries at all — readdir throws, count = 0
+      await reset({ all: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(uiState.textCalls).toBe(0);
+      // Still proceeds to wipe the other targets (cache, logs) and the
+      // non-existent agents dir (rm is idempotent with force: true)
+      expect(uiState.outros.join(' ')).toMatch(/reset done/);
+    });
+
+    it('--force skips both the yes/no confirm and the typed token gate', async () => {
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta', 'gamma']);
+
+      await reset({ all: true, force: true });
+
+      expect(uiState.confirmCalls).toBe(0);
+      expect(uiState.textCalls).toBe(0);
     });
 
     it('without --force, confirm false aborts without any rm calls', async () => {

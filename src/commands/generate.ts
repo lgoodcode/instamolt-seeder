@@ -85,8 +85,20 @@ const AGENTNAME_PROMPT_SAMPLE_K = 8;
 const MAX_AGENTNAME_ATTEMPTS = 8;
 
 /**
- * Generate N agents with M posts each.
+ * Inclusive random integer in [min, max]. Used to roll a per-agent post count
+ * when `generate` is invoked with a range.
+ */
+function randIntInclusive(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * Generate N agents, each with a randomly chosen post count in [postsMin, postsMax].
  * Writes everything to output/ as JSON files.
+ *
+ * When `postsMin === postsMax` (including the default where `postsMax` falls
+ * through to `postsMin`), every agent gets exactly that many posts — identical
+ * to the historical fixed-count behaviour.
  *
  * Per-persona de-duplication context is built up at startup from existing
  * agents on disk and grows as new content is created within the run, so:
@@ -94,7 +106,18 @@ const MAX_AGENTNAME_ATTEMPTS = 8;
  *   - new posts are told what other posts (this agent + same-persona peers) already say
  *   - a Jaccard similarity gate retries once if the model collides anyway
  */
-export async function generate(agentCount: number, postsPerAgent: number): Promise<void> {
+export async function generate(
+  agentCount: number,
+  postsMin: number,
+  postsMax: number = postsMin,
+): Promise<void> {
+  if (postsMin < 0) {
+    throw new Error(`generate: postsMin must be >= 0 (got ${postsMin})`);
+  }
+  if (postsMax < postsMin) {
+    throw new Error(`generate: postsMax (${postsMax}) must be >= postsMin (${postsMin})`);
+  }
+
   ui.intro('Generate');
   const startedAt = Date.now();
 
@@ -102,7 +125,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   logEvent({
     eventType: 'session_start',
     success: true,
-    details: { command: 'generate', agentCount, postsPerAgent },
+    details: { command: 'generate', agentCount, postsMin, postsMax },
   });
 
   const personas = await loadPersonas();
@@ -111,8 +134,8 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 
   logCoverageSummary(assignments, personas.size, voiceProfiles.size);
 
-  log('info', `Generating ${agentCount} agents with ${postsPerAgent} posts each`);
-  log('info', `Total posts: ${agentCount * postsPerAgent}`);
+  const postsDesc = postsMin === postsMax ? `${postsMin}` : `${postsMin}-${postsMax}`;
+  log('info', `Generating ${agentCount} agents with ${postsDesc} posts each`);
 
   // Load existing agents if any (for idempotency).
   const existing = await loadExistingAgents();
@@ -155,13 +178,17 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
     // assumed to occupy the first N slots).
     const specsToCreate = specs.slice(existingForPersona);
 
+    // Roll a post count per agent up front so the progress bar total is
+    // accurate. Stays deterministic-per-agent through the inner retry loops.
+    const postCounts = specsToCreate.map(() => randIntInclusive(postsMin, postsMax));
+    const totalPostsInBlock = postCounts.reduce((sum, n) => sum + n, 0);
+
     ui.section(`${personaId} — creating ${toCreate} agents`);
 
     // Each agent costs (1 name + 1 bio + N posts) Gemini calls. The bar
     // ticks once per Gemini call so the operator gets fine-grained progress
     // even when a single persona block takes a few minutes.
-    const stepsPerAgent = 2 + postsPerAgent;
-    const bar = ui.progress(toCreate * stepsPerAgent, 'preparing...');
+    const bar = ui.progress(2 * toCreate + totalPostsInBlock, 'preparing...');
 
     // Unauthenticated probe client for `isAgentnameAvailable`. The live
     // availability check is the real uniqueness guarantee — the on-disk
@@ -172,6 +199,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
 
     for (let i = 0; i < specsToCreate.length; i++) {
       const spec = specsToCreate[i];
+      const postsForAgent = postCounts[i];
       try {
         // --- Identity ---
         // Bounded retry loop: generate → local dedup → platform availability
@@ -261,7 +289,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         await writeFile(join(agentDir, 'agent.json'), JSON.stringify(agent, null, 2));
 
         // --- Posts ---
-        log('info', `  ${agentname}: generating ${postsPerAgent} posts...`);
+        log('info', `  ${agentname}: generating ${postsForAgent} posts...`);
 
         // priorPosts is the running list of posts THIS agent has produced
         // in this loop. peerPosts is the same-persona pool that grows as
@@ -272,8 +300,8 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
         const agentPosts: GeneratedPost[] = [];
         const peerPosts = postContext.get(persona.id) ?? [];
 
-        for (let p = 1; p <= postsPerAgent; p++) {
-          bar.tick(`@${agentname}: post ${p}/${postsPerAgent}`);
+        for (let p = 1; p <= postsForAgent; p++) {
+          bar.tick(`@${agentname}: post ${p}/${postsForAgent}`);
           // priorPosts is the running list for THIS agent (small, M items
           // total) — pass as-is. peerPosts is the full persona corpus, so
           // pre-curate with `pickDiverseAndRecent` to give Gemini K_PEER
@@ -288,7 +316,7 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
           const content = await generatePostWithSimilarityGate(
             persona,
             p,
-            postsPerAgent,
+            postsForAgent,
             [...priorPosts],
             peerSnapshot,
           );
@@ -385,10 +413,24 @@ export async function generate(agentCount: number, postsPerAgent: number): Promi
   // idempotent (the bake phase already skips agents that have one), so
   // persisting agents.json + dedup-index.json up-front costs nothing and
   // makes a bake-phase failure non-destructive.
+  // Count actual post files per agent since post counts now vary when
+  // invoked with a range. Existing agents may also have non-uniform counts
+  // from earlier runs, so walking the disk is the only accurate source.
+  let totalPostsOnDisk = 0;
+  for (const a of allAgents) {
+    try {
+      const entries = await readdir(join(config.agentsDir, a.agentname));
+      totalPostsOnDisk += entries.filter((f) => /^post-\d+\.json$/.test(f)).length;
+    } catch {
+      // Agent dir missing — skip; the agent record itself is already a
+      // partial-write case that a resumed run will reconcile.
+    }
+  }
+
   const index: AgentsIndex = {
     generatedAt: new Date().toISOString(),
     totalAgents: allAgents.length,
-    totalPosts: allAgents.length * postsPerAgent,
+    totalPosts: totalPostsOnDisk,
     agents: allAgents,
   };
 

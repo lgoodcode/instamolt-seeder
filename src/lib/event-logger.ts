@@ -149,8 +149,87 @@ function freshStats(): SeederStats {
     moderation: { totalStrikes: 0, byTier: {}, byCategory: {} },
     growth: { ticksFired: 0, agentsAdded: 0 },
     personas: {},
+    mentions: {
+      total: 0,
+      byPhase: { bake: 0, runtime: 0 },
+      byContext: {
+        comment: { bake: 0, runtime: 0 },
+        reply: { bake: 0, runtime: 0 },
+      },
+      byMentioningAgent: {},
+      byTargetAgent: {},
+    },
     latency: {},
   };
+}
+
+/**
+ * Normalize `stats.mentions` to the current nested-by-phase shape. Covers
+ * three shapes that can appear on disk:
+ *   - **Missing** (stats files written before the mention aggregation
+ *     shipped): seed a full empty `mentions` block.
+ *   - **Legacy flat `byContext`** (PR #11 initial cut where `byContext.*`
+ *     were numbers): collapse the legacy totals into the `runtime` slot
+ *     since pre-fix rates were already implicitly runtime-skewed, and sync
+ *     `byPhase.runtime` so downstream counters (`stats.mentions.byPhase[phase]++`
+ *     in `logEvent`) see a consistent total.
+ *   - **Partial** (some subfields missing — e.g. `byPhase`, per-agent maps,
+ *     or `total` absent on a hand-edited file): defensively backfill every
+ *     required subobject so a single missing field can't crash the next
+ *     mention event.
+ *
+ * Exported so both the resume-path migration in `loadOrArchivePriorStats`
+ * and the read-only `pnpm status` renderer share one source of truth —
+ * otherwise a status call on a never-migrated stats.json would render
+ * `NaN` / `undefined` breakdowns.
+ *
+ * Mutates `stats` in place and returns it for chaining.
+ */
+export function normalizeMentionsShape(stats: SeederStats): SeederStats {
+  if (!stats.mentions) {
+    stats.mentions = {
+      total: 0,
+      byPhase: { bake: 0, runtime: 0 },
+      byContext: {
+        comment: { bake: 0, runtime: 0 },
+        reply: { bake: 0, runtime: 0 },
+      },
+      byMentioningAgent: {},
+      byTargetAgent: {},
+    };
+    return stats;
+  }
+
+  if (typeof stats.mentions.total !== 'number') stats.mentions.total = 0;
+  if (!stats.mentions.byPhase) stats.mentions.byPhase = { bake: 0, runtime: 0 };
+  if (!stats.mentions.byMentioningAgent) stats.mentions.byMentioningAgent = {};
+  if (!stats.mentions.byTargetAgent) stats.mentions.byTargetAgent = {};
+  if (!stats.mentions.byContext) {
+    stats.mentions.byContext = {
+      comment: { bake: 0, runtime: 0 },
+      reply: { bake: 0, runtime: 0 },
+    };
+  }
+
+  // Detect the legacy flat-byContext shape (numeric `comment` / `reply`) and
+  // migrate into runtime slots. Sync `byPhase.runtime` to stay consistent
+  // with the aggregated total — without this, `byPhase` ends up at zero
+  // while `byContext.*.runtime` carries the real count.
+  const ctx = stats.mentions.byContext as unknown as {
+    comment: number | { bake: number; runtime: number };
+    reply: number | { bake: number; runtime: number };
+  };
+  if (typeof ctx.comment === 'number' || typeof ctx.reply === 'number') {
+    const commentNum = typeof ctx.comment === 'number' ? ctx.comment : 0;
+    const replyNum = typeof ctx.reply === 'number' ? ctx.reply : 0;
+    stats.mentions.byContext = {
+      comment: { bake: 0, runtime: commentNum },
+      reply: { bake: 0, runtime: replyNum },
+    };
+    stats.mentions.byPhase = { bake: 0, runtime: commentNum + replyNum };
+  }
+
+  return stats;
 }
 
 /**
@@ -176,6 +255,7 @@ function loadOrArchivePriorStats(): SeederStats {
       // Without this, resume would read an undefined field and the first
       // `pushLatency` call would crash on `stats.latency[type]`.
       if (!prev.latency) prev.latency = {};
+      normalizeMentionsShape(prev);
       return prev;
     }
     // Archive: copy the old file, then start fresh. `mkdirSync` with
@@ -318,6 +398,27 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
     }
     stats.personas[event.persona].actions++;
     if (!event.success && !isSkipped) stats.personas[event.persona].errors++;
+  }
+
+  // Mention fan-out aggregation. `mention` events are emitted one-per-target
+  // after a comment/reply lands (either on the platform or in the bake
+  // sample file), so incrementing here is a 1:1 map to notification count.
+  if (event.eventType === 'mention' && event.success) {
+    const d = event.details ?? {};
+    const target = typeof d.targetAgentname === 'string' ? d.targetAgentname : undefined;
+    const phase = d.phase === 'runtime' ? 'runtime' : d.phase === 'bake' ? 'bake' : undefined;
+    const context =
+      d.context === 'reply' ? 'reply' : d.context === 'comment' ? 'comment' : undefined;
+    if (target && phase && context) {
+      stats.mentions.total++;
+      stats.mentions.byPhase[phase]++;
+      stats.mentions.byContext[context][phase]++;
+      if (event.agentname) {
+        stats.mentions.byMentioningAgent[event.agentname] =
+          (stats.mentions.byMentioningAgent[event.agentname] ?? 0) + 1;
+      }
+      stats.mentions.byTargetAgent[target] = (stats.mentions.byTargetAgent[target] ?? 0) + 1;
+    }
   }
 
   // Feed refresh tracking
@@ -487,6 +588,42 @@ export async function timed<T>(
       },
     });
     throw err;
+  }
+}
+
+/**
+ * Emit one `mention` event per resolved mention target. Callers supply the
+ * already-parsed target list (via `parseResolvedMentions`) plus the context
+ * metadata; this helper just formats the SeederEvent. Fire-and-forget —
+ * always succeeds (logEvent swallows write failures).
+ *
+ * Invariant: call this AFTER the underlying comment/reply event has been
+ * logged, so `events.jsonl` orders `comment → mention → mention` not the
+ * reverse.
+ */
+export function logMentions(input: {
+  agentname: string;
+  persona?: string;
+  targets: string[];
+  context: 'comment' | 'reply';
+  phase: 'bake' | 'runtime';
+  postId?: string;
+  sourceCommentId?: string;
+}): void {
+  for (const target of input.targets) {
+    logEvent({
+      eventType: 'mention',
+      agentname: input.agentname,
+      persona: input.persona,
+      success: true,
+      details: {
+        targetAgentname: target,
+        context: input.context,
+        phase: input.phase,
+        ...(input.postId ? { postId: input.postId } : {}),
+        ...(input.sourceCommentId ? { sourceCommentId: input.sourceCommentId } : {}),
+      },
+    });
   }
 }
 

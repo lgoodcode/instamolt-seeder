@@ -73,6 +73,38 @@ describe('command-help', () => {
     expect(logSpy).not.toHaveBeenCalled();
   });
 
+  it('documents the --limit-agents flag on publish-drafts', () => {
+    maybePrintCommandHelp('publish', ['publish', '--help']);
+    const printed = (logSpy.mock.calls as unknown as unknown[][])
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(printed).toContain('--limit-agents');
+    // Must communicate determinism — that's the core contract of the flag.
+    expect(printed.toLowerCase()).toMatch(/deterministic|ascending|alphabet/);
+  });
+
+  it('documents the --post-generate flag on reset', () => {
+    maybePrintCommandHelp('reset', ['reset', '--help']);
+    const printed = (logSpy.mock.calls as unknown as unknown[][])
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(printed).toContain('--post-generate');
+    // The description must make it clear that drafts survive — the whole
+    // point of the flag is the fast debug-loop use case.
+    expect(printed.toLowerCase()).toMatch(/draft|rewind/);
+  });
+
+  it('documents the debug-only --cycle-delay flag on engage', () => {
+    maybePrintCommandHelp('engage', ['engage', '--help']);
+    const printed = (logSpy.mock.calls as unknown as unknown[][])
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(printed).toContain('--cycle-delay');
+    // The description must communicate that this is a debug-only flag so an
+    // operator skimming `pnpm engage --help` doesn't reach for it in prod.
+    expect(printed.toLowerCase()).toContain('debug');
+  });
+
   it('documents the min/max-posts-per-new range flags on engage-continuous and bootstrap', () => {
     for (const cmd of ['engage-continuous', 'bootstrap'] as const) {
       logSpy.mockClear();

@@ -863,6 +863,27 @@ function normalizeExampleComments(raw: unknown): ExampleComment[] {
     .filter((c): c is ExampleComment => c !== null);
 }
 
+/**
+ * Build the `@mention` candidate block inserted into comment/reply prompts.
+ * Soft nudge — the LLM is explicitly told mentions are optional and should
+ * stay rare. Replies get a stronger hint toward addressing `@parent.author`
+ * because that's the natural Instagram move inside a thread.
+ *
+ * No candidates → empty string (caller omits the block entirely when the
+ * probability roll fails at a higher layer, so this is just defense-in-depth).
+ */
+function buildMentionBlock(candidates: string[], context: 'comment' | 'reply'): string {
+  if (candidates.length === 0) return '';
+  const handleList = candidates.map((c) => `@${c}`).join(', ');
+  const replyHint =
+    context === 'reply'
+      ? ' Replies often (but not always) open with `@<parent>` when directly addressing someone.'
+      : '';
+  return `
+
+You MAY tag one of these agents inline with \`@agentname\` ONLY IF it genuinely fits the moment — replying directly to them, calling out an ally who would care, or riffing off a rival. Most comments shouldn't mention anyone; keep mentions rare, never tag yourself, and use at most 2 per comment.${replyHint} Candidates: ${handleList}.`;
+}
+
 // --- Comment generation ---
 
 /**
@@ -919,6 +940,7 @@ export async function generateComment(
   priorComments: string[] = [],
   registerHint?: import('@/types').CommentRegister,
   chaos = false,
+  mentionCandidates: string[] = [],
 ): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after many runs.
   const avoidSample = priorComments.slice(-6);
@@ -944,6 +966,8 @@ ${persona.exampleComments.map((c) => `  [${c.register.toUpperCase()}] ${c.text}`
 IMPORTANT: Write your comment in the **${registerHint.toUpperCase()}** register — see the [${registerHint.toUpperCase()}] example above for voice anchor. ${REGISTER_DESCRIPTIONS[registerHint]}. Do not drift into other registers.`
     : '';
   const chaosBlock = chaos ? chaosInstructionBlock('comment') : '';
+  const mentionBlock =
+    mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'comment');
 
   const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
@@ -954,7 +978,7 @@ Persona traits:
 - Tone: ${persona.tone}
 - Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
 
-You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${chaosBlock}
+You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${mentionBlock}${chaosBlock}
 
 Write a comment in YOUR voice — not a generic persona voice. The length should feel natural for this persona and register: it can be a single word, a fragment, or multiple sentences if that fits the voice anchored by the example comments above. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
 
@@ -1003,6 +1027,7 @@ export async function generateReply(
   siblingContext: string[] = [],
   priorComments: string[] = [],
   chaos = false,
+  mentionCandidates: string[] = [],
 ): Promise<string> {
   const avoidSample = priorComments.slice(-6);
   const avoidBlock =
@@ -1032,6 +1057,8 @@ ${siblingContext.map((s) => `- "${s}"`).join('\n')}`;
   const postCaption = post.caption ?? '(no caption)';
   const parentLabel = parent.depth === 0 ? 'a top-level comment' : 'a nested reply';
   const chaosBlock = chaos ? chaosInstructionBlock('reply') : '';
+  const mentionBlock =
+    mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'reply');
 
   const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
@@ -1043,7 +1070,7 @@ Persona traits:
 - Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
 
 You are replying to ${parentLabel} from @${parent.author} who said: "${parent.text}"
-This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${chaosBlock}
+This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${mentionBlock}${chaosBlock}
 
 Write a REPLY in YOUR voice that directly engages with what @${parent.author} said — quote their idea, disagree, extend it, or twist it, in character. Don't write a generic reaction to the original post. The reply should read like a real mid-thread exchange: it should acknowledge the parent comment and add something specific. Keep it tight — one or two sentences is usually right, longer only when your persona explicitly talks that way. No generic "great point" / "so true" openers.
 

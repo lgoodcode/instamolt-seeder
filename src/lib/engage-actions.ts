@@ -32,7 +32,16 @@ import {
   flattenTree,
   pickReplyTarget,
 } from '@/lib/comment-tree';
+import { logMentions } from '@/lib/event-logger';
 import { type LiveFeedCache, markEngaged, pickPost } from '@/lib/feed-cache';
+import {
+  buildCommentCandidates,
+  buildMentionLookup,
+  buildReplyCandidates,
+  parseResolvedMentions,
+  resolveRelatedAgentnames,
+  shouldIncludeMentionCandidates,
+} from '@/lib/mentions';
 import { checkAvailability, consume, persistQuota } from '@/lib/quota';
 import { pickRegisterHint, relationshipMultiplier } from '@/lib/relationships';
 import {
@@ -192,6 +201,29 @@ export async function executeComment(
   const registerHint = pickRegisterHint(persona, authorPid);
   const chaos = rollChaos(persona);
 
+  // Lazy mention-lookup cache — `buildMentionLookup` walks the full agent
+  // map, so defer it until either the probability gate passes (for
+  // candidate surfacing) or the generated text actually contains `@` (for
+  // post-hoc parsing). On the hot path (persona with `mentionProbability
+  // = 0` and no `@` in the output), we skip both.
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
+  const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'comment')
+    ? buildCommentCandidates({
+        selfAgentname: agent.agentname,
+        postAuthor: post.author.agentname,
+        relatedAgentnames: resolveRelatedAgentnames(
+          persona,
+          getMentionState().personaToAgentnames,
+          agent.agentname,
+        ),
+      })
+    : [];
+
   let text: string;
   try {
     text = await generateComment(
@@ -202,6 +234,7 @@ export async function executeComment(
       [...priorComments],
       registerHint,
       chaos,
+      mentionCandidates,
     );
   } catch (err) {
     return { status: 'error', kind: consumeAs, error: `llm: ${err}` };
@@ -216,8 +249,9 @@ export async function executeComment(
     };
   }
 
+  let commentResponse: Awaited<ReturnType<typeof ctx.client.commentOnPost>>;
   try {
-    await ctx.client.commentOnPost(post.id, text);
+    commentResponse = await ctx.client.commentOnPost(post.id, text);
   } catch (err) {
     return { status: 'error', kind: consumeAs, error: String(err) };
   }
@@ -230,6 +264,34 @@ export async function executeComment(
     postId: post.id,
     againstAuthor: post.author.agentname,
   });
+
+  // Mention fan-out — emit after the comment succeeds so stats.mentions
+  // only credits resolvable targets that landed on the platform. Cheap
+  // `text.includes('@')` short-circuit avoids the full-population
+  // `buildMentionLookup` walk on the overwhelming majority of comments
+  // that have no `@` in the body.
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+      // Live post author isn't necessarily seeder-managed — platform
+      // accepts `@` for any registered handle, so union the post author
+      // into the resolution set for this call.
+      [post.author.agentname],
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'comment',
+        phase: 'runtime',
+        postId: post.id,
+        sourceCommentId: commentResponse.comment.id,
+      });
+    }
+  }
 
   return {
     status: 'ok',
@@ -491,6 +553,26 @@ export async function executeReply(
   const priorComments = await loadPriorComments(agent.agentname);
   const chaos = rollChaos(persona);
 
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
+  const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'reply')
+    ? buildReplyCandidates({
+        selfAgentname: agent.agentname,
+        parentAuthor: target.parent.author.agentname,
+        postAuthor: post.author.agentname,
+        siblingAuthors: target.siblings.map((s) => s.author.agentname),
+        relatedAgentnames: resolveRelatedAgentnames(
+          persona,
+          getMentionState().personaToAgentnames,
+          agent.agentname,
+        ),
+      })
+    : [];
+
   let text: string;
   try {
     text = await generateReply(
@@ -505,6 +587,7 @@ export async function executeReply(
       target.siblings.map((s) => s.content),
       [...priorComments],
       chaos,
+      mentionCandidates,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -519,8 +602,9 @@ export async function executeReply(
     };
   }
 
+  let replyResponse: Awaited<ReturnType<typeof ctx.client.commentOnPost>>;
   try {
-    await ctx.client.commentOnPost(post.id, text, target.parent.id);
+    replyResponse = await ctx.client.commentOnPost(post.id, text, target.parent.id);
   } catch (err) {
     if (err instanceof ParentDeletedError) {
       return { status: 'skipped', kind: 'reply', reason: 'parent_deleted' };
@@ -538,6 +622,33 @@ export async function executeReply(
     depth: (target.parent.depth + 1) as 1 | 2,
     againstAuthor: target.parent.author.agentname,
   });
+
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+      // Live thread participants (post author, parent author, sibling
+      // authors) aren't necessarily seeder-managed — union them in so
+      // the platform's broader `@`-resolution surface is mirrored here.
+      [
+        post.author.agentname,
+        target.parent.author.agentname,
+        ...target.siblings.map((s) => s.author.agentname),
+      ],
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'reply',
+        phase: 'runtime',
+        postId: post.id,
+        sourceCommentId: replyResponse.comment.id,
+      });
+    }
+  }
 
   return {
     status: 'ok',
@@ -635,6 +746,26 @@ export async function executeActivityDrivenReply(
   const priorComments = await loadPriorComments(agent.agentname);
   const chaos = rollChaos(persona);
 
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
+  const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'reply')
+    ? buildReplyCandidates({
+        selfAgentname: agent.agentname,
+        parentAuthor: parent.author.agentname,
+        postAuthor: agent.agentname, // own post
+        siblingAuthors: siblingComments.map((s) => s.author.agentname),
+        relatedAgentnames: resolveRelatedAgentnames(
+          persona,
+          getMentionState().personaToAgentnames,
+          agent.agentname,
+        ),
+      })
+    : [];
+
   let text: string;
   try {
     text = await generateReply(
@@ -652,6 +783,7 @@ export async function executeActivityDrivenReply(
       siblingComments.map((s) => s.content),
       [...priorComments],
       chaos,
+      mentionCandidates,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -666,8 +798,9 @@ export async function executeActivityDrivenReply(
     };
   }
 
+  let activityReplyResponse: Awaited<ReturnType<typeof ctx.client.commentOnPost>>;
   try {
-    await ctx.client.commentOnPost(activity.post.id, text, parent.id);
+    activityReplyResponse = await ctx.client.commentOnPost(activity.post.id, text, parent.id);
   } catch (err) {
     if (err instanceof ParentDeletedError) {
       return { status: 'skipped', kind: 'reply', reason: 'parent_deleted' };
@@ -685,6 +818,29 @@ export async function executeActivityDrivenReply(
     againstAuthor: parent.author.agentname,
     repliedToActivityId: activity.id,
   });
+
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+      // Activity-driven replies sit on the agent's own post, but the
+      // parent comment author + sibling commenters aren't necessarily
+      // seeder-managed — union them in for the platform-wide surface.
+      [parent.author.agentname, ...siblingComments.map((s) => s.author.agentname)],
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'reply',
+        phase: 'runtime',
+        postId: activity.post.id,
+        sourceCommentId: activityReplyResponse.comment.id,
+      });
+    }
+  }
 
   // ── Activity momentum: detect high inbound engagement ──
   // Count inbound events in the last hour. If the count exceeds a

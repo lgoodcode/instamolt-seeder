@@ -101,6 +101,13 @@ async function startChallengeWithBioRetry(
 interface PublishOptions {
   agent?: string;
   limit?: number;
+  /**
+   * Cap the run to the first N agents by agentname (ascending). Deterministic
+   * across invocations so repeat runs hit the same small subset — designed for
+   * the publish-then-engage-then-reset debug loop at `--cycle-delay` speed.
+   * Ignored when `agent` is set (single-agent scope already bounds the run).
+   */
+  limitAgents?: number;
   skipFollowGraph?: boolean;
 }
 
@@ -153,9 +160,18 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     return;
   }
 
-  const agents = options.agent
+  let agents = options.agent
     ? index.agents.filter((a) => a.agentname === options.agent)
     : index.agents;
+
+  // `--limit-agents N` takes the first N agents by agentname (ascending) so
+  // two invocations with the same flag hit the same subset — the whole point
+  // is reproducible small-batch debugging. Ignored when `--agent` is set.
+  if (!options.agent && options.limitAgents !== undefined && options.limitAgents > 0) {
+    agents = [...agents]
+      .sort((a, b) => a.agentname.localeCompare(b.agentname))
+      .slice(0, options.limitAgents);
+  }
 
   if (agents.length === 0) {
     log(
@@ -511,9 +527,11 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       // full registered fleet (so the target has someone to follow), but the
       // outer follower loop is restricted — otherwise a targeted single-agent
       // publish would mutate the global follow graph on every other agent.
-      const followers = options.agent
-        ? registered.filter((a) => a.agentname === options.agent)
-        : registered;
+      // The same applies to `--limit-agents`: the debug-loop contract is
+      // "cap the run to this subset", which must include Phase C, or a
+      // follow-up debug run would see follow edges it didn't ask for.
+      const selectedAgentnames = new Set(agents.map((a) => a.agentname));
+      const followers = registered.filter((a) => selectedAgentnames.has(a.agentname));
       const edges: FollowEdge[] = [];
       for (const follower of followers) {
         const followerPersona = personas.get(follower.personaId);

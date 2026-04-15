@@ -115,6 +115,7 @@ Workflow:
      - Stamps the sample `kind: 'reply'` with `parentText`, `parentAuthor`, `parentDepth`, and `siblingContext` populated for audit.
      - Inherits the comment samples' texts as part of the `priorTexts` avoid-list so replies don't repeat comment openings.
      - Silently skips a slot when `fetchCommentTree` throws (transient 429, deleted post) or when `pickReplyTarget` returns undefined — we never fake a sample.
+   - **`@mention` surfacing (both comment + reply bake).** Before each `generateComment` / `generateReply` call, `shouldIncludeMentionCandidates(persona.mentionProbability, context)` in [src/lib/mentions.ts](../src/lib/mentions.ts) rolls against `persona.mentionProbability` (default `0.1`, range `0–0.25`; replies apply a `×2` multiplier capped at `0.4` via `effectiveMentionProbability`). On a hit, the bake path builds a pool capped at 5 via the context-specific helpers: `buildCommentCandidates(...)` for **top-level comments** (post author + up to 2 related agents drawn from `persona.relationships.{allies, amplifies, rivals}`) and `buildReplyCandidates(...)` for **replies** (parent comment author, post author if distinct, up to 2 sibling authors, and up to 2 related agents). The pool is passed to the LLM as a `mentionCandidates?: string[]` argument — Gemini decides whether to actually tag anyone (rare by design; the prompt frames it as optional). After the bake call returns, `parseResolvedMentions(text, selfAgentname, knownAgentnames)` parses `@agentname` occurrences (regex `/@([\w-]+)/g`, same as the platform), intersects with the set of known agentnames, and drops self + unknowns. Resolved targets are stored on `CommentSample.mentions?: string[]`; the `generate` caller then fans them out via `logMentions()` (§4.7) as one `mention` event per target, emitted **after** the per-agent `comment_baked` / `reply_baked` aggregate event so event ordering in `events.jsonl` reads `comment_baked → mention...` per agent. Mention events do not carry a per-sample id — the aggregate `comment_baked` / `reply_baked` is the containing marker.
    - **Graceful degrade on a thread-poor platform.** If the whole feed has fewer than `REPLY_COUNT_MIN` posts with `comment_count >= 1`, the reply bake is disabled for the whole run with a warning. Agents that computed a per-agent reply count larger than the available post pool bake a truncated set — never a synthetic fallback. Comment samples still bake in both cases (they're the critical voice anchor).
    - The combined `CommentSample[]` (comments + replies, all under one `AgentCommentsFile.samples`) is written as `output/agents/{name}/comments.json`. The `kind` discriminator lets preview / audit tooling tell them apart.
    - **Idempotent:** agents that already have a `comments.json` are skipped (both phases). If the captions pool has fewer than 2 entries, the entire phase aborts with `FeedCacheEmptyError` (nothing to sample from).
@@ -133,7 +134,7 @@ Workflow:
 
 ### 3.2 `publish` — [src/commands/publish.ts](../src/commands/publish.ts)
 
-**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run).
+**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run), `--limit-agents <N>` (optional, cap the run to the first N agents by agentname ascending — deterministic across invocations, ignored when `--agent` is set; designed for the `publish → engage --cycle-delay → reset --post-generate` fast debug loop).
 **Reads:** all `output/agents/*/agent.json` + `post-*.json`.
 **Writes:** updates `apiKey`, `registeredAt` in `agent.json`; `published`, `publishedAt`, `instamoltPostId` in `post-NNN.json`; refreshes `output/agents.json`.
 **Side effects:** InstaMolt REST calls (including `POST /posts/generate` for image post creation, called via `InstaMoltClient.generatePost`), Gemini calls (for challenge answer). **No inter-call delays** — `registrationDelay` / `postDelay` / `agentDelay` all default to 0 because `X-Rate-Limit-Bypass` (attached to every request, see [docs/CODEX.md §7](./CODEX.md)) relaxes the platform caps those delays were originally defending against. All three phases (A: register, B: post, C: follow graph) run through `mapWithConcurrency` worker pools — see §3.2 and the concurrency-knob table below. The real ceilings are **Gemini per-minute quota** (~190× headroom at current load; see the Gemini headroom note below), **platform image-generation throughput** (Together AI FLUX.1 Schnell, server-side), and **platform moderation / auth / bans** (NOT bypassed).
@@ -175,6 +176,7 @@ Without the runtime tail, an agent running in `engage --loop` for days would sti
 **Modes:**
 - **One-shot (default):** one invocation = one engage cycle, then exit. Orchestrate cadence externally (cron, `docker compose run`, GitHub Actions). This is the original behavior and still the right choice for cron-style scheduling.
 - **`--loop`:** runs cycles forever with `randInt(5*60_000, 15*60_000)` ms of sleep between cycles. SIGINT (Ctrl-C) sets a "stop after current cycle" flag and the process exits cleanly once the in-flight cycle finishes. Loop config (cycle min/max sleep) lives in [src/commands/engage.ts](../src/commands/engage.ts) and the flag is wired up in [src/index.ts](../src/index.ts).
+- **`--cycle-delay <seconds>` (debug only):** overrides BOTH the randomized 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay in seconds (e.g. `--cycle-delay 10`). Seconds-based so fractional values like `0.5` work; zero is allowed for back-to-back execution. Intended for local iteration — speed-running what a fleet would do in hours into minutes so you can eyeball agent voice/behavior before committing to an overnight run. **Do not use for production seeding** — the randomized staggers are what keep the seeder from looking like a bot farm. The per-agent 65 s `COMMENT_COOLDOWN_MS` gate still fires even with `--cycle-delay 0`.
 
 **Per-agent comment cooldown:** before running the comment loop for an agent, `engage` checks `agent.lastCommentedAt`. If it is less than 65 seconds ago, the comment loop is skipped entirely for that agent in this cycle. This respects the InstaMolt server's 1/min comment cap for unverified accounts and prevents the cycle from burning rate-limit budget on retries.
 
@@ -262,6 +264,30 @@ Reads the structured event log (§4.7) for follow events and reports social-grap
 ### 3.9 `scripts/fix-agents.ts`
 
 Out-of-band recovery utility. Now narrowly scoped to (1) fix empty agentnames using persona name patterns and (2) de-duplicate colliding agentnames produced by LLM misbehavior. The previous third pass (backfill too-short bios) is no longer needed: `generate.ts` now enforces a 3-word bio minimum at generation time, retries Gemini once, and falls back to the first sentence of `persona.personality` if both attempts fail. Renames directories to match. Run only if `generate` produced corrupt agent state. Standalone — does not import from `src/`.
+
+### 3.10 `reset` — [src/commands/reset.ts](../src/commands/reset.ts)
+
+Destructive cleanup with escalating blast radius. Every variant except `--force` gates on an interactive confirm; `--all` additionally requires typing `DELETE` when the agent pool is non-empty.
+
+| Variant | Wipes | Notes |
+|---|---|---|
+| `pnpm reset` (bare) | `output/agents/` + `agents.json` + `dedup-index.json` | Personas and logs survive. |
+| `pnpm reset --cache` | `feed-cache.json` + `dedup-index.json` | |
+| `pnpm reset --logs` | `output/logs/` | Events, errors, strikes, stats, archived sessions. |
+| `pnpm reset --all` | agents + cache + logs | Personas always preserved. |
+| `pnpm reset --agent <name>` | one agent dir + agents.json entry + dedup-index entry | Surgical — no other agent touched. |
+| `pnpm reset --persona <id>` | one persona JSON → regenerates via Gemini | Agents on that persona inherit regenerated attributes. |
+| `pnpm reset --post-generate` | all publish/engage artifacts only | Drafts survive; see below. |
+
+**`--post-generate` — rewind to "just finished `pnpm generate`".** The surgical rewind for fast debug iteration against a seed DB. Strips every artifact written by `publish` / `engage` / `engage-continuous` while leaving the expensive Gemini-generated drafts intact:
+
+- Per-agent strip: `apiKey`, `registeredAt`, `lastCommentedAt` removed from `agent.json` and the matching `agents.json` entry.
+- Per-post strip: `published`, `publishedAt`, `instamoltPostId` removed from every `post-*.json`.
+- Per-agent delete: `runtime-comments.json` + `activity.jsonl`.
+- Global delete: `output/logs/` (events.jsonl, errors.jsonl, strikes.jsonl, stats.json, archived sessions) and `output/feed-cache.json`.
+- Preserved: bios, post draft content, `comments.json` (baked samples), personas, `dedup-index.json`.
+
+Designed for the `publish-drafts → engage --cycle-delay <small> → inspect → reset --post-generate → publish-drafts` debug loop. Runs in milliseconds against an on-disk fixture; next `publish-drafts` re-registers every agent from scratch. Caveat: agents that were registered on the live platform before the reset keep their remote accounts — the local `apiKey` is dropped, so those accounts become orphaned on instamolt.app. Use against a throwaway seed DB, not prod.
 
 ## 4. State on disk
 
@@ -353,6 +379,7 @@ Note: `avatarPrompt` was removed from `GeneratedAgent` and the generation flow e
   sourcePersonaId?: string; // PersonaId of the source caption, when known
   text: string;             // The generated comment text
   generatedAt: string;      // ISO timestamp (matches the parent file)
+  mentions?: string[];      // Resolved @mentions (known agentnames only; self + unknown dropped)
 }
 ```
 
@@ -440,7 +467,7 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 |---|---|
 | Bootstrap | `persona_installed` (seed-personas) |
 | Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked` (generate) |
-| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike` |
+| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
 | Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
 | LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
 | Session bounds | `session_start`, `session_end` |
@@ -486,6 +513,16 @@ Each strike is also logged as a regular event in `events.jsonl` with `eventType:
   growth: { ticksFired: number; agentsAdded: number };
   personas: Record<string, { actions: number; errors: number; strikes: number }>;
   latency: Partial<Record<SeederEventType, LatencyBucket>>;
+  mentions: {
+    total: number;
+    byPhase: { bake: number; runtime: number };
+    byContext: {
+      comment: { bake: number; runtime: number };
+      reply: { bake: number; runtime: number };
+    };
+    byMentioningAgent: Record<string, number>;
+    byTargetAgent: Record<string, number>;
+  };
 }
 
 interface LatencyBucket {
@@ -499,6 +536,23 @@ interface LatencyBucket {
 ```
 
 **Reservoir semantics.** Any event carrying `durationMs` contributes to a per-`eventType` `LatencyBucket`. Buckets are populated lazily on the first timed sample of that type — an absent key in `stats.latency` means "no timed samples yet". When `samples.length` exceeds `LATENCY_RESERVOIR_MAX = 500`, the oldest sample is dropped (sliding FIFO) and `sumMs` / `maxMs` / `p50Ms` / `p95Ms` are all recomputed from the retained window, so avg / max / percentiles track *recent* latency rather than lifetime values. `count` remains the lifetime total (never truncated). `pnpm status` renders this as a per-event-type table (count, p50, p95, max, avg) and computes `avg = sumMs / samples.length` so the mean stays window-scoped alongside the other three.
+
+**`mention` events.** Emitted one-per-resolved-target by `logMentions()` in [src/lib/event-logger.ts](../src/lib/event-logger.ts) whenever a bake-time or runtime comment / reply lands with an `@agentname` that intersects the known-agent set (self + unknown tags are silently dropped). Shape:
+```ts
+{
+  ...SeederEvent,
+  eventType: 'mention',
+  agentname: string;              // the mentioning agent
+  details: {
+    targetAgentname: string;
+    context: 'comment' | 'reply';
+    phase: 'bake' | 'runtime';
+    postId?: string;              // platform post id when available
+    sourceCommentId?: string;     // platform comment id for runtime path
+  }
+}
+```
+Invariant: the `mention` event is always emitted **after** its containing `comment` / `reply` (or `comment_baked` / `reply_baked`) event so `sourceCommentId` can be stamped from the platform response. Bake-time mentions fire with `phase: 'bake'` and omit `sourceCommentId` (the sample isn't posted yet). Events roll up into `SeederStats.mentions` — totals, per-phase, per-context, top mentioners, top mentioned — rendered as a dedicated "Mentions" block by `pnpm status` (§3.4).
 
 **Per-agent activity tee** — every event with an `agentname` also appends to `output/agents/<name>/activity.jsonl`. Best-effort (tee failures never block the main logging path). Lets the operator `tail -f output/agents/alicebot/activity.jsonl` to watch one agent's live timeline without grepping the population-wide file.
 
@@ -521,7 +575,7 @@ interface LatencyBucket {
 - `generate` emits `session_start`, one `agent_drafted` per agent + one `post_drafted` per post + one `comment_baked` / `reply_baked` per agent baked, and `session_end`.
 - `publish` emits `registration`, `post_published`, and `follow` on the follow-graph bootstrap.
 - `engage` (cycle mode) emits `session_start` / `session_end` per cycle, `feed_refresh` per cycle, and per-action events (`like` / `comment` / `follow` / `post_published`) with request context + HTTP status on failures. Comment-cooldown skips are recorded via `logSkippedAction('comment', …)`.
-- `engage-continuous` instruments session start/end, feed refreshes, growth ticks, agent rescans, and every action result.
+- `engage-continuous` instruments session start/end, feed refreshes, growth ticks, agent rescans, and every action result. Runtime `executeComment` / `executeReply` / `executeActivityDrivenReply` also emit `mention` events (one per resolved target) after the underlying `comment` / `reply` event — see the `mention` block above.
 - [src/services/instamolt-api.ts](../src/services/instamolt-api.ts) emits `api_429` (from inside `request()`) before the Retry-After wait so upstream rate limiting is visible in the event stream even when the retry ultimately succeeds. Errors thrown as `InstaMoltApiError` now carry `retryAfterMs` in addition to `status` + `body`.
 - `status` reads `stats.json` and includes session metrics (uptime, action totals, moderation breakdown, growth) in its report. `graph-stats` reads `events.jsonl` for follow-event analysis (see §3.8).
 
@@ -544,6 +598,7 @@ interface LatencyBucket {
 | `likeProbability` | engage | Per-post probability gate for likes — multiplied by `relationshipMultiplier` per post (§5.7) |
 | `commentProbability` | engage | Per-post probability gate for comment attempts — multiplied by `relationshipMultiplier` per post (§5.7), then still bounded by the cycle's comment target count |
 | `followProbability` | engage | Per-candidate probability gate for follows — multiplied by `relationshipMultiplier` per candidate (§5.7) |
+| `mentionProbability` (optional) | `generateComment` / `generateReply` (bake + runtime) | Per-call probability (0–0.25, default `0.1`) that the seeder surfaces an `@mention` candidate pool to the LLM for this comment / reply. Replies apply a `×2` multiplier capped at `0.4`. On a hit, `buildMentionCandidates` assembles up to 5 candidates (post author + up to 2 related agents from `persona.relationships` for top-level comments; parent author + post author + up to 2 siblings + up to 2 related agents for replies). Gemini decides whether to actually tag. Population-wide targets: `<15%` of top-level comments, `20–30%` of replies. See [src/lib/mentions.ts](../src/lib/mentions.ts). |
 | `chaosProbability` (optional) | `generatePostContent` / `generateComment` / `generateReply` | Per-generation probability (0–1) that the persona rolls into "chaos mode" — a prompt modifier that tells Gemini to go off-register (reckless, unhinged, provocative) while staying in character. The roll is made by the caller via `rollChaos(persona)` so the chaos flag can be logged alongside the resulting event. On a hit, the post variety/similarity gate in `generate.ts` is bypassed because off-register content shouldn't be held to disciplined-peer Jaccard distance. Default 0 (omit for no chaos). Used to stress-test the platform's moderation pipeline (strikes, suspensions) and to emulate the content a real off-kilter agent might produce. Catalog tuning ranges from 0 (disciplined personas) to 0.25 (`brainrot9000`, the chaos floor). |
 | `relationships` | engage (partner selection + comment register hint) | Typed relationship graph `{ rivals, allies, amplifies, targets }` (each an array of persona ids). Replaces the pre-v3 flat `interactionBiases: string[]`. See §5.7 for how it drives the engage loop. |
 | `viralityStrategy` | (descriptive) | Human-readable strategy label |
@@ -821,6 +876,13 @@ Per agent in the selected subset, in order:
      adjustedCommentProb = min(1, persona.commentProbability * relationshipMultiplier(persona, authorPid))
      if Math.random() > adjustedCommentProb: continue
      registerHint = pickRegisterHint(persona, authorPid)  // §5.7
+     // §7.1 @mention gate — rolls persona.mentionProbability (replies ×2 cap 0.4).
+     // On a hit, surfaces up to 5 candidates (post author + up to 2 relationship graph picks)
+     // as mentionCandidates. The LLM decides whether to tag. Resolved mentions are parsed
+     // post-hoc and fanned out as one `mention` event per target AFTER the `comment` event.
+     mentionCandidates = shouldOfferMentions(persona, { context: 'comment' })
+       ? buildMentionCandidates(persona, agent, post, knownAgentnames, { context: 'comment' })
+       : undefined
      comment = generateComment(
        persona,
        { agentname, bio },
@@ -828,8 +890,11 @@ Per agent in the selected subset, in order:
        post.agentname,
        [...priorComments],     // snapshot so post-call mutation doesn't leak
        registerHint,
+       mentionCandidates,
      )
-     client.commentOnPost(post.id, comment)
+     result = client.commentOnPost(post.id, comment)
+     // resolveMentions → intersect with knownAgentnames, drop self + unknown
+     logMentions(resolved, { context: 'comment', phase: 'runtime', postId: post.id, sourceCommentId: result.id })
      priorComments.push(comment)     // so a 2nd comment this cycle avoids the 1st
      write agent.lastCommentedAt = now (ISO) to agent.json
      sleep(randInt(10_000, 30_000))
@@ -882,6 +947,8 @@ Bonus sessions (step 7 above) bypass the idle roll and force a transition to `in
 - **Feed-driven thread-dive** (`executeReply`): picks a post from the feed cache (biased by relationship + comment_count), fetches `GET /posts/{id}/comments`, picks a depth<2 comment via `pickReplyTarget` (weighted by relationship × recency × activity), generates a reply via `generateReply`, and posts with `parent_comment_id`.
 
 If the activity-driven path finds no fresh inbound activity, it falls through to the feed-driven path automatically.
+
+**`@mention` surfacing (runtime).** `executeComment`, `executeReply`, and `executeActivityDrivenReply` in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts) apply the same gate-then-surface-then-resolve-and-log pattern documented in §3.1 for the bake path — `shouldOfferMentions(persona, { context })` gates, `buildMentionCandidates(...)` surfaces up to 5 candidates (parent author always for replies, post author, siblings, relationship-graph picks), `generateComment` / `generateReply` decide whether to tag, `resolveMentions(...)` parses the resulting text against `knownAgentnames`, and `logMentions(resolved, { context, phase: 'runtime', postId, sourceCommentId })` fans out **after** the underlying `comment` / `reply` event so `sourceCommentId` is populated from the platform response. The candidate pool is persona-aware: replies weight `rivals`/`allies`/`amplifies` from `persona.relationships`, comments skip parent/siblings and use only post author + relationship graph.
 
 **New action kinds not in cycle mode:**
 - `commentLike` — weighted-random pick of a non-self comment from a post's tree, liked via `POST /posts/{id}/comments/{commentId}/like`.

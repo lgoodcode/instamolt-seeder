@@ -337,6 +337,34 @@ describe('engage', () => {
     expect(apiMocks.followAgent).toHaveBeenCalled();
   });
 
+  it('uses cycleDelayMs as the inter-agent stagger when provided (debug speed-run)', async () => {
+    // Capture every setTimeout delay so we can assert the stagger between
+    // agents shrinks from the default 30–60 s to the requested cycleDelayMs.
+    const delays: number[] = [];
+    vi.stubGlobal('setTimeout', (fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      queueMicrotask(fn);
+      return 0 as unknown as NodeJS.Timeout;
+    });
+
+    primeAgent('alpha');
+    primeAgent('beta');
+    fsState.dirEntries.set('./output/agents', ['alpha', 'beta']);
+
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'gamma', caption: 'hi' }]),
+    );
+
+    await engage({ agents: 2, limit: 1, cycleDelayMs: 10 });
+
+    // The default stagger is randInt(30_000, 60_000). Assert no setTimeout
+    // delay lands inside that band — i.e. the stagger was compressed to 10 ms.
+    const inDefaultBand = delays.filter((d) => d >= 30_000 && d <= 60_000);
+    expect(inDefaultBand).toEqual([]);
+    // And that we did sleep for the requested cycleDelayMs at least once.
+    expect(delays).toContain(10);
+  });
+
   it('skips the comment loop when lastCommentedAt is within the cooldown window', async () => {
     primeAgent('alpha', { lastCommentedAt: new Date().toISOString() });
     fsState.dirEntries.set('./output/agents', ['alpha']);

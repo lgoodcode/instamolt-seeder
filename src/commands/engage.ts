@@ -6,11 +6,18 @@ import {
   flushStats,
   initEventLogger,
   logEvent,
+  logMentions,
   logSkippedAction,
   updateAgentCounts,
 } from '@/lib/event-logger';
 import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
+import {
+  buildCommentCandidates,
+  parseResolvedMentions,
+  resolveRelatedAgentnames,
+  shouldIncludeMentionCandidates,
+} from '@/lib/mentions';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient } from '@/services/instamolt-api';
@@ -28,6 +35,13 @@ interface EngageOptions {
   agents?: number;
   limit?: number;
   loop?: boolean;
+  /**
+   * Debug-only: force a fixed inter-cycle sleep (in milliseconds) instead of
+   * the default `randomInt(5min, 15min)`. Lets operators run a tight feedback
+   * loop to eyeball agent behavior before committing to an overnight run.
+   * Production seeding should leave this unset.
+   */
+  cycleDelayMs?: number;
 }
 
 const COMMENT_COOLDOWN_MS = 65_000;
@@ -159,6 +173,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
   const maxAgents = options.agents ?? 10;
   const actionsLimit = options.limit ?? 5;
   const loopEnabled = options.loop ?? false;
+  const cycleDelayMs = options.cycleDelayMs;
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
 
@@ -218,8 +233,14 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       // subset) because the explore feed will surface posts from any
       // registered agent, not just the ones acting this cycle.
       const agentnameToPersonaId = new Map<string, string>();
+      const personaToAgentnames = new Map<string, string[]>();
+      const knownAgentnames = new Set<string>();
       for (const a of allAgents) {
         agentnameToPersonaId.set(a.agentname, a.personaId);
+        knownAgentnames.add(a.agentname);
+        const list = personaToAgentnames.get(a.personaId) ?? [];
+        list.push(a.agentname);
+        personaToAgentnames.set(a.personaId, list);
       }
 
       // Load the shared feed cache ONCE per cycle — every agent below reads
@@ -407,6 +428,27 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 // lets Gemini pick freely from all 5 example registers.
                 const registerHint = pickRegisterHint(persona, authorPid);
                 sp.message(`@${agent.agentname} — writing comment for @${post.author.agentname}`);
+
+                // Mention candidate surfacing — roll the persona's mention
+                // probability (rare by default). On a hit, pull up to 2
+                // related agentnames from the allies/amplifies/rivals
+                // graph and add the post author. Empty list on a failed
+                // roll skips the prompt block entirely.
+                const mentionCandidates = shouldIncludeMentionCandidates(
+                  persona.mentionProbability,
+                  'comment',
+                )
+                  ? buildCommentCandidates({
+                      selfAgentname: agentData.agentname,
+                      postAuthor: post.author.agentname,
+                      relatedAgentnames: resolveRelatedAgentnames(
+                        persona,
+                        personaToAgentnames,
+                        agentData.agentname,
+                      ),
+                    })
+                  : [];
+
                 // Snapshot the avoid list at call time (matches the pattern in
                 // generate.ts) so post-call mutations of `priorCommentTexts`
                 // don't retroactively change what was passed for an earlier
@@ -419,8 +461,9 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   [...priorCommentTexts],
                   registerHint,
                   rollChaos(persona),
+                  mentionCandidates,
                 );
-                await client.commentOnPost(post.id, comment);
+                const commentRes = await client.commentOnPost(post.id, comment);
                 commented++;
                 actionsUsed++;
                 cycleComments++;
@@ -454,6 +497,34 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                     preview: comment.slice(0, 80),
                   },
                 });
+                // Emit one `mention` event per resolved target. Runs AFTER
+                // the `comment` event so the events.jsonl order is
+                // `comment → mention...` and `stats.mentions` is only
+                // credited when the underlying comment succeeded. Short-
+                // circuit on `!includes('@')` — the overwhelming majority
+                // of comments have no mention so we skip the regex walk.
+                if (comment.includes('@')) {
+                  const resolvedMentions = parseResolvedMentions(
+                    comment,
+                    agentData.agentname,
+                    knownAgentnames,
+                    // Live post author isn't necessarily seeder-managed —
+                    // union into the per-call resolution set so mentions
+                    // of real platform users aren't silently dropped.
+                    [post.author.agentname],
+                  );
+                  if (resolvedMentions.length > 0) {
+                    logMentions({
+                      agentname: agent.agentname,
+                      persona: agent.personaId,
+                      targets: resolvedMentions,
+                      context: 'comment',
+                      phase: 'runtime',
+                      postId: post.id,
+                      sourceCommentId: commentRes.comment.id,
+                    });
+                  }
+                }
                 await sleep(randomInt(10000, 30000));
               } catch (err) {
                 cycleErrors++;
@@ -617,9 +688,11 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           }
         }
 
-        // Stagger between agents: 30-60 seconds
+        // Stagger between agents: 30-60 seconds by default, or a fixed
+        // cycleDelayMs for debug/speed-run previews (same knob as the
+        // inter-cycle sleep).
         if (i < selected.length - 1) {
-          const gap = randomInt(30000, 60000);
+          const gap = cycleDelayMs ?? randomInt(30000, 60000);
           await staggerSleep(gap);
         }
       }
@@ -652,7 +725,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       flushStats();
 
       if (loopEnabled && !stopRequested) {
-        const wait = randomInt(5 * 60 * 1000, 15 * 60 * 1000);
+        const wait = cycleDelayMs ?? randomInt(5 * 60 * 1000, 15 * 60 * 1000);
         await loopSleep(wait, () => stopRequested);
       }
     } while (loopEnabled && !stopRequested);

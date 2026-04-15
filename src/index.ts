@@ -108,7 +108,18 @@ async function main() {
     case 'publish': {
       const agent = getFlag('agent');
       const limit = getFlag('limit') ? parseInt(getFlag('limit')!, 10) : undefined;
-      await publish({ agent, limit });
+      const limitAgentsFlag = getFlag('limit-agents');
+      let limitAgents: number | undefined;
+      if (limitAgentsFlag !== undefined) {
+        const parsed = parseInt(limitAgentsFlag, 10);
+        if (Number.isNaN(parsed) || parsed <= 0) {
+          throw new Error(
+            `publish: --limit-agents must be a positive integer (got "${limitAgentsFlag}")`,
+          );
+        }
+        limitAgents = parsed;
+      }
+      await publish({ agent, limit, limitAgents });
       break;
     }
 
@@ -116,7 +127,18 @@ async function main() {
       const agents = parseInt(getFlag('agents') ?? '10', 10);
       const limit = parseInt(getFlag('limit') ?? '5', 10);
       const loop = args.includes('--loop');
-      await engage({ agents, limit, loop });
+      const cycleDelayFlag = getFlag('cycle-delay');
+      let cycleDelayMs: number | undefined;
+      if (cycleDelayFlag !== undefined) {
+        const seconds = Number.parseFloat(cycleDelayFlag);
+        if (Number.isNaN(seconds) || seconds < 0) {
+          throw new Error(
+            `engage: --cycle-delay must be a non-negative number (got "${cycleDelayFlag}")`,
+          );
+        }
+        cycleDelayMs = Math.round(seconds * 1000);
+      }
+      await engage({ agents, limit, loop, cycleDelayMs });
       break;
     }
 
@@ -266,8 +288,9 @@ async function main() {
       const cache = args.includes('--cache');
       const logs = args.includes('--logs');
       const all = args.includes('--all');
+      const postGenerate = args.includes('--post-generate');
       const force = args.includes('--force');
-      await reset({ agent, persona, cache, logs, all, force });
+      await reset({ agent, persona, cache, logs, all, postGenerate, force });
       break;
     }
 

@@ -510,4 +510,210 @@ describe('reset', () => {
       expect(uiState.outros.join(' ')).toMatch(/aborted/);
     });
   });
+
+  describe('--post-generate', () => {
+    /**
+     * Seed an agents dir with two agents, each carrying the publish/engage
+     * artifacts the flag is supposed to strip (apiKey/registeredAt/
+     * lastCommentedAt on agent.json, published/publishedAt/instamoltPostId
+     * on a post, plus per-agent runtime-comments.json + activity.jsonl).
+     * Also seeds agents.json with matching entries so the in-index strip is
+     * exercised.
+     */
+    function seedPostGenerateFixture(): void {
+      const alphaDir = join(config.agentsDir, 'alpha');
+      const betaDir = join(config.agentsDir, 'beta');
+      fsState.dirEntries.set(config.agentsDir, ['alpha', 'beta']);
+      fsState.dirEntries.set(alphaDir, [
+        'agent.json',
+        'post-001.json',
+        'post-002.json',
+        'comments.json',
+        'runtime-comments.json',
+        'activity.jsonl',
+      ]);
+      fsState.dirEntries.set(betaDir, ['agent.json', 'post-001.json']);
+
+      fsState.files.set(
+        join(alphaDir, 'agent.json'),
+        JSON.stringify({
+          agentname: 'alpha',
+          personaId: 'p1',
+          voiceProfileId: 'v1',
+          bio: 'alpha bio',
+          apiKey: 'key-alpha',
+          registeredAt: '2026-01-01T00:00:00.000Z',
+          lastCommentedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      );
+      fsState.files.set(
+        join(alphaDir, 'post-001.json'),
+        JSON.stringify({
+          id: 'post-001',
+          imagePrompt: 'prompt 1',
+          caption: 'caption 1',
+          aspectRatio: 'square',
+          published: true,
+          publishedAt: '2026-01-01T00:00:00.000Z',
+          instamoltPostId: 'remote-1',
+        }),
+      );
+      // Unpublished draft — should be untouched by the field strip (no
+      // publish fields present to remove) but must survive.
+      fsState.files.set(
+        join(alphaDir, 'post-002.json'),
+        JSON.stringify({
+          id: 'post-002',
+          imagePrompt: 'prompt 2',
+          caption: 'caption 2',
+          aspectRatio: 'square',
+        }),
+      );
+      fsState.files.set(
+        join(alphaDir, 'comments.json'),
+        JSON.stringify({ agentname: 'alpha', generatedAt: '2026-01-01', samples: [] }),
+      );
+      fsState.files.set(join(alphaDir, 'runtime-comments.json'), '{"comments":[]}');
+      fsState.files.set(join(alphaDir, 'activity.jsonl'), '{"eventType":"like"}\n');
+
+      fsState.files.set(
+        join(betaDir, 'agent.json'),
+        JSON.stringify({
+          agentname: 'beta',
+          personaId: 'p2',
+          voiceProfileId: 'v2',
+          bio: 'beta bio',
+          apiKey: 'key-beta',
+          registeredAt: '2026-01-01T00:00:00.000Z',
+        }),
+      );
+      fsState.files.set(
+        join(betaDir, 'post-001.json'),
+        JSON.stringify({
+          id: 'post-001',
+          imagePrompt: 'b-prompt',
+          caption: 'b-caption',
+          aspectRatio: 'landscape',
+          published: true,
+          publishedAt: '2026-01-01T00:00:00.000Z',
+          instamoltPostId: 'remote-b',
+        }),
+      );
+
+      fsState.files.set(
+        config.agentsIndexPath,
+        JSON.stringify({
+          generatedAt: '2026-01-01',
+          totalAgents: 2,
+          totalPosts: 3,
+          agents: [
+            {
+              agentname: 'alpha',
+              personaId: 'p1',
+              voiceProfileId: 'v1',
+              bio: 'alpha bio',
+              apiKey: 'key-alpha',
+              registeredAt: '2026-01-01T00:00:00.000Z',
+              lastCommentedAt: '2026-01-02T00:00:00.000Z',
+            },
+            {
+              agentname: 'beta',
+              personaId: 'p2',
+              voiceProfileId: 'v2',
+              bio: 'beta bio',
+              apiKey: 'key-beta',
+              registeredAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      );
+    }
+
+    it('strips publish/engage fields from every agent.json, post-*.json, and agents.json entry', async () => {
+      seedPostGenerateFixture();
+
+      await reset({ postGenerate: true, force: true });
+
+      const alphaAgent = JSON.parse(
+        fsState.files.get(join(config.agentsDir, 'alpha', 'agent.json'))!,
+      );
+      expect(alphaAgent).not.toHaveProperty('apiKey');
+      expect(alphaAgent).not.toHaveProperty('registeredAt');
+      expect(alphaAgent).not.toHaveProperty('lastCommentedAt');
+      // Draft fields must survive — this is the whole point of the flag.
+      expect(alphaAgent.agentname).toBe('alpha');
+      expect(alphaAgent.bio).toBe('alpha bio');
+      expect(alphaAgent.personaId).toBe('p1');
+
+      const alphaPost1 = JSON.parse(
+        fsState.files.get(join(config.agentsDir, 'alpha', 'post-001.json'))!,
+      );
+      expect(alphaPost1).not.toHaveProperty('published');
+      expect(alphaPost1).not.toHaveProperty('publishedAt');
+      expect(alphaPost1).not.toHaveProperty('instamoltPostId');
+      expect(alphaPost1.imagePrompt).toBe('prompt 1');
+      expect(alphaPost1.caption).toBe('caption 1');
+
+      const betaAgent = JSON.parse(
+        fsState.files.get(join(config.agentsDir, 'beta', 'agent.json'))!,
+      );
+      expect(betaAgent).not.toHaveProperty('apiKey');
+      expect(betaAgent).not.toHaveProperty('registeredAt');
+
+      const agentsIndex = JSON.parse(fsState.files.get(config.agentsIndexPath)!);
+      for (const entry of agentsIndex.agents) {
+        expect(entry).not.toHaveProperty('apiKey');
+        expect(entry).not.toHaveProperty('registeredAt');
+        expect(entry).not.toHaveProperty('lastCommentedAt');
+      }
+      // totalAgents / totalPosts are preserved — drafts still exist.
+      expect(agentsIndex.totalAgents).toBe(2);
+      expect(agentsIndex.totalPosts).toBe(3);
+    });
+
+    it('deletes per-agent runtime-comments.json + activity.jsonl plus output/logs + feed-cache', async () => {
+      seedPostGenerateFixture();
+
+      await reset({ postGenerate: true, force: true });
+
+      const rmPaths = fsState.rmCalls.map((c) => c.path);
+      expect(rmPaths).toContain(join(config.agentsDir, 'alpha', 'runtime-comments.json'));
+      expect(rmPaths).toContain(join(config.agentsDir, 'alpha', 'activity.jsonl'));
+      // Beta has neither sibling file; ensure we didn't fabricate rm calls
+      // for files that weren't present.
+      expect(rmPaths).not.toContain(join(config.agentsDir, 'beta', 'runtime-comments.json'));
+      expect(rmPaths).not.toContain(join(config.agentsDir, 'beta', 'activity.jsonl'));
+      expect(rmPaths).toContain(config.logsDir);
+      expect(rmPaths).toContain(config.feedCachePath);
+      // Draft artifacts must not be deleted.
+      expect(rmPaths).not.toContain(join(config.agentsDir, 'alpha', 'comments.json'));
+      expect(rmPaths).not.toContain(join(config.agentsDir, 'alpha', 'post-001.json'));
+      expect(rmPaths).not.toContain(join(config.agentsDir, 'alpha'));
+    });
+
+    it('without --force, abort on "no" leaves all state untouched', async () => {
+      seedPostGenerateFixture();
+      uiState.confirmResult = false;
+
+      await reset({ postGenerate: true });
+
+      expect(uiState.confirmCalls).toBe(1);
+      expect(fsState.rmCalls).toHaveLength(0);
+      expect(fsState.writeCalls).toHaveLength(0);
+      expect(uiState.outros.join(' ')).toMatch(/aborted/);
+    });
+
+    it('is a no-op when there are no agents on disk', async () => {
+      // Empty agents dir, no agents.json. Should still wipe logs + feed-cache
+      // (they may be populated from a prior session) but not crash.
+      fsState.dirEntries.set(config.agentsDir, []);
+
+      await reset({ postGenerate: true, force: true });
+
+      const rmPaths = fsState.rmCalls.map((c) => c.path);
+      expect(rmPaths).toContain(config.logsDir);
+      expect(rmPaths).toContain(config.feedCachePath);
+      expect(fsState.writeCalls).toHaveLength(0);
+    });
+  });
 });

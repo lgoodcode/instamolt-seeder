@@ -321,8 +321,8 @@ describe('buildCaptionsPoolFromFeedCache', () => {
     const pool = buildCaptionsPoolFromFeedCache(cache);
 
     expect(pool).toHaveLength(2);
-    expect(pool).toContainEqual({ author: 'alpha', caption: 'alpha says hi' });
-    expect(pool).toContainEqual({ author: 'beta', caption: 'beta too' });
+    expect(pool).toContainEqual({ author: 'alpha', caption: 'alpha says hi', postId: '1' });
+    expect(pool).toContainEqual({ author: 'beta', caption: 'beta too', postId: '2' });
   });
 
   it('drops posts whose caption is missing, null, or whitespace-only', () => {
@@ -334,7 +334,7 @@ describe('buildCaptionsPoolFromFeedCache', () => {
 
     const pool = buildCaptionsPoolFromFeedCache(cache);
     expect(pool).toHaveLength(1);
-    expect(pool[0]).toEqual({ author: 'gamma', caption: 'real content' });
+    expect(pool[0]).toEqual({ author: 'gamma', caption: 'real content', postId: '3' });
   });
 
   it('does not populate personaId from the feed (peers are outside the persona set)', () => {

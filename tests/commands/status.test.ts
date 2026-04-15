@@ -278,4 +278,77 @@ describe('status', () => {
     expect(out).toMatch(/brainrot9000.*3 comment samples/);
     expect(out).toMatch(/cozy_circuit.*0 comment samples/);
   });
+
+  it('renders a legacy flat-byContext stats.json without crashing (normalizes on read)', async () => {
+    // Regression for coderabbit#3084318335: renderMentions assumed
+    // mentions.byContext.{comment,reply} were already `{bake,runtime}`. A
+    // stats.json persisted under the pre-fix PR #11 shape (numeric
+    // byContext.comment / byContext.reply, absent byPhase) would render
+    // NaN / undefined here. status is read-only and skips initEventLogger,
+    // so it must call normalizeMentionsShape itself.
+    fsState.files.set(
+      './output/agents.json',
+      JSON.stringify({
+        generatedAt: '2026-04-07T00:00:00Z',
+        totalAgents: 1,
+        totalPosts: 0,
+        agents: [
+          {
+            agentname: 'alpha',
+            personaId: 'brainrot9000',
+            bio: 'a b c',
+            apiKey: 'k1',
+          },
+        ],
+      }),
+    );
+    fsState.dirEntries.set(join('./output/agents', 'alpha'), []);
+
+    // Legacy flat-byContext stats.json (PR #11 initial cut shape).
+    fsState.files.set(
+      join('./output/logs', 'stats.json'),
+      JSON.stringify({
+        lastUpdatedAt: '2026-04-10T00:00:00Z',
+        session: {
+          sessionId: 'sess-legacy',
+          startedAt: '2026-04-10T00:00:00Z',
+          uptimeMs: 0,
+          totalEvents: 20,
+        },
+        agents: { registered: 1, active: 1 },
+        actions: {
+          comment: { success: 10, skipped: 0, error: 0 },
+          reply: { success: 4, skipped: 0, error: 0 },
+          like: { success: 0, skipped: 0, error: 0 },
+          follow: { success: 0, skipped: 0, error: 0 },
+          post: { success: 0, skipped: 0, error: 0 },
+          comment_like: { success: 0, skipped: 0, error: 0 },
+        },
+        feeds: { refreshCount: 0, lastRefreshedAt: null, avgPostCount: 0 },
+        moderation: { totalStrikes: 0, byTier: {}, byCategory: {} },
+        growth: { ticksFired: 0, agentsAdded: 0 },
+        personas: {},
+        mentions: {
+          total: 6,
+          byContext: { comment: 4, reply: 2 },
+          byMentioningAgent: { alpha: 6 },
+          byTargetAgent: { beta: 6 },
+        },
+        latency: {},
+      }),
+    );
+
+    // Must not throw; must render counts pulled from the migrated shape.
+    await status();
+
+    const mentionsBody = getNoteBody('Total: 6');
+    expect(mentionsBody).toBeDefined();
+    // Legacy numeric byContext migrates into runtime; byPhase is synced to
+    // the combined total.
+    expect(mentionsBody).toContain('bake 0');
+    expect(mentionsBody).toContain('runtime 6');
+    // No NaN leakage in the rendered strings — the whole point of the fix.
+    expect(mentionsBody).not.toMatch(/NaN/);
+    expect(mentionsBody).not.toMatch(/undefined/);
+  });
 });

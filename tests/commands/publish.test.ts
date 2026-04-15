@@ -291,6 +291,47 @@ describe('publish', () => {
     expect(apiMocks.startChallenge).toHaveBeenCalledWith('alpha', expect.any(String));
   });
 
+  it('--limit-agents caps the run to the first N agents alphabetically (deterministic)', async () => {
+    // Seed in a non-alphabetical order to prove the slice is alphabetical,
+    // not index-order. Two invocations with the same --limit-agents must hit
+    // the same subset — this is the core determinism contract.
+    for (const name of ['charlie', 'alpha', 'bravo', 'delta']) {
+      primeAgent(name);
+    }
+    primeIndex(['charlie', 'alpha', 'bravo', 'delta']);
+
+    apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockImplementation(async (_rid, _ans) => ({
+      success: true,
+      agent: { agentname: 'n/a', api_key: 'key', is_verified: false },
+    }));
+
+    await publish({ skipFollowGraph: true, limitAgents: 2 });
+
+    const registered = apiMocks.startChallenge.mock.calls.map((args) => args[0]);
+    expect(registered).toEqual(['alpha', 'bravo']);
+  });
+
+  it('--limit-agents is ignored when --agent is also passed', async () => {
+    // --agent is already a single-agent scope — --limit-agents would just be
+    // noise. The flag is documented as ignored in that case.
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      primeAgent(name);
+    }
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockResolvedValue({
+      success: true,
+      agent: { agentname: 'beta', api_key: 'key-beta', is_verified: false },
+    });
+
+    await publish({ agent: 'beta', limitAgents: 1, skipFollowGraph: true });
+
+    const registered = apiMocks.startChallenge.mock.calls.map((args) => args[0]);
+    expect(registered).toEqual(['beta']);
+  });
+
   it('skips agents with empty or too-short names', async () => {
     fsState.files.set(
       './output/agents.json',
@@ -651,6 +692,36 @@ describe('publish', () => {
     }
     // Phase C should have run (alpha has candidates), so followAgent is called
     // at least once.
+    expect(apiMocks.followAgent).toHaveBeenCalled();
+  });
+
+  it('--limit-agents N only creates follow edges FROM the first N agents in Phase C', async () => {
+    // Regression for coderabbit#3084387624: Phase C was iterating the full
+    // registered fleet as followers regardless of --limit-agents, so a debug
+    // run with --limit-agents 2 would still mutate the follow graph on every
+    // other agent. The subset must apply to Phase C followers the same way
+    // it applies to Phase A/B.
+    for (const name of ['alpha', 'bravo', 'charlie', 'delta']) {
+      primeAgent(name, { apiKey: `key-${name}` });
+    }
+    primeIndex(['charlie', 'alpha', 'delta', 'bravo']);
+
+    const { InstaMoltClient } = await import('@/services/instamolt-api');
+    const ctor = InstaMoltClient as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    await publish({ limitAgents: 2 });
+
+    // alpha + bravo win the ascending-alphabetical slice. Only their keys
+    // should appear as followers — charlie and delta stay out of Phase C.
+    const followerKeys = ctor.mock.calls
+      .map((args: unknown[]) => args[0])
+      .filter((k: unknown): k is string => typeof k === 'string' && k.startsWith('key-'));
+    const unique = new Set(followerKeys);
+    expect(unique.has('key-alpha')).toBe(true);
+    expect(unique.has('key-bravo')).toBe(true);
+    expect(unique.has('key-charlie')).toBe(false);
+    expect(unique.has('key-delta')).toBe(false);
     expect(apiMocks.followAgent).toHaveBeenCalled();
   });
 

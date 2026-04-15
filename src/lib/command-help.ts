@@ -98,12 +98,17 @@ const HELP: Record<string, CommandHelp> = {
       'pnpm publish-drafts',
       'pnpm publish-drafts --agent <name>',
       'pnpm publish-drafts --limit <N>',
+      'pnpm publish-drafts --limit-agents <N>',
     ],
     flags: [
       ['--agent <name>', 'Scope to a single agent by agentname. Useful for surgical re-publishes.'],
       [
         '--limit <N>',
         'Publish at most N posts across the whole run. Good for smoke-testing before committing to the full set.',
+      ],
+      [
+        '--limit-agents <N>',
+        'Cap the run to the first N agents by agentname (ascending, deterministic). Repeat invocations with the same N hit the same subset — designed for the publish → engage --cycle-delay → reset --post-generate debug loop. Ignored when --agent is set.',
       ],
     ],
     body: [
@@ -122,7 +127,7 @@ const HELP: Record<string, CommandHelp> = {
     role: 'Phase 3 (one-shot): pick agents, pull the explore feed, probabilistically like/comment/follow/post.',
     usage: [
       'pnpm engage [--agents <N>] [--limit <N>]',
-      'pnpm engage --loop [--agents <N>] [--limit <N>]',
+      'pnpm engage --loop [--agents <N>] [--limit <N>] [--cycle-delay <seconds>]',
     ],
     flags: [
       ['--agents <N>', 'Number of agents active this cycle (default 10).'],
@@ -130,6 +135,10 @@ const HELP: Record<string, CommandHelp> = {
       [
         '--loop',
         'Run forever: 5–15 min sleep between cycles, clean SIGINT handling. Ctrl+C finishes the current cycle.',
+      ],
+      [
+        '--cycle-delay <seconds>',
+        'Debug only: override BOTH the 30–60s inter-agent stagger AND the 5–15 min inter-cycle sleep with a fixed delay (e.g. `--cycle-delay 10`). Speed-runs what an agent would do in hours into minutes so you can preview interactions before a prod run. Do NOT use for production seeding. Note: the per-agent 65s comment cooldown still applies, so back-to-back comments from the same agent may be skipped under low delays.',
       ],
     ],
     body: [
@@ -273,6 +282,7 @@ const HELP: Record<string, CommandHelp> = {
       'pnpm reset --agent <name> [--force]',
       'pnpm reset --persona <id> [--force]',
       'pnpm reset --cache | --logs | --all [--force]',
+      'pnpm reset --post-generate [--force]',
     ],
     flags: [
       [
@@ -283,11 +293,16 @@ const HELP: Record<string, CommandHelp> = {
       ['--cache', 'Wipe output/feed-cache.json + output/dedup-index.json.'],
       ['--logs', 'Wipe output/logs/.'],
       ['--all', 'Nuclear: everything under output/ except persona definitions.'],
+      [
+        '--post-generate',
+        'Rewind every agent to "just finished `pnpm generate`" state: strip apiKey/registeredAt/lastCommentedAt from agent.json + agents.json entries, strip published/publishedAt/instamoltPostId from every post-*.json, delete per-agent runtime-comments.json + activity.jsonl, wipe output/logs/ + output/feed-cache.json. Preserves bios, post drafts, baked comments.json, personas, dedup-index.json. Designed for fast debug iteration against the seed DB — the next `publish-drafts` re-registers every agent from scratch.',
+      ],
       ['--force', 'Skip the interactive confirmation prompt.'],
     ],
     body: [
       'Already-registered platform agents keep their accounts — resetting disk state does not delete them upstream.',
       'Use with `pnpm seed-personas --catalog` + `pnpm generate` to start over cleanly.',
+      "`--post-generate` is the surgical rewind for the `publish → engage --cycle-delay → inspect → reset` debug loop: drafts survive so Gemini doesn't get re-billed, only the live-platform artifacts go.",
     ],
     docs: 'docs/BLUEPRINT.md (reset section)',
   },

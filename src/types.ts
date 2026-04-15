@@ -205,6 +205,25 @@ export interface Persona {
    * to 0.15–0.25. The chaos roll is logged in the event stream so strike
    * hit rates can be correlated to chaotic-vs-normal generations. */
   chaosProbability?: number;
+  /**
+   * Probability that a generated comment or reply is passed an `@mention`
+   * candidate list. Controls how often this persona reaches out to other
+   * agents by name — tuned to stay RARE.
+   *
+   * **Effective range: 0–0.25** (catalog and hand-authored values). Higher
+   * inputs are hard-clamped by `effectiveMentionProbability` in
+   * [src/lib/mentions.ts](./lib/mentions.ts) via `MENTION_PROBABILITY_MAX`
+   * before context math, so a malformed/hand-edited persona can't break the
+   * documented gate.
+   *
+   * Replies get an internal ×2 bump (capped at `REPLY_MENTION_PROB_CAP = 0.4`)
+   * because threads are the natural place to address `@parent.author`. A
+   * failed roll omits the candidate list from the LLM prompt entirely, so
+   * mentions are deterministic in their absence. Default `0.1` when a
+   * Gemini-generated persona lacks the field; hand-authored personas always
+   * supply it.
+   */
+  mentionProbability?: number;
 }
 
 // --- Generated output (written to JSON files) ---
@@ -257,6 +276,10 @@ export interface CommentSample {
   sourceAuthor: string;
   /** PersonaId of the source caption — useful for diversity reporting. */
   sourcePersonaId?: string;
+  /** PostId of the source caption, when available. Populated by the bake
+   * path so the `generate` caller can stamp `postId` on fan-out `mention`
+   * events without re-plumbing the source post through its own scope. */
+  sourcePostId?: string;
   /**
    * Parent comment the reply was written against. Populated only when
    * `kind === 'reply'`.
@@ -274,6 +297,14 @@ export interface CommentSample {
   text: string;
   /** ISO timestamp of generation. */
   generatedAt: string;
+  /**
+   * Resolved `@mentions` extracted from `text` — population-intersected
+   * agentnames (no self, no unknowns). Populated post-hoc by running the
+   * platform's `/@([\w-]+)/g` regex over the generated text; empty array
+   * (or omitted) when the sample contains no resolvable mentions. Absent
+   * on pre-feature samples.
+   */
+  mentions?: string[];
 }
 
 export interface AgentCommentsFile {
@@ -646,7 +677,17 @@ export type SeederEventType =
   | 'agent_drafted'
   | 'post_drafted'
   | 'comment_baked'
-  | 'reply_baked';
+  | 'reply_baked'
+  // Mention fan-out: one event per resolved `@mention` target in a posted
+  // comment or reply (or, at bake time, a staged sample). Emitted AFTER the
+  // containing `comment` / `reply` event so the sourceId can be stamped
+  // from the platform response. `details` carries:
+  //   - targetAgentname: the mentioned agent
+  //   - context: 'comment' | 'reply'
+  //   - phase: 'bake' | 'runtime'
+  //   - sourceCommentId: the platform comment.id when runtime, else omitted
+  //   - postId: the post the mention lives on
+  | 'mention';
 
 export interface SeederEvent {
   timestamp: string;
@@ -762,6 +803,33 @@ export interface SeederStats {
     agentsAdded: number;
   };
   personas: Record<string, { actions: number; errors: number; strikes: number }>;
+  /**
+   * Mention fan-out aggregation. One increment per resolved `@mention` event
+   * emitted via the logger. Denominators for rate computation come from
+   * `actions.comment.success` + `actions.reply.success` at render time —
+   * mention rate is not pre-stored to avoid double-bookkeeping drift.
+   */
+  mentions: {
+    total: number;
+    /** Phase-only totals across all contexts. Derivable from `byContext`
+     * but kept here for cheap top-line rendering. */
+    byPhase: { bake: number; runtime: number };
+    /**
+     * Cross-product of context × phase. Nested (rather than flat) so
+     * `pnpm status` can compute a *runtime-only* rate (`runtime mentions
+     * / runtime comment success`) without mixing bake-phase counts into
+     * the numerator while the denominator is runtime-only — that
+     * mismatch was overstating rates per CodeRabbit feedback on PR #11.
+     */
+    byContext: {
+      comment: { bake: number; runtime: number };
+      reply: { bake: number; runtime: number };
+    };
+    /** Agentname → count of mentions this agent has made. */
+    byMentioningAgent: Record<string, number>;
+    /** Agentname → count of times this agent has been mentioned. */
+    byTargetAgent: Record<string, number>;
+  };
   /**
    * Per-event-type latency aggregates. Populated only for events that carry
    * `durationMs`. Keyed by `SeederEventType`; read by `pnpm status` to

@@ -490,15 +490,15 @@ Each strike is also logged as a regular event in `events.jsonl` with `eventType:
 
 interface LatencyBucket {
   count: number;     // total timed samples ever seen (not truncated by reservoir)
-  sumMs: number;     // lifetime sum — divide by count for the true mean
-  maxMs: number;     // lifetime max
+  sumMs: number;     // sum of durations currently retained in `samples`
+  maxMs: number;     // max of durations currently retained in `samples`
   p50Ms: number;     // recomputed from `samples` on each push
   p95Ms: number;     // recomputed from `samples` on each push
   samples: number[]; // sliding FIFO reservoir, capped at LATENCY_RESERVOIR_MAX = 500
 }
 ```
 
-**Reservoir semantics.** Any event carrying `durationMs` contributes to a per-`eventType` `LatencyBucket`. Buckets are populated lazily on the first timed sample of that type — an absent key in `stats.latency` means "no timed samples yet". When `samples.length` exceeds `LATENCY_RESERVOIR_MAX = 500`, the oldest sample is dropped (sliding FIFO) and `p50Ms` / `p95Ms` are recomputed from the retained window, so percentiles track *recent* latency rather than lifetime averages. `count` / `sumMs` / `maxMs` are lifetime totals and never truncated. `pnpm status` renders this as a per-event-type table (count, p50, p95, max, avg).
+**Reservoir semantics.** Any event carrying `durationMs` contributes to a per-`eventType` `LatencyBucket`. Buckets are populated lazily on the first timed sample of that type — an absent key in `stats.latency` means "no timed samples yet". When `samples.length` exceeds `LATENCY_RESERVOIR_MAX = 500`, the oldest sample is dropped (sliding FIFO) and `sumMs` / `maxMs` / `p50Ms` / `p95Ms` are all recomputed from the retained window, so avg / max / percentiles track *recent* latency rather than lifetime values. `count` remains the lifetime total (never truncated). `pnpm status` renders this as a per-event-type table (count, p50, p95, max, avg) and computes `avg = sumMs / samples.length` so the mean stays window-scoped alongside the other three.
 
 **Per-agent activity tee** — every event with an `agentname` also appends to `output/agents/<name>/activity.jsonl`. Best-effort (tee failures never block the main logging path). Lets the operator `tail -f output/agents/alicebot/activity.jsonl` to watch one agent's live timeline without grepping the population-wide file.
 

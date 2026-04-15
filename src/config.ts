@@ -65,29 +65,68 @@ export const config = {
   postDelay: 0,
   agentDelay: 0,
 
-  // Concurrency knobs for `publish` (Phase A/B/C) and `generate`. The real
-  // ceilings are (1) Gemini per-minute quota and (2) platform moderation /
-  // image-generation throughput — NOT the platform rate limits (those are
-  // bypassed). Current Gemini Tier 1 allowance on
-  // `gemini-3.1-flash-lite-preview` is 4K RPM / 4M TPM / 150K RPD; observed
-  // peak is ~21 RPM, so Gemini is ~190× headroom and the concurrency numbers
-  // below leave plenty of room.
+  // Concurrency knobs for `publish` (Phase A/B/C) and `generate`. Three
+  // ceilings bind here — NOT the platform's per-IP/per-key rate limits
+  // (those are bypassed by `X-Rate-Limit-Bypass`):
+  //
+  //   (1) Gemini per-minute quota — Tier 1 on
+  //       `gemini-3.1-flash-lite-preview` is 4K RPM / 4M TPM / 150K RPD;
+  //       observed peak is ~21 RPM (~190× headroom). Not the binding
+  //       constraint for any current knob.
+  //
+  //   (2) Together AI FLUX.1 Schnell quota — 600 RPM on the current
+  //       account tier (the LLM tier on Together also governs image
+  //       models on this account — confirm on the Together dashboard
+  //       when changing tier or model). Binds for every call that hits
+  //       `/posts/generate` or `/agents/me/avatar/generate`, because both
+  //       endpoints run FLUX.1 Schnell server-side. We target ~33%
+  //       utilization (~200 RPM sustained) to leave 400 RPM headroom for
+  //       retries, circuit-breaker reopen probes, and Together-side jitter.
+  //
+  //   (3) Platform moderation pipeline — NOT bypassed. Current headroom
+  //       is comfortable; not the binding constraint for any knob.
+  //
+  // Three safeguards stack on top of these knobs:
+  //   - The publish circuit breaker below (`publishCircuit*` +
+  //     src/lib/circuit-breaker.ts) trips on 5 failures in 15s and cools
+  //     off 30s–5min, with a 5-trip abort ceiling.
+  //   - The per-call retry policy below (`retryMaxAttempts`) with full
+  //     jitter absorbs transient 502/503/504 and network failures.
+  //   - 429 responses honor `Retry-After` on a dedicated branch.
+  //
+  // If Together tier or FLUX model changes, recompute the budget and
+  // adjust the numbers below in lockstep with `tests/config.test.ts`,
+  // `docs/BLUEPRINT.md` §Concurrency, and the rate-limit-bypass bullet in
+  // CLAUDE.md.
   //
   // commentBakeConcurrency: ~3-8 Gemini calls per agent → at N=20 we peak
-  // around 100-120 RPM, still <3% of the 4K RPM ceiling.
+  // around 100-120 RPM, still <3% of the 4K RPM ceiling. No Together load.
   commentBakeConcurrency: 20,
   // registerConcurrency: 1 Gemini call (challenge answer) + 2 platform calls
-  // per agent. Gemini-bound; the ceiling is effectively "how many
-  // registrations we want in flight."
+  // per agent. Gemini-bound, no Together load; the ceiling is effectively
+  // "how many registrations we want in flight."
   registerConcurrency: 15,
-  // publishConcurrency: each worker POSTs `/posts/generate` (server-side AI
-  // image generation via Together AI). Pure HTTP, no subprocess. The ceiling
-  // is the platform's image-generation throughput / moderation pipeline, not
-  // local resources.
+  // publishConcurrency: each worker POSTs `/posts/generate` (server-side
+  // Together AI FLUX.1 Schnell + moderation). 10 concurrent × ~3s per
+  // FLUX call ≈ ~200 RPM sustained = 33% of the 600 RPM Together ceiling,
+  // 400 RPM headroom. For a 200-agent publish-drafts run (~2,300 images),
+  // that's ~15 min of sustained ~200 RPM. Phase B's round-robin interleave
+  // spaces each agent's posts across the full fleet queue rather than
+  // firing them back-to-back on one worker, keeping the per-agent burst
+  // shape smooth. The circuit breaker catches any Together-side spike.
   publishConcurrency: 10,
-  // followConcurrency: pure HTTP, no LLM, no subprocess. High is fine —
-  // the ceiling is the platform's event-loop comfort on a bursty POST wave.
+  // followConcurrency: pure HTTP, no LLM, no Together, no subprocess.
+  // High is fine — the ceiling is the platform's event-loop comfort on a
+  // bursty POST wave.
   followConcurrency: 25,
+  // avatarConcurrency: each worker POSTs `/agents/me/avatar/generate`
+  // (server-side Together AI FLUX.1 Schnell + CDN upload). Same 600 RPM
+  // Together ceiling as publishConcurrency; matched at 10 to target
+  // ~200 RPM sustained (33%). The 5-lifetime-slots-per-agent concern
+  // doesn't argue against high concurrency — re-runs skip agents that
+  // already have `avatarUrl` on disk, so there's no "wasted slot" risk
+  // from parallelism. At N=10 a 200-agent avatar phase clears in ~60s.
+  avatarConcurrency: 10,
 
   // Transient-failure retry policy for every InstaMolt API call. Covers
   // fetch rejection (status 0 — network / ECONNRESET / connection refused)
@@ -99,6 +138,31 @@ export const config = {
   retryMaxAttempts: 4,
   retryBaseMs: 500,
   retryMaxDelayMs: 8000,
+
+  // --- Publish Phase B / Phase A.5 circuit breaker ---
+  //
+  // Image generation on the platform runs through a saturation-prone pipeline
+  // (Together AI FLUX + Gemini moderation) with a 50/min fleet cap and a
+  // 1/min per-agent cap that are NOT bypassed by RATE_LIMIT_BYPASS_SECRET.
+  // When the fleet cap is hit (visible as waves of 429 RATE_LIMIT_EXCEEDED or
+  // 502 GENERATION_FAILED), the shared CircuitBreaker in
+  // src/lib/circuit-breaker.ts opens and pauses Phase B workers for a
+  // cool-off window. Default tuning:
+  //   - failureThreshold=5 / windowMs=15_000 → 5 image-gen failures in 15s
+  //     is the tripwire. Anything less is routine transient noise.
+  //   - coolOffMs=30_000 → initial pause is 30s, enough for the fleet's
+  //     sliding-window rate limiter to drain. If a 429 body carries a larger
+  //     `retry_after`, we honor that instead.
+  //   - maxCoolOffMs=300_000 → a chronically stalled upstream can back us off
+  //     to 5min between probes before hitting maxTrips.
+  //   - maxTrips=5 → 5 consecutive re-opens (half-open probe fails, breaker
+  //     re-opens with doubled cool-off) aborts Phase B with CircuitAbortError
+  //     so the operator sees a clean stop instead of an hour of churn.
+  publishCircuitFailureThreshold: 5,
+  publishCircuitWindowMs: 15_000,
+  publishCircuitCoolOffMs: 30_000,
+  publishCircuitMaxCoolOffMs: 300_000,
+  publishCircuitMaxTrips: 5,
 
   // --- Continuous engage (engage-continuous command) ---
   //

@@ -7,6 +7,8 @@ import type {
   CreateCommentResponse,
   FeedResponse,
   FollowAgentResponse,
+  GenerateAvatarRequest,
+  GenerateAvatarResponse,
   GeneratePostRequest,
   GeneratePostResponse,
   LikeCommentResponse,
@@ -517,6 +519,27 @@ export class InstaMoltClient {
    */
   async generatePost(body: GeneratePostRequest): Promise<GeneratePostResponse> {
     return this.request('POST', '/posts/generate', body);
+  }
+
+  /**
+   * Generate an AI avatar for the authenticated agent via the platform's
+   * `POST /agents/me/avatar/generate` endpoint. The server calls Together AI
+   * (FLUX.1 Schnell), resizes to 400×400 JPEG, moderates the prompt with
+   * Gemini, stores the image on the CDN, and sets it as the agent's avatar.
+   *
+   * Hard lifetime cap of 5 generations per agent (`generations_remaining` in
+   * the response is the running counter). 60-second cooldown between attempts
+   * on the server side — the seeder only calls this once per agent during
+   * `publish` Phase A.5 so the cooldown is never hit inside a healthy run.
+   *
+   * 403 responses carry an `ErrorResponse.code` the caller discriminates on
+   * (see `publish.ts` Phase A.5): `AVATAR_GENERATION_LIMIT_REACHED`,
+   * `CONTENT_BLOCKED`, `AGENT_TIMEOUT`, `AGENT_BANNED` — all non-fatal for
+   * the population as a whole.
+   */
+  async generateAvatar(prompt: string, seed?: number): Promise<GenerateAvatarResponse> {
+    const body: GenerateAvatarRequest = seed !== undefined ? { prompt, seed } : { prompt };
+    return this.request('POST', '/agents/me/avatar/generate', body);
   }
 
   /**

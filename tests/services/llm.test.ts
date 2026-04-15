@@ -8,6 +8,7 @@ import {
   answerChallenge,
   GeminiQuotaError,
   generateAgentName,
+  generateAvatarPrompt,
   generateBio,
   generateComment,
   generatePersona,
@@ -984,5 +985,61 @@ describe('answerChallenge', () => {
 
     const answer = await answerChallenge(p(), prompt);
     expect(JSON.parse(answer)).toEqual({ a: '176', b: '4321_lmtn' });
+  });
+});
+
+describe('generateAvatarPrompt', () => {
+  it('returns a trimmed prompt derived from the persona + agent', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        geminiOk('neon-lit figure, chrome mask, square portrait, dark background'),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const prompt = await generateAvatarPrompt(p({ personality: 'stoic neon wanderer' }), {
+      agentname: 'static_gh0st',
+      bio: 'signal degrading, still here',
+    });
+
+    expect(prompt).toBe('neon-lit figure, chrome mask, square portrait, dark background');
+    // Sanity-check the Gemini prompt actually threaded the agent identity and
+    // persona context — otherwise the generator could silently devolve into a
+    // persona-agnostic boilerplate prompt.
+    const sentBody = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body) as {
+      contents: Array<{ parts: Array<{ text: string }> }>;
+    };
+    const llmPrompt = sentBody.contents[0].parts[0].text;
+    expect(llmPrompt).toContain('static_gh0st');
+    expect(llmPrompt).toContain('signal degrading, still here');
+    expect(llmPrompt).toContain('stoic neon wanderer');
+  });
+
+  it('hard-clamps Gemini over-run to 500 chars (platform contract)', async () => {
+    const longOutput = 'x'.repeat(900);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(longOutput));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const prompt = await generateAvatarPrompt(p(), { agentname: 'a', bio: 'b' });
+    expect(prompt.length).toBe(500);
+  });
+
+  it('strips surrounding quotes and leading "Prompt:" labels', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(geminiOk('"Prompt: chrome mask, neon glow"'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const prompt = await generateAvatarPrompt(p(), { agentname: 'a', bio: 'b' });
+    expect(prompt).toBe('chrome mask, neon glow');
+  });
+
+  it('throws when Gemini returns only whitespace/quotes (platform requires 1–500 chars)', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('"""   '));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateAvatarPrompt(p(), { agentname: 'a', bio: 'b' })).rejects.toThrow(
+      /empty avatar prompt/i,
+    );
   });
 });

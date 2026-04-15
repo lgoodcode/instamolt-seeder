@@ -32,7 +32,8 @@
     "prepare": "simple-git-hooks || true",
     "git:clean": "tsx scripts/git-clean.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
-    "rename-drafts": "tsx scripts/rename-unpublished-drafts.ts"
+    "rename-drafts": "tsx scripts/rename-unpublished-drafts.ts",
+    "avatars": "tsx scripts/generate-avatars.ts"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",

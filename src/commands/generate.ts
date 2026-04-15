@@ -39,6 +39,7 @@ import { type AgentAssignment, getAgentAssignments } from '@/personas/registry';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import {
   generateAgentName,
+  generateAvatarPrompt,
   generateBio,
   generatePostContent,
   type PostContent,
@@ -298,6 +299,40 @@ export async function generate(
           voiceProfileId: spec.voiceProfile.id,
           bio,
         };
+
+        // Bake the avatar prompt. Text-only Gemini call; publish Phase A.5
+        // hands this verbatim to `POST /agents/me/avatar/generate` which
+        // runs Together AI FLUX server-side. Soft-failure: a throw here
+        // leaves `avatarPrompt` unset and the backfill script
+        // (`pnpm avatars`) will fill it in later — one bad prompt draft
+        // must not abort the whole persona block.
+        const avatarPromptStartedAt = Date.now();
+        try {
+          const avatarPrompt = await generateAvatarPrompt(persona, agent);
+          agent.avatarPrompt = avatarPrompt;
+          logEvent({
+            eventType: 'avatar_prompt_drafted',
+            agentname,
+            persona: persona.id,
+            success: true,
+            durationMs: Date.now() - avatarPromptStartedAt,
+            details: {
+              voiceProfileId: spec.voiceProfile.id,
+              promptLength: avatarPrompt.length,
+            },
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log('warn', `  @${agentname}: avatar prompt draft failed (${msg}); leaving unset`);
+          logEvent({
+            eventType: 'avatar_prompt_drafted',
+            agentname,
+            persona: persona.id,
+            success: false,
+            durationMs: Date.now() - avatarPromptStartedAt,
+            error: msg,
+          });
+        }
 
         // Create agent directory + write agent.json before posts so a crash
         // mid-post-generation still leaves a usable identity on disk.

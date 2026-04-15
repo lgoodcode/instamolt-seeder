@@ -703,6 +703,45 @@ describe('reset', () => {
       expect(uiState.outros.join(' ')).toMatch(/aborted/);
     });
 
+    it('strips avatarUrl/avatarGeneratedAt/avatarGenerationSeed but preserves avatarPrompt', async () => {
+      // After --post-generate the apiKey is dropped, so the next publish-drafts
+      // registers a fresh platform agent. The stored avatarUrl belongs to the
+      // now-orphaned prior account — if we kept it, publish's `needsAvatar`
+      // gate (`apiKey && !avatarUrl`) would short-circuit and the new agent
+      // would stay avatarless on the platform. avatarPrompt survives because
+      // it's pre-registration and the next publish pass reuses it.
+      const alphaDir = join(config.agentsDir, 'alpha');
+      fsState.dirEntries.set(config.agentsDir, ['alpha']);
+      fsState.dirEntries.set(alphaDir, ['agent.json']);
+      fsState.files.set(
+        join(alphaDir, 'agent.json'),
+        JSON.stringify({
+          agentname: 'alpha',
+          personaId: 'p1',
+          voiceProfileId: 'v1',
+          bio: 'alpha bio',
+          avatarPrompt: 'a portrait',
+          avatarUrl: 'https://cdn.example/avatars/alpha.jpg',
+          avatarGeneratedAt: '2026-01-01T00:00:00.000Z',
+          avatarGenerationSeed: 42,
+          apiKey: 'key-alpha',
+          registeredAt: '2026-01-01T00:00:00.000Z',
+          lastCommentedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      );
+
+      await reset({ postGenerate: true, force: true });
+
+      const alpha = JSON.parse(fsState.files.get(join(alphaDir, 'agent.json'))!);
+      expect(alpha).not.toHaveProperty('apiKey');
+      expect(alpha).not.toHaveProperty('registeredAt');
+      expect(alpha).not.toHaveProperty('lastCommentedAt');
+      expect(alpha).not.toHaveProperty('avatarUrl');
+      expect(alpha).not.toHaveProperty('avatarGeneratedAt');
+      expect(alpha).not.toHaveProperty('avatarGenerationSeed');
+      expect(alpha.avatarPrompt).toBe('a portrait');
+    });
+
     it('is a no-op when there are no agents on disk', async () => {
       // Empty agents dir, no agents.json. Should still wipe logs + feed-cache
       // (they may be populated from a prior session) but not crash.

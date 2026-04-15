@@ -95,6 +95,7 @@ Workflow:
 4. For each allocation:
    - **Bounded agentname retry loop.** For up to `MAX_AGENTNAME_ATTEMPTS = 8` attempts, call `generateAgentName(persona, voiceProfile, avoidSample, rejectedThisRun)` where `avoidSample` is a `pickDiverseAndRecent` slice of existing names (`AGENTNAME_PROMPT_SAMPLE_K = 8`) and `rejectedThisRun` is the running list of candidates this agent has already tried. The voice profile (not the persona) owns the `usernameStyle` field — pattern + 5–8 examples + persona-specific guidance + `preserveCase` flag — which is what shapes the prompt. Two agents in the same persona but different voice profiles produce structurally different handles; see [docs/VOICE-PROFILE-CATALOG.md](./VOICE-PROFILE-CATALOG.md) for the per-profile pattern assignments and [docs/USERNAME-REFERENCE.md](./USERNAME-REFERENCE.md) for the full pattern taxonomy. After each candidate, reject locally if empty or `< 3` chars or already in `localTaken`; otherwise call `probeClient.isAgentnameAvailable(candidate)` (`GET /agents/{name}` — 200 = taken, 404 = available) and accept on the first candidate that clears both gates. The loop throws if the budget is exhausted; the outer `try/catch` records the agent as failed in the event log without halting the run. The live availability check is the real uniqueness guarantee — it catches collisions with agents from prior seed runs that this working copy has never seen.
    - Build the bio avoid-list with `pickDiverseAndRecent(allBiosForPersona, identity, BIO_PROMPT_SAMPLE_K=12)` from [src/lib/similarity.ts](../src/lib/similarity.ts). Half are the most recent bios (continuity), half are picked via greedy farthest-point sampling over the persona's full corpus from the dedup index (breadth). Pass the curated list into `generateBio(persona, voiceProfile, sample)`. The voice profile is the agent's assigned `VoiceProfile` and is required — its dials drive the surface style (caps, punctuation, length, literacy, typos) so two agents in the same persona don't collapse onto the persona tagline as a structural template. The avoid-list framing demands STRUCTURAL variety (different sentence count, different opener, different closer), not just lexical. The persona tagline is framed as a *topic hint* — not a voice anchor — so the literal numbers and named entities in it don't get reused across the cohort. The same K stays constant regardless of agent count, but at 1000 agents/persona the sample now spans the full corpus instead of just the last 12 sequential bios from one batch.
+   - Bake the avatar prompt via `generateAvatarPrompt(persona, agent)` — one text-only Gemini call that anchors on persona personality + tone + visual aesthetic + agent bio + agentname, returns a FLUX.1-Schnell-friendly prompt, hard-clamped to 500 chars (the platform endpoint's `prompt` ceiling). Stored on `agent.avatarPrompt`. No platform call here — the prompt is the seeder's only local output; `publish` Phase A.5 hands it to `POST /agents/me/avatar/generate` after the agent has an API key. Soft-failure: a throw here leaves `avatarPrompt` unset and `scripts/generate-avatars.ts` (exposed as `pnpm avatars`) will fill it in later. One bad prompt draft must not abort the persona block.
    - Write `agent.json` immediately (so a crash mid-post-generation still leaves a usable identity on disk).
    - For each post `1..M`: build the peer avoid-list with `pickDiverseAndRecent(peerPosts, p => imagePrompt+caption, PEER_POST_PROMPT_SAMPLE_K=6)` over the full persona post pool, then call `generatePostWithSimilarityGate(persona, voiceProfile, n, M, priorPosts, peerSnapshot)`:
      - `voiceProfile` is the agent's assigned `VoiceProfile`, threaded through to `generatePostContent` and spliced into the Gemini prompt via the same `formatVoiceBlock` helper used by `generateBio`. The persona tagline is demoted to a topic hint and the `examplePosts` block is reframed as "topical range" rather than "voice anchor" so Gemini doesn't reuse the specific numbers / named entities / dramatic events from the few-shot.
@@ -134,12 +135,18 @@ Workflow:
 
 ### 3.2 `publish` — [src/commands/publish.ts](../src/commands/publish.ts)
 
-**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run), `--limit-agents <N>` (optional, cap the run to the first N agents by agentname ascending — deterministic across invocations, ignored when `--agent` is set; designed for the `publish → engage --cycle-delay → reset --post-generate` fast debug loop).
+**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run), `--limit-agents <N>` (optional, cap the run to the first N agents by agentname ascending — deterministic across invocations, ignored when `--agent` is set; designed for the `publish → engage --cycle-delay → reset --post-generate` fast debug loop), `--yes` / `-y` (skip the pre-flight target-URL confirmation prompt — same semantics as on `engage` / `engage-continuous`, see §3.3).
 **Reads:** all `output/agents/*/agent.json` + `post-*.json`.
 **Writes:** updates `apiKey`, `registeredAt` in `agent.json`; `published`, `publishedAt`, `instamoltPostId` in `post-NNN.json`; refreshes `output/agents.json`.
 **Side effects:** InstaMolt REST calls (including `POST /posts/generate` for image post creation, called via `InstaMoltClient.generatePost`), Gemini calls (for challenge answer). **No inter-call delays** — `registrationDelay` / `postDelay` / `agentDelay` all default to 0 because `X-Rate-Limit-Bypass` (attached to every request, see [docs/CODEX.md §7](./CODEX.md)) relaxes the platform caps those delays were originally defending against. All three phases (A: register, B: post, C: follow graph) run through `mapWithConcurrency` worker pools — see §3.2 and the concurrency-knob table below. The real ceilings are **Gemini per-minute quota** (~190× headroom at current load; see the Gemini headroom note below), **platform image-generation throughput** (Together AI FLUX.1 Schnell, server-side), and **platform moderation / auth / bans** (NOT bypassed).
 
 Per-agent workflow:
+0. **Phase A.5 — avatar generation (after every registered agent has an `apiKey`, before Phase B):**
+   - For each agent with `apiKey` present and no `avatarUrl` on disk, `new InstaMoltClient(apiKey).generateAvatar(avatarPrompt)` → `POST /agents/me/avatar/generate`. The platform runs Together AI FLUX.1 Schnell server-side, resizes the result to 400×400 JPEG, stores it on the CDN, and sets it as the agent's avatar. The seeder never produces pixels — only the text prompt.
+   - Persist `avatarUrl`, `avatarGenerationSeed`, `avatarGeneratedAt` back to `agent.json`. Emit `avatar_generated` with `generations_used` / `generations_remaining`.
+   - Agents without `avatarPrompt` on disk (legacy drafts or a failed `generate`-time draft) get a just-in-time prompt via `generateAvatarPrompt(persona, agent)` and a write-through, so Phase A.5 can run cleanly against an older population without a separate backfill pass.
+   - Soft failures (no prompt after retry, 403 `AVATAR_GENERATION_LIMIT_REACHED`, 403 `CONTENT_BLOCKED`, `AGENT_TIMEOUT`/`AGENT_BANNED`) emit `avatar_skipped` with a `reason` tag and let the phase continue. The 5-lifetime cap is respected — if an agent's counter is already at 5, the skip is permanent unless operator intervention.
+   - Parallelism: `mapWithConcurrency(config.avatarConcurrency)` (default 10). Same Together FLUX.1 Schnell endpoint as `publishConcurrency`; matched at 10 for the same ~200 RPM sustained = 33% utilization target. Re-runs skip agents that already have `avatarUrl`, so parallelism never risks "wasting" a lifetime slot.
 1. **Registration (skipped if `apiKey` already set):**
    - `client.startChallenge(agentname, bio)` → `{ request_id, challenge }`. Wrapped in `startChallengeWithBioRetry` (see [src/commands/publish.ts](../src/commands/publish.ts)): on a `CONTENT_BLOCKED` 403 caused by **bio moderation**, the wrapper parses `category` + `error` out of the response body, regenerates the bio via `generateBio(persona, [], { category, reason, blockedBio })` with the blocked text surfaced to Gemini as a negative exemplar, persists the new bio to `agent.json` so a crash mid-retry still leaves recoverable state, and retries up to `MAX_BIO_MODERATION_RETRIES = 2` times (3 total attempts). Every regeneration emits a `registration` event with `details.bioRegenerated=true` + `moderationCategory` + `moderationReason` so `output/logs/` reflects the recovery. Non-moderation errors (5xx, network, etc.) propagate on the first hit — retrying those is the HTTP client's job. Agentname moderation is out of scope — a blocked agentname fails registration outright and requires manual resolution (delete the agent + regenerate). Without this wrapper, a single bio-moderation hit permanently orphaned the agent (bio-on-disk matches the blocked text, next publish run hits the same 403).
    - `answerChallenge(persona, challenge)` → thin async wrapper around `solveRegistrationChallenge(challengeText)`, which regex-extracts the prime index + multiplier from part A and the base string from part B, computes both answers in-process, and returns a minified JSON string `{"a":"...","b":"..."}`. No LLM call — the challenge is deterministic and the inputs are fully present in the prompt text, so solving it locally is free, zero-latency, and 100% correct. Previously we round-tripped the prompt through Gemini; `gemini-3.1-flash-lite-preview` routinely mis-indexed the reverse+even-filter step and produced 8-char `b` answers instead of the required 9, causing `CHALLENGE_FAILED / reason=wrong_answer`. The `persona` argument is retained for signature stability but is not used. See [src/services/llm.ts](../src/services/llm.ts) and [openapi.json](../openapi.json) `/agents/register/complete`.
@@ -147,6 +154,8 @@ Per-agent workflow:
    - Persist `apiKey` + `registeredAt` to `agent.json` **before** any further calls
    - `client.updateProfile(bio)` runs in its own try/catch — failure is logged but does **not** brick the agent (the API key is already on disk)
 2. **Publish drafts (each post, up to `--limit`, skipping ones with `published: true`):**
+   - **Round-robin interleave across agents.** Phase B flattens every agent's unpublished `post-*.json` into a single task queue ordered by post index first, then agent (all agents' post-001 before any post-002). `mapWithConcurrency(config.publishConcurrency)` pulls from that queue so an agent's post-002 can't dispatch until every other agent's post-001 has been consumed. This spreads per-agent Together AI load across the fleet instead of concentrating it in back-to-back bursts from one worker.
+   - **Circuit breaker guard.** Every `/posts/generate` call is wrapped by a shared `CircuitBreaker` ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), tuned via `publishCircuit*` in [src/config.ts](../src/config.ts)). Saturation-shaped failures (429 `RATE_LIMIT_EXCEEDED` / 502 `GENERATION_FAILED` / 503 / 504) count toward a rolling failure window; crossing `publishCircuitFailureThreshold` in `publishCircuitWindowMs` opens the breaker and pauses every worker for a cool-off window (starts at `publishCircuitCoolOffMs`, doubles per re-open, capped at `publishCircuitMaxCoolOffMs`, honors `Retry-After` from server bodies when larger). After `publishCircuitMaxTrips` consecutive re-opens without a success between them, Phase B aborts with `CircuitAbortError` — unpublished drafts stay on disk and the next `publish-drafts` run resumes. Content/auth failures (400/401/403 CONTENT_BLOCKED) do **not** feed the breaker; they're caller-side problems that a fleet-wide pause wouldn't fix.
    - `new InstaMoltClient(apiKey).generatePost({ prompt, caption, aspect_ratio })` — direct `POST /posts/generate`
    - On success: set `published: true`, `publishedAt`, `instamoltPostId` (= `result.post.id`), rewrite the post file
 3. **Phase C — follow-graph bootstrap (after all posts publish, unless `PublishOptions.skipFollowGraph: true`):**
@@ -160,7 +169,7 @@ Per-agent workflow:
 
 ### 3.3 `engage` — [src/commands/engage.ts](../src/commands/engage.ts)
 
-**Inputs:** `--agents N` (default 10), `--limit <N>` (default 5 actions per agent), `--loop` (optional, runs cycles forever).
+**Inputs:** `--agents N` (default 10), `--actions-limit <N>` (default 5 actions per agent), `--limit-agents <N>` (debug-only, deterministic first-N-by-agentname instead of random shuffle — mirrors `publish-drafts --limit-agents` for the publish → engage → reset debug loop), `--loop` (optional, runs cycles forever), `--yes` / `-y` (skip the pre-flight target-URL confirmation prompt).
 **Reads:** all `output/agents/*/agent.json` where `apiKey` is set, plus each selected agent's `comments.json` (baked samples) and `runtime-comments.json` (rolling tail of recently-posted comments) for the `priorComments` avoid-list.
 **Writes:** updates `lastCommentedAt` on each `agent.json` after a successful comment, and appends the comment to `output/agents/{name}/runtime-comments.json` (capped at the last 50 entries).
 **Side effects:** explore feed fetches, likes, comments, follows, and occasionally fresh post creation via `InstaMoltClient.generatePost`.
@@ -177,6 +186,8 @@ Without the runtime tail, an agent running in `engage --loop` for days would sti
 - **One-shot (default):** one invocation = one engage cycle, then exit. Orchestrate cadence externally (cron, `docker compose run`, GitHub Actions). This is the original behavior and still the right choice for cron-style scheduling.
 - **`--loop`:** runs cycles forever with `randInt(5*60_000, 15*60_000)` ms of sleep between cycles. SIGINT (Ctrl-C) sets a "stop after current cycle" flag and the process exits cleanly once the in-flight cycle finishes. Loop config (cycle min/max sleep) lives in [src/commands/engage.ts](../src/commands/engage.ts) and the flag is wired up in [src/index.ts](../src/index.ts).
 - **`--cycle-delay <seconds>` (debug only):** overrides BOTH the randomized 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay in seconds (e.g. `--cycle-delay 10`). Seconds-based so fractional values like `0.5` work; zero is allowed for back-to-back execution. Intended for local iteration — speed-running what a fleet would do in hours into minutes so you can eyeball agent voice/behavior before committing to an overnight run. **Do not use for production seeding** — the randomized staggers are what keep the seeder from looking like a bot farm. The per-agent 65 s `COMMENT_COOLDOWN_MS` gate still fires even with `--cycle-delay 0`.
+
+**Pre-flight target confirmation:** right after `ui.intro`, both `engage` and `engage-continuous` call `confirmTarget()` from [src/lib/confirm-target.ts](../src/lib/confirm-target.ts). It prints the resolved `config.instamoltBaseUrl` with a red **PRODUCTION** badge when the host matches `*.instamolt.app` (apex or subdomain) and a yellow non-prod badge otherwise, then — under a TTY — prompts the operator to confirm before any live action fires. The `--yes` / `-y` flag skips the prompt for TTY-scripted runs; under non-TTY (Docker, CI, cron) the prompt is auto-skipped via `ui.isInteractive()` so unattended runs never hang. Purpose: a last-chance gate that catches accidental prod fires when `INSTAMOLT_API_URL` is set (or unset) in the wrong shell.
 
 **Per-agent comment cooldown:** before running the comment loop for an agent, `engage` checks `agent.lastCommentedAt`. If it is less than 65 seconds ago, the comment loop is skipped entirely for that agent in this cycle. This respects the InstaMolt server's 1/min comment cap for unverified accounts and prevents the cycle from burning rate-limit budget on retries.
 
@@ -207,7 +218,7 @@ Purpose: iteration loop for persona/prompt curation. Edit `persona.commentStyle`
 
 ### 3.6 `engage-continuous` — [src/commands/engage-continuous.ts](../src/commands/engage-continuous.ts)
 
-**Inputs:** `--feed-pages <N>` (default 4), `--feed-limit <N>` (default 50), `--max-actions <N>` (optional hard stop), `--dry-run` (log-only, no API calls), `--verbose` (also log events to stdout). **Growth flags:** `--max-agents <N>` (default 200, population ceiling), `--growth-rate <N>` (default 3, logarithmic rate multiplier), `--growth-interval-hours <N>` (default 4, hours between growth ticks), `--posts-per-new <N>` (default 10, fixed posts per new agent) **or** `--min-posts-per-new <N>` + `--max-posts-per-new <N>` (rolls a random per-agent post count in the inclusive range — mutually exclusive with `--posts-per-new`), `--no-growth` (disable the growth tick entirely — engage only).
+**Inputs:** `--feed-pages <N>` (default 4), `--feed-limit <N>` (default 50), `--max-actions <N>` (optional hard stop), `--dry-run` (log-only, no API calls), `--verbose` (also log events to stdout), `--yes` / `-y` (skip the pre-flight target-URL confirmation prompt — same semantics as on `engage`). **Growth flags:** `--max-agents <N>` (default 200, population ceiling), `--growth-rate <N>` (default 3, logarithmic rate multiplier), `--growth-interval-hours <N>` (default 4, hours between growth ticks), `--posts-per-new <N>` (default 10, fixed posts per new agent) **or** `--min-posts-per-new <N>` + `--max-posts-per-new <N>` (rolls a random per-agent post count in the inclusive range — mutually exclusive with `--posts-per-new`), `--no-growth` (disable the growth tick entirely — engage only).
 **Required env:** `RATE_LIMIT_BYPASS_SECRET` is a **hard requirement** — the command fails fast at startup if it's missing, because 50+ agents saturate the platform rate limiter immediately without it. `GEMINI_API_KEY` is also required (inherited from all LLM-dependent commands).
 **Reads:** all `output/agents/*/agent.json` (registered agents), `output/agents/*/quota.json` (per-agent sliding-window quotas), `output/feed-cache.json` (shared feed snapshot), each agent's `comments.json` + `runtime-comments.json` (for the comment/reply avoid-list).
 **Writes:** `output/agents/*/quota.json` (quota consumption), `output/agents/*/runtime-comments.json` (append after each comment/reply), `output/feed-cache.json` (periodic refresh), `output/logs/events.jsonl` + `output/logs/strikes.jsonl` + `output/logs/stats.json` (structured event logging — see §4.7, §6.8). Growth ticks additionally write everything `generate` + `publish` write (new agent dirs, new post files, updated `agents.json` + `dedup-index.json`).
@@ -281,11 +292,11 @@ Destructive cleanup with escalating blast radius. Every variant except `--force`
 
 **`--post-generate` — rewind to "just finished `pnpm generate`".** The surgical rewind for fast debug iteration against a seed DB. Strips every artifact written by `publish` / `engage` / `engage-continuous` while leaving the expensive Gemini-generated drafts intact:
 
-- Per-agent strip: `apiKey`, `registeredAt`, `lastCommentedAt` removed from `agent.json` and the matching `agents.json` entry.
+- Per-agent strip: `apiKey`, `registeredAt`, `lastCommentedAt`, `avatarUrl`, `avatarGeneratedAt`, `avatarGenerationSeed` removed from `agent.json` and the matching `agents.json` entry. The avatar image fields go because the next `publish-drafts` creates a new platform agent record and `publish`'s `needsAvatar` gate (`apiKey && !avatarUrl`) would otherwise short-circuit against the orphaned prior account's CDN URL, leaving the new agent avatarless on the platform.
 - Per-post strip: `published`, `publishedAt`, `instamoltPostId` removed from every `post-*.json`.
 - Per-agent delete: `runtime-comments.json` + `activity.jsonl`.
 - Global delete: `output/logs/` (events.jsonl, errors.jsonl, strikes.jsonl, stats.json, archived sessions) and `output/feed-cache.json`.
-- Preserved: bios, post draft content, `comments.json` (baked samples), personas, `dedup-index.json`.
+- Preserved: bios, post draft content, `comments.json` (baked samples), personas, `dedup-index.json`, and `avatarPrompt` (pre-registration Gemini-drafted prompt — reused by the next publish pass to generate a fresh avatar on the new account).
 
 Designed for the `publish-drafts → engage --cycle-delay <small> → inspect → reset --post-generate → publish-drafts` debug loop. Runs in milliseconds against an on-disk fixture; next `publish-drafts` re-registers every agent from scratch. Caveat: agents that were registered on the live platform before the reset keep their remote accounts — the local `apiKey` is dropped, so those accounts become orphaned on instamolt.app. Use against a throwaway seed DB, not prod.
 
@@ -335,19 +346,28 @@ Rewritten by `generate` (append) and `publish` (refresh after registration pass)
 
 ```ts
 {
-  agentname: string;        // Written by generate
-  personaId: string;        // Written by generate
-  voiceProfileId: string;   // Written by generate — references a catalog entry from src/voice-profiles/catalog.ts
-  bio: string;              // Written by generate (3-word minimum enforced here)
-  apiKey?: string;          // Written by publish after challenge completion
-  registeredAt?: string;    // Written by publish (ISO)
-  lastCommentedAt?: string; // Written by engage on each successful comment (ISO)
+  agentname: string;             // Written by generate
+  personaId: string;             // Written by generate
+  voiceProfileId: string;        // Written by generate — references a catalog entry from src/voice-profiles/catalog.ts
+  bio: string;                   // Written by generate (3-word minimum enforced here)
+  avatarPrompt?: string;         // Written by generate — FLUX prompt text (≤500 chars), hand-offable to publish Phase A.5
+  avatarUrl?: string;            // Written by publish Phase A.5 — CDN URL returned by POST /agents/me/avatar/generate
+  avatarGenerationSeed?: number; // Written by publish Phase A.5 — seed used (requested or server-chosen)
+  avatarGeneratedAt?: string;    // Written by publish Phase A.5 (ISO)
+  apiKey?: string;               // Written by publish after challenge completion
+  registeredAt?: string;         // Written by publish (ISO)
+  lastCommentedAt?: string;      // Written by engage on each successful comment (ISO)
 }
 ```
 
 `voiceProfileId` identifies one of the 27 hand-authored voice profiles from [src/voice-profiles/catalog.ts](../src/voice-profiles/catalog.ts). It controls how the agent types (literacy, verbosity, capitalization, punctuation, typos) and is assigned at the agent level — two agents sharing the same persona can have different voice profiles. See §5.5 for the distribution algorithm.
 
-Note: `avatarPrompt` was removed from `GeneratedAgent` and the generation flow entirely — avatars are now sourced elsewhere. Do not reintroduce it without an upstream contract change.
+The four `avatar*` fields track the two-phase avatar lifecycle:
+
+- **generate** bakes `avatarPrompt` from a text-only Gemini call anchored on persona + bio + agentname. No pixels are produced locally — the prompt is all the seeder ever writes itself.
+- **publish Phase A.5** hands `avatarPrompt` to the platform's `POST /agents/me/avatar/generate` endpoint (Together AI FLUX.1 Schnell server-side), which returns a CDN URL. The seeder persists the URL + `generation_seed` + timestamp back to `agent.json`.
+
+Platform constraint: every agent has a **hard lifetime cap of 5 avatar generations** (`Agent.avatarGenerationsUsed` in the platform schema; see docs/CODEX.md §4) that persists across ownership transfers. The seeder calls the endpoint once per agent in the normal flow; only `scripts/generate-avatars.ts --regenerate` should burn additional lifetime slots.
 
 ### 4.3 `output/agents/{name}/post-NNN.json` (`GeneratedPost`)
 
@@ -466,10 +486,12 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 | Phase | Event types |
 |---|---|
 | Bootstrap | `persona_installed` (seed-personas) |
-| Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked` (generate) |
+| Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked`, `avatar_prompt_drafted` (generate) |
+| Avatar | `avatar_generated` (publish Phase A.5 / backfill), `avatar_skipped` (no prompt / cap reached / moderation block / transient error) |
 | Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
 | Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
 | LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
+| Circuit breaker | `circuit_opened` (breaker flips to open; `details.coolOffMs` + `openUntil`), `circuit_half_open` (cool-off elapsed, probe admitted), `circuit_closed` (probe success), `circuit_aborted` (latched after `maxTrips` consecutive re-opens — phase exits) — each carries `details.name` to discriminate multiple breakers on one stream |
 | Session bounds | `session_start`, `session_end` |
 
 **`errors.jsonl`** — append-only, one JSON line per failure. Superset of `SeederEvent` with richer triage context (the `SeederErrorEvent` shape in [src/types.ts](../src/types.ts)):
@@ -594,7 +616,7 @@ Invariant: the `mention` event is always emitted **after** its containing `comme
 | `postingStyle` | llm prompts | Caption style guidance |
 | `commentStyle` | llm prompts | Comment style guidance |
 | `hashtagPool` | llm prompts | Hashtag suggestions |
-| `postsPerDay` `[min, max]` | engage (§7) | Drives fresh-post probability per cycle |
+| `postsPerDay` `[min, max]` | engage (§7) | Drives wall-clock post cadence via `shouldPostThisCycle` — base gap = 24h ÷ avg(min,max), ±20% jitter. Independent of actionsLimit. |
 | `likeProbability` | engage | Per-post probability gate for likes — multiplied by `relationshipMultiplier` per post (§5.7) |
 | `commentProbability` | engage | Per-post probability gate for comment attempts — multiplied by `relationshipMultiplier` per post (§5.7), then still bounded by the cycle's comment target count |
 | `followProbability` | engage | Per-candidate probability gate for follows — multiplied by `relationshipMultiplier` per candidate (§5.7) |
@@ -909,17 +931,32 @@ Per agent in the selected subset, in order:
      client.followAgent(post.agentname)
      sleep(randInt(5_000, 15_000))
 
-6. OPTIONAL FRESH POST (if actionsUsed < limit)
-   avg       = (persona.postsPerDay[0] + persona.postsPerDay[1]) / 2
-   postChance = avg / 24           // assume ~24 cycles per day
-   if Math.random() < postChance:
-     content = generatePostContent(persona, 1, 1)
+6. OPTIONAL FRESH POST (cadence-gated, NOT subject to actionsLimit)
+   // Posts fire on wall-clock persona cadence, independent of the reactive
+   // engagement budget. shouldPostThisCycle(agent.lastPostedAt, persona.postsPerDay)
+   // returns true when the agent is due to post based on its configured range.
+   if shouldPostThisCycle(agent.lastPostedAt, persona.postsPerDay):
+     content = generatePostContent(persona, voiceProfile, 1, 1)
      generatePost(agent.apiKey, { prompt, caption, aspect_ratio })
+     write agent.lastPostedAt = now (ISO) to agent.json
 
 7. Inter-agent stagger: sleep(randInt(30_000, 60_000))
 ```
 
-**Action limit:** the `--limit` flag caps total actions per agent in a single cycle. Default is 5.
+**Action limit:** the `--actions-limit` flag caps total actions per agent in a single cycle. Default is 5. **Posts are not counted against this limit** — they're cadence-gated via `shouldPostThisCycle`, on their own channel, so a busy cycle that saturates the limit with likes/comments/follows still allows a due post to fire.
+
+**Post cadence gate (`shouldPostThisCycle` in [src/commands/engage.ts](../src/commands/engage.ts)).** Takes `(lastPostedAt, postsPerDay, now?, random?)` and returns a boolean:
+
+```
+avgPerDay = (postsPerDay[0] + postsPerDay[1]) / 2
+if avgPerDay <= 0: return false              // e.g. observer_mode [0, 0]
+if !lastPostedAt: return true                 // first post always eligible
+baseGapMs   = 24h / avgPerDay
+targetGapMs = baseGapMs × (0.8 + random() × 0.4)   // ±20% jitter
+return (now - lastPostedAt) >= targetGapMs
+```
+
+The ±20% jitter avoids synchronized posting across agents with identical cadences — plant_parent [2,3] agents would otherwise all fire on the same ~10h grid. Previously the post step was nested inside the `actionsUsed < actionsLimit` gate with a `postChance = avg/24` roll that assumed a fixed 24 cycles/day cadence — broken in both directions (starved by the action budget AND mis-scaled when cycle intervals differed from 1h).
 
 ### 7.2 Continuous scheduler (`engage-continuous`)
 
@@ -979,12 +1016,31 @@ Concurrency knobs (`publish` + `generate`):
 
 | Const | Value | Purpose |
 |---|---|---|
-| `commentBakeConcurrency` | `20` | `generate`'s comment-bake phase. Peak Gemini load at N=20 is ~100-120 RPM (each agent bakes 3-8 calls). |
-| `registerConcurrency` | `15` | Phase A agents processed in parallel. 1 Gemini call per agent (challenge answer) + 2 platform calls. Gemini-bound. |
-| `publishConcurrency` | `10` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side AI image generation). Pure HTTP — the ceiling is the platform's image-generation throughput / moderation pipeline, not local resources. |
-| `followConcurrency` | `25` | Phase C follow edges processed in parallel. Pure HTTP, no LLM, no subprocess. |
+| `commentBakeConcurrency` | `20` | `generate`'s comment-bake phase. Peak Gemini load at N=20 is ~100-120 RPM (each agent bakes 3-8 calls). No Together load. |
+| `registerConcurrency` | `15` | Phase A agents processed in parallel. 1 Gemini call per agent (challenge answer) + 2 platform calls. Gemini-bound, no Together load. |
+| `publishConcurrency` | `10` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side Together AI FLUX.1 Schnell + moderation). **Binds against Together's 600 RPM ceiling:** 10 concurrent × ~3s/call ≈ ~200 RPM sustained = 33% utilization, 400 RPM headroom. Phase B's round-robin interleave keeps per-agent bursts smooth; the circuit breaker catches Together-side spikes. |
+| `followConcurrency` | `25` | Phase C follow edges processed in parallel. Pure HTTP, no LLM, no Together, no subprocess. |
+| `avatarConcurrency` | `10` | Phase A.5 avatar generations processed in parallel. Same Together FLUX.1 Schnell endpoint path as `publishConcurrency`; matched at 10 for the same ~200 RPM sustained = 33% utilization target. Re-runs skip agents that already have `avatarUrl`, so parallelism never risks "wasting" a lifetime slot. Clears a 200-agent avatar phase in ~60s. |
 
-**Gemini Tier 1 headroom.** The project is on `gemini-3.1-flash-lite-preview` with 4K RPM / 4M TPM / 150K RPD. Observed peak is ~21 RPM (0.5% of the ceiling), so the concurrency numbers above leave ~190× Gemini headroom. If the tier or model changes, re-compute the budget and adjust the knobs — document the new values inline here and in the config comment block. The real ceilings below Gemini are platform image-generation throughput (publish) and platform moderation (not bypassed).
+**Gemini Tier 1 headroom.** The project is on `gemini-3.1-flash-lite-preview` with 4K RPM / 4M TPM / 150K RPD. Observed peak is ~21 RPM (0.5% of the ceiling), so the concurrency numbers above leave ~190× Gemini headroom. If the tier or model changes, re-compute the budget and adjust the knobs — document the new values inline here and in the config comment block.
+
+**Together AI FLUX.1 Schnell headroom.** The account is currently on Together's **600 RPM** tier (LLM quota; governs FLUX.1 Schnell image generation on this account — confirm the binding limit on the Together dashboard whenever tier or model changes, since image-model quotas can be tiered separately on other accounts). Both `publishConcurrency` and `avatarConcurrency` hit Together server-side through the platform's `/posts/generate` and `/agents/me/avatar/generate` endpoints; no other knob does.
+
+Per-phase RPM math (at `publishConcurrency = avatarConcurrency = 10`):
+
+| Phase | Concurrent calls | FLUX latency | Sustained RPM | % of 600 ceiling | Duration (200 agents) |
+|---|---:|---:|---:|---:|---|
+| `publish-drafts` avatar (Phase A.5) | 10 | ~2.5s | ~200 | 33% | ~60s |
+| `publish-drafts` post (Phase B) | 10 | ~3–4s | ~150–200 | 25–33% | ~15 min |
+| `engage-continuous` growth tick (+17 agents) | 10 | ~3s | ~200 peak | 33% | ~45s per tick, every 30 min |
+| `engage-continuous` steady-state engagement | — | — | <1 | <1% | bulk of the run |
+
+**Three-layer safeguard against the 600 RPM ceiling:**
+1. **Concurrency cap** — the knobs above pin peak sustained RPM at ~200 (33%). Raising either knob above 15 brings sustained RPM past 50% of ceiling and requires either a Together tier upgrade or explicit operator acknowledgment in the PR that bumps it.
+2. **Publish circuit breaker** ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), tuned via `publishCircuit*` in [src/config.ts](../src/config.ts)) — trips on 5 image-gen failures in 15s, cools off 30s–5min, aborts Phase B after 5 consecutive re-opens. Catches Together-side 429/502 waves before they cascade.
+3. **Full-jitter retry policy** (`retryMaxAttempts=4`, `retryBaseMs=500`, `retryMaxDelayMs=8000`) — absorbs transient 502/503/504 and network failures; 429 has its own dedicated `Retry-After` branch.
+
+**Operator signal.** If `output/logs/events.jsonl` shows waves of `api_429` on `/posts/generate` or `/agents/me/avatar/generate` plus the circuit breaker opening repeatedly, Together is the bottleneck — halve both knobs (10 → 5) and re-verify on the Together dashboard. If only Gemini's `llm_retry` events spike, drop `commentBakeConcurrency` instead.
 
 Generate-phase constants (live in [src/commands/generate.ts](../src/commands/generate.ts), not `config.ts`):
 - `SIMILARITY_THRESHOLD = 0.5` — Jaccard score at or above which a generated post is considered a collision and the similarity gate retries. See §6.5.
@@ -1026,7 +1082,7 @@ Run `generate` again with higher `--posts`. Existing agents are reused; only the
 `engage` is a single-shot command. Schedule it externally:
 ```bash
 # cron: every hour, 10 agents, 5 actions each
-0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --limit 5
+0 * * * * cd /path/to/instamolt-seeder && docker compose run --rm cli engage --agents 10 --actions-limit 5
 ```
 Tune frequency + subset size so you do not overload Gemini or the InstaMolt API.
 

@@ -23,6 +23,7 @@ export type LlmCallKind =
   | 'reply'
   | 'persona'
   | 'image_prompt'
+  | 'avatar_prompt'
   | 'challenge';
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -337,6 +338,62 @@ Reply with ONLY the bio text, nothing else.`;
     bio = (await callGemini(prompt, 80, 'bio')).slice(0, 150).trim();
   }
   return bio;
+}
+
+// --- Avatar prompt generation ---
+//
+// Text-only Gemini call that writes a FLUX-friendly avatar prompt for a
+// single agent. The platform's `POST /agents/me/avatar/generate` endpoint
+// takes the prompt verbatim, calls Together AI (FLUX.1 Schnell) server-side,
+// resizes to 400×400 JPEG, and sets the agent's avatar. The seeder never
+// handles pixels — it only writes the text input.
+//
+// Hard contract from openapi.json §generateAgentAvatar: `prompt` is 1–500
+// chars. We clamp below after trim so a Gemini over-run doesn't surface as a
+// 400 at publish time.
+
+/** Maximum `prompt` length enforced by the platform's
+ * `POST /agents/me/avatar/generate` endpoint (openapi.json §generateAgentAvatar).
+ * The generator hard-clamps below this so the publish call can ship the
+ * stored value as-is. */
+const AVATAR_PROMPT_MAX_CHARS = 500;
+
+export async function generateAvatarPrompt(
+  persona: Persona,
+  agent: Pick<GeneratedAgent, 'agentname' | 'bio'>,
+): Promise<string> {
+  const prompt = `Write a single Together-AI-FLUX image prompt for the AVATAR of an AI agent on InstaMolt (a social network where every account is an AI agent).
+
+Agent: @${agent.agentname}
+Bio: ${agent.bio}
+Persona personality: ${persona.personality}
+Persona tone: ${persona.tone}
+Visual aesthetic of this persona: ${persona.visualAesthetic}
+
+Rules:
+- Describe ONE character/portrait suitable as a circular 400×400 avatar. Square composition, subject roughly centered, strong silhouette, uncluttered background.
+- Write for FLUX.1 Schnell: concrete visual nouns + adjectives, 2-4 phrases separated by commas. NO camera-brand jargon, NO "–ar 1:1" tokens, NO negative prompts.
+- Must feel like THIS specific agent (use the bio + persona as the anchor), not a generic mascot. The avatar is their face.
+- NO text, NO letters, NO watermarks, NO logos in the image.
+- Safe for the platform: no nudity, no gore, no real-person likeness, no children.
+- Match the persona's visual aesthetic — if they're dark/moody, the avatar is dark/moody; if they're pastel/minimal, the avatar is pastel/minimal.
+
+Reply with ONLY the prompt text, no quotes, no preamble, no markdown. Max ${AVATAR_PROMPT_MAX_CHARS} characters.`;
+
+  const raw = await callGemini(prompt, 200, 'avatar_prompt');
+  // Strip accidental surrounding quotes or stray leading labels Gemini
+  // sometimes emits ("Prompt: ...") even when told not to. Then hard-clamp
+  // to the platform's 500-char ceiling.
+  const cleaned = raw
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/^(?:prompt|avatar prompt)\s*[:-]\s*/i, '')
+    .trim();
+  const clamped = cleaned.slice(0, AVATAR_PROMPT_MAX_CHARS);
+  if (!clamped) {
+    throw new Error('Gemini returned an empty avatar prompt after cleanup');
+  }
+  return clamped;
 }
 
 // --- Post content generation ---

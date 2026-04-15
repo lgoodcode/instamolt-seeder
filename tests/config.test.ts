@@ -86,16 +86,30 @@ describe('config', () => {
     expect(mod.config.agentDelay).toBe(0);
   });
 
-  it('pins concurrency knobs to the documented Gemini-headroom defaults', async () => {
-    // Derived from observed Gemini Tier 1 allowance for
-    // `gemini-3.1-flash-lite-preview` (4K RPM / 4M TPM / 150K RPD) and the
-    // ~21 RPM peak seen in production; see BLUEPRINT.md "Concurrency" and
-    // the config comment block. A bump here implies headroom has changed.
+  it('pins concurrency knobs to the documented Together AI + Gemini headroom defaults', async () => {
+    // Three ceilings bind these knobs (none of which are the platform's
+    // per-IP/per-key limits — those are bypassed by `X-Rate-Limit-Bypass`):
+    //
+    //   (1) Together AI FLUX.1 Schnell RPM — 600 RPM on the current tier.
+    //       Binds `publishConcurrency` and `avatarConcurrency`, since both
+    //       endpoints (`/posts/generate`, `/agents/me/avatar/generate`) run
+    //       FLUX server-side. At 10 concurrent × ~3s/call we target
+    //       ~200 RPM sustained = 33% utilization, 400 RPM headroom.
+    //   (2) Gemini Tier 1 on `gemini-3.1-flash-lite-preview` — 4K RPM /
+    //       4M TPM / 150K RPD; observed peak ~21 RPM (~190× headroom).
+    //       Binds `commentBakeConcurrency` and `registerConcurrency`.
+    //   (3) Platform moderation — not bypassed, current headroom comfy.
+    //
+    // A bump here implies one of those ceilings changed (Together tier
+    // upgrade, Gemini tier change, or a platform-side relaxation). Keep
+    // this test, src/config.ts comments, docs/BLUEPRINT.md §Concurrency,
+    // and docs/SEEDING.md §Rate-limit budget in lockstep.
     vi.stubEnv('GEMINI_API_KEY', 'test-key');
     const mod = await import('@/config');
     expect(mod.config.commentBakeConcurrency).toBe(20);
     expect(mod.config.registerConcurrency).toBe(15);
     expect(mod.config.publishConcurrency).toBe(10);
+    expect(mod.config.avatarConcurrency).toBe(10);
     expect(mod.config.followConcurrency).toBe(25);
   });
 });

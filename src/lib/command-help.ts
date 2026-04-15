@@ -110,8 +110,13 @@ const HELP: Record<string, CommandHelp> = {
         '--limit-agents <N>',
         'Cap the run to the first N agents by agentname (ascending, deterministic). Repeat invocations with the same N hit the same subset — designed for the publish → engage --cycle-delay → reset --post-generate debug loop. Ignored when --agent is set.',
       ],
+      [
+        '--yes / -y',
+        'Skip the pre-flight "confirm target URL" prompt. Under non-TTY (Docker, CI, cron) the prompt is already skipped so unattended runs don\'t hang; this flag is for TTY-scripted runs.',
+      ],
     ],
     body: [
+      'Pre-flight gate: prints the resolved `INSTAMOLT_API_URL` and, in a TTY, asks the operator to confirm before any registration / post / follow fires — flagged PRODUCTION when it points at instamolt.app.',
       "Phase A: register unregistered agents (answers InstaMolt's AI challenge, stores apiKey in agent.json).",
       'Phase B: publishes unpublished drafts via POST /posts/generate (runs through InstaMoltClient, not an MCP subprocess).',
       'Phase C: bootstraps the follow graph across the freshly-registered agents.',
@@ -126,12 +131,19 @@ const HELP: Record<string, CommandHelp> = {
   engage: {
     role: 'Phase 3 (one-shot): pick agents, pull the explore feed, probabilistically like/comment/follow/post.',
     usage: [
-      'pnpm engage [--agents <N>] [--limit <N>]',
-      'pnpm engage --loop [--agents <N>] [--limit <N>] [--cycle-delay <seconds>]',
+      'pnpm engage [--agents <N>] [--actions-limit <N>]',
+      'pnpm engage --loop [--agents <N>] [--actions-limit <N>] [--limit-agents <N>] [--cycle-delay <seconds>]',
     ],
     flags: [
       ['--agents <N>', 'Number of agents active this cycle (default 10).'],
-      ['--limit <N>', 'Max actions per agent this cycle (default 5).'],
+      [
+        '--actions-limit <N>',
+        'Max actions (likes + comments + follows) per agent this cycle (default 5). Posts are independent of this budget — they fire on wall-clock cadence via `persona.postsPerDay`, not on the actions counter.',
+      ],
+      [
+        '--limit-agents <N>',
+        'Debug only: deterministically pick the first N agents by agentname (ascending) instead of a random shuffle. Mirrors `publish-drafts --limit-agents` so both phases hit the same subset across runs — designed for the publish → engage --cycle-delay → reset --post-generate debug loop.',
+      ],
       [
         '--loop',
         'Run forever: 5–15 min sleep between cycles, clean SIGINT handling. Ctrl+C finishes the current cycle.',
@@ -140,9 +152,14 @@ const HELP: Record<string, CommandHelp> = {
         '--cycle-delay <seconds>',
         'Debug only: override BOTH the 30–60s inter-agent stagger AND the 5–15 min inter-cycle sleep with a fixed delay (e.g. `--cycle-delay 10`). Speed-runs what an agent would do in hours into minutes so you can preview interactions before a prod run. Do NOT use for production seeding. Note: the per-agent 65s comment cooldown still applies, so back-to-back comments from the same agent may be skipped under low delays.',
       ],
+      [
+        '--yes / -y',
+        'Skip the pre-flight "confirm target URL" prompt. Under non-TTY (Docker, CI, cron) the prompt is already skipped so unattended runs don\'t hang; this flag is for TTY-scripted runs.',
+      ],
     ],
     body: [
-      'Per-agent probabilities gate every action (likeProbability, commentProbability, followProbability, postProbability).',
+      'Pre-flight gate: prints the resolved `INSTAMOLT_API_URL` and, in a TTY, asks the operator to confirm before any live action fires — the target is flagged PRODUCTION when it points at instamolt.app.',
+      'Per-agent probabilities gate like/comment/follow (likeProbability, commentProbability, followProbability). Posts are gated separately by `persona.postsPerDay` + `lastPostedAt` wall-clock cadence via `shouldPostThisCycle`.',
       "Comments load the baked samples from comments.json + the rolling runtime-comments.json tail (last 50) as the avoid-list, so --loop mode doesn't drift into repetition.",
       'For ongoing activity at scale, prefer `engage-continuous` — this is the simpler one-shot variant.',
     ],
@@ -179,8 +196,13 @@ const HELP: Record<string, CommandHelp> = {
       ],
       ['--no-growth', 'Disable growth ticks; engage-only mode.'],
       ['--verbose', 'Mirror every event line to stdout. Only useful during initial tuning.'],
+      [
+        '--yes / -y',
+        'Skip the pre-flight "confirm target URL" prompt. Under non-TTY (Docker, CI, cron) the prompt is already skipped so unattended runs don\'t hang; this flag is for TTY-scripted runs.',
+      ],
     ],
     body: [
+      'Pre-flight gate: prints the resolved `INSTAMOLT_API_URL` and, in a TTY, asks the operator to confirm before any live action fires — the target is flagged PRODUCTION when it points at instamolt.app.',
       'Models burst-then-quiet per-agent sessions, not flat uniform pacing.',
       'Growth ticks spawn new agents + drafts + published posts on the same cadence, so the population organically expands.',
       'All interactions land in output/logs/events.jsonl — use `pnpm events --since 1h` to audit.',

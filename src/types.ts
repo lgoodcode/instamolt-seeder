@@ -233,11 +233,50 @@ export interface GeneratedAgent {
   personaId: string;
   voiceProfileId: string;
   bio: string;
+  // Baked during `generate` (text-only Gemini output). The platform's
+  // `POST /agents/me/avatar/generate` endpoint caps `prompt` at 500 chars;
+  // the generator hard-clamps before writing this field so `publish` can
+  // ship it as-is. Absent agents fall through to the backfill script.
+  avatarPrompt?: string;
+  // Set after a successful `generateAgentAvatar` call in `publish` Phase A.5
+  // (or by `scripts/generate-avatars.ts`). CDN URL of the processed 400×400
+  // JPEG — read by downstream tooling to confirm avatars landed.
+  avatarUrl?: string;
+  /** Seed returned by the platform for reproducibility. May be the requested
+   * seed or a server-chosen one when the caller passed `undefined`. Preserved
+   * so a regenerate (e.g. `pnpm avatars --regenerate --agent X`) can reason
+   * about which attempt produced the current pixels. */
+  avatarGenerationSeed?: number;
+  avatarGeneratedAt?: string;
   // Set during publish phase:
   apiKey?: string;
   registeredAt?: string;
   // Set during engage cycles to respect the 60s per-agent comment cooldown.
   lastCommentedAt?: string;
+  // Set during engage cycles after a successful post. The post gate in
+  // engage.ts reads this to enforce wall-clock cadence against
+  // `persona.postsPerDay` — see `shouldPostThisCycle` in commands/engage.ts.
+  lastPostedAt?: string;
+}
+
+/** Hand-narrowed body for `POST /agents/me/avatar/generate`. Spec compat is
+ * asserted in `_SpecCompatibility` below. */
+export interface GenerateAvatarRequest {
+  prompt: string;
+  seed?: number;
+}
+
+/** Hand-narrowed response for `POST /agents/me/avatar/generate`. The spec
+ * allows `generation_seed` to be omitted or null, so we keep that shape here
+ * as `number | null | undefined`. The seeder's writer normalizes
+ * `response.generation_seed ?? undefined` into `avatarGenerationSeed` so
+ * "no seed available" is stored as `undefined`. Spec compat is asserted in
+ * `_SpecCompatibility` below. */
+export interface GenerateAvatarResponse {
+  avatar_url: string;
+  generation_seed?: number | null;
+  generations_used: number;
+  generations_remaining: number;
 }
 
 export interface GeneratedPost {
@@ -678,6 +717,15 @@ export type SeederEventType =
   | 'post_drafted'
   | 'comment_baked'
   | 'reply_baked'
+  // Avatar lifecycle. `avatar_prompt_drafted` fires once per agent during
+  // `generate` when the Gemini text-prompt generator returns. `avatar_generated`
+  // fires once per agent during `publish` Phase A.5 on a successful
+  // `POST /agents/me/avatar/generate`. `avatar_skipped` covers non-fatal
+  // skips (missing prompt, 403 lifetime cap, moderation block) — the run
+  // keeps going so one bad avatar doesn't abort the whole population.
+  | 'avatar_prompt_drafted'
+  | 'avatar_generated'
+  | 'avatar_skipped'
   // Mention fan-out: one event per resolved `@mention` target in a posted
   // comment or reply (or, at bake time, a staged sample). Emitted AFTER the
   // containing `comment` / `reply` event so the sourceId can be stamped
@@ -687,7 +735,19 @@ export type SeederEventType =
   //   - phase: 'bake' | 'runtime'
   //   - sourceCommentId: the platform comment.id when runtime, else omitted
   //   - postId: the post the mention lives on
-  | 'mention';
+  | 'mention'
+  // Circuit breaker lifecycle. Emitted by src/lib/circuit-breaker.ts when the
+  // shared breaker guarding saturation-prone downstreams (Phase B post image
+  // gen, Phase A.5 avatar image gen) changes state. `details.name` identifies
+  // which breaker tripped so multiple breakers can share the event stream.
+  // `circuit_opened` carries `{ trips, coolOffMs, openUntil }`; `circuit_half_open`
+  // and `circuit_closed` carry `{ trips }`; `circuit_aborted` fires once when
+  // the breaker latches after `maxTrips` consecutive re-trips without a
+  // success between them.
+  | 'circuit_opened'
+  | 'circuit_half_open'
+  | 'circuit_closed'
+  | 'circuit_aborted';
 
 export interface SeederEvent {
   timestamp: string;
@@ -892,5 +952,13 @@ export type _SpecCompatibility = readonly [
   _Extends<
     GeneratePostResponse,
     operations['generateImagePost']['responses'][201]['content']['application/json']
+  >,
+  _Extends<
+    GenerateAvatarRequest,
+    NonNullable<operations['generateAgentAvatar']['requestBody']>['content']['application/json']
+  >,
+  _Extends<
+    GenerateAvatarResponse,
+    operations['generateAgentAvatar']['responses'][201]['content']['application/json']
   >,
 ];

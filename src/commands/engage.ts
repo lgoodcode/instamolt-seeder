@@ -1,6 +1,7 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
+import { confirmTarget } from '@/lib/confirm-target';
 import {
   drainWrites,
   flushStats,
@@ -33,8 +34,15 @@ import { loadVoiceProfiles, resolveVoiceProfile } from '@/voice-profiles/index';
 
 interface EngageOptions {
   agents?: number;
-  limit?: number;
+  actionsLimit?: number;
   loop?: boolean;
+  /**
+   * Debug-only: deterministically pick the first N agents by agentname
+   * (ascending) instead of a random shuffle. Mirrors `publish-drafts
+   * --limit-agents` so both phases hit the same subset across runs — designed
+   * for the publish → engage --cycle-delay → reset --post-generate loop.
+   */
+  limitAgents?: number;
   /**
    * Debug-only: force a fixed inter-cycle sleep (in milliseconds) instead of
    * the default `randomInt(5min, 15min)`. Lets operators run a tight feedback
@@ -42,9 +50,56 @@ interface EngageOptions {
    * Production seeding should leave this unset.
    */
   cycleDelayMs?: number;
+  /**
+   * Skip the interactive "confirm target URL" prompt. Under non-TTY the
+   * prompt is already skipped so unattended runs don't hang; this flag is
+   * for TTY-scripted runs where the operator has already eyeballed the
+   * target and doesn't want to hand-confirm each invocation.
+   */
+  yes?: boolean;
 }
 
 const COMMENT_COOLDOWN_MS = 65_000;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Wall-clock post cadence gate. Returns true when the agent is due to post
+ * based on `persona.postsPerDay` and its `lastPostedAt` timestamp.
+ *
+ * Posts are the one engage action NOT subject to `actionsLimit` — they fire
+ * on persona cadence regardless of how many likes/comments/follows the agent
+ * already performed this cycle. Previously the post step lived at the end of
+ * the per-agent action loop gated by `actionsUsed < actionsLimit`, so the
+ * 2-4 likes + 1-2 comments + 1-2 follows would routinely saturate the limit
+ * (max demand 8 vs budget 5) and the post step never ran — even when the
+ * persona's `postsPerDay` rolled a hit. The fix: split posts out as their
+ * own cadence-gated channel, independent of the reactive engagement budget.
+ *
+ * The gate uses the average of the persona's postsPerDay range to derive a
+ * base gap (24h / avg), then jitters ±20% per check so agents with identical
+ * cadences don't synchronize their posting. First post (no `lastPostedAt`)
+ * is always eligible. Personas with `postsPerDay = [0, 0]` never post.
+ */
+export function shouldPostThisCycle(
+  lastPostedAt: string | undefined,
+  postsPerDay: readonly [number, number],
+  now: number = Date.now(),
+  random: () => number = Math.random,
+): boolean {
+  const [minPerDay, maxPerDay] = postsPerDay;
+  const avgPerDay = (minPerDay + maxPerDay) / 2;
+  if (avgPerDay <= 0) return false;
+  if (!lastPostedAt) return true;
+
+  const lastMs = Date.parse(lastPostedAt);
+  if (Number.isNaN(lastMs)) return true;
+
+  const baseGapMs = MS_PER_DAY / avgPerDay;
+  const jitter = 0.8 + random() * 0.4;
+  const targetGapMs = baseGapMs * jitter;
+  return now - lastMs >= targetGapMs;
+}
 
 /**
  * Flatten an unknown error into the detail shape the event logger uses to
@@ -171,8 +226,9 @@ interface RuntimeCommentsFile {
 
 export async function engage(options: EngageOptions = {}): Promise<void> {
   const maxAgents = options.agents ?? 10;
-  const actionsLimit = options.limit ?? 5;
+  const actionsLimit = options.actionsLimit ?? 5;
   const loopEnabled = options.loop ?? false;
+  const limitAgents = options.limitAgents;
   const cycleDelayMs = options.cycleDelayMs;
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
@@ -185,8 +241,16 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
 
   let cycleNumber = 0;
 
-  // SIGINT handling for graceful shutdown of the outer --loop.
-  // The current cycle finishes and then the while-loop exits cleanly.
+  ui.intro('Engage');
+
+  if (!(await confirmTarget('engage', { yes: options.yes }))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage aborted — target not confirmed`));
+    return;
+  }
+
+  // SIGINT handling for graceful shutdown of the outer --loop. Registered
+  // after the target check so a declined confirmation doesn't leak the
+  // listener across repeated in-process calls.
   let stopRequested = false;
   const onSigint = () => {
     if (!stopRequested) {
@@ -198,8 +262,6 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
     process.on('SIGINT', onSigint);
   }
 
-  ui.intro('Engage');
-
   try {
     do {
       // Load all registered agents
@@ -210,8 +272,25 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
         return;
       }
 
-      // Pick a random subset
-      const selected = shuffle(allAgents).slice(0, Math.min(maxAgents, allAgents.length));
+      // Pick the active subset for this cycle.
+      // - Default: random shuffle, take `maxAgents`.
+      // - Debug: `--limit-agents N` deterministically takes the first N
+      //   agents by agentname (ascending) so repeat invocations hit the same
+      //   subset. Mirrors `publish-drafts --limit-agents`.
+      // Non-positive `limitAgents` values (0 or negative) are already rejected
+      // by the flag parser, but defensively normalize here so the selector
+      // only activates on a real positive integer.
+      const normalizedLimitAgents =
+        limitAgents !== undefined && limitAgents > 0 ? limitAgents : undefined;
+      const ordered =
+        normalizedLimitAgents !== undefined
+          ? [...allAgents].sort((a, b) => a.agentname.localeCompare(b.agentname))
+          : shuffle(allAgents);
+      const subsetCap =
+        normalizedLimitAgents !== undefined
+          ? Math.min(normalizedLimitAgents, maxAgents)
+          : maxAgents;
+      const selected = ordered.slice(0, Math.min(subsetCap, ordered.length));
       cycleNumber++;
       const cycleStartedAt = Date.now();
       updateAgentCounts(allAgents.length, selected.length);
@@ -598,75 +677,73 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             }
           }
 
-          // 5. Optionally create a new post
-          if (actionsUsed < actionsLimit) {
-            // Roll against postsPerDay frequency: higher frequency = higher chance
-            const [minPosts, maxPosts] = persona.postsPerDay;
-            const avgPostsPerDay = (minPosts + maxPosts) / 2;
-            // Assume ~24 cycles per day, so chance per cycle = avgPostsPerDay / 24
-            const postChance = avgPostsPerDay / 24;
+          // 5. Optionally create a new post.
+          //
+          // Posts are NOT subject to `actionsLimit` — they fire on wall-clock
+          // persona cadence (`postsPerDay`) via `shouldPostThisCycle`, not on
+          // the reactive-engagement budget. See the helper's docblock for the
+          // history of why the old actionsLimit-gated path was broken.
+          if (shouldPostThisCycle(agentData.lastPostedAt, persona.postsPerDay)) {
+            const resolved = resolveVoiceProfile(voiceProfiles, agent);
+            if ('error' in resolved) {
+              cycleErrors++;
+              log('warn', `${resolved.error}, skipping post`);
+              logEvent({
+                eventType: 'post_published',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: false,
+                error: resolved.error,
+                details: { voiceProfileId: agent.voiceProfileId },
+              });
+            } else {
+              const voiceProfile = resolved.profile;
+              const postStartedAt = Date.now();
+              try {
+                sp.message(`@${agent.agentname} — generating a fresh post`);
+                const content = await generatePostContent(
+                  persona,
+                  voiceProfile,
+                  1,
+                  1,
+                  [],
+                  [],
+                  rollChaos(persona),
+                );
+                const postClient = new InstaMoltClient(agent.apiKey);
+                const result = await postClient.generatePost({
+                  prompt: content.imagePrompt,
+                  caption: content.caption,
+                  aspect_ratio: content.aspectRatio,
+                });
 
-            if (Math.random() < postChance) {
-              const resolved = resolveVoiceProfile(voiceProfiles, agent);
-              if ('error' in resolved) {
+                cyclePosts++;
+                agentData.lastPostedAt = new Date().toISOString();
+                agentDataDirty = true;
+                sp.message(`@${agent.agentname} — posted ${result.post.id}`);
+                logEvent({
+                  eventType: 'post_published',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: true,
+                  durationMs: Date.now() - postStartedAt,
+                  details: {
+                    postId: result.post.id,
+                    caption: content.caption.slice(0, 80),
+                  },
+                });
+              } catch (err) {
                 cycleErrors++;
-                log('warn', `${resolved.error}, skipping post`);
+                log('warn', `Post creation failed: ${err}`);
                 logEvent({
                   eventType: 'post_published',
                   agentname: agent.agentname,
                   persona: agent.personaId,
                   success: false,
-                  error: resolved.error,
-                  details: { voiceProfileId: agent.voiceProfileId },
+                  durationMs: Date.now() - postStartedAt,
+                  error: err instanceof Error ? err.message : String(err),
+                  details: errorDetails(err),
                 });
-              } else {
-                const voiceProfile = resolved.profile;
-                const postStartedAt = Date.now();
-                try {
-                  sp.message(`@${agent.agentname} — generating a fresh post`);
-                  const content = await generatePostContent(
-                    persona,
-                    voiceProfile,
-                    1,
-                    1,
-                    [],
-                    [],
-                    rollChaos(persona),
-                  );
-                  const postClient = new InstaMoltClient(agent.apiKey);
-                  const result = await postClient.generatePost({
-                    prompt: content.imagePrompt,
-                    caption: content.caption,
-                    aspect_ratio: content.aspectRatio,
-                  });
-
-                  actionsUsed++;
-                  cyclePosts++;
-                  sp.message(`@${agent.agentname} — posted ${result.post.id}`);
-                  logEvent({
-                    eventType: 'post_published',
-                    agentname: agent.agentname,
-                    persona: agent.personaId,
-                    success: true,
-                    durationMs: Date.now() - postStartedAt,
-                    details: {
-                      postId: result.post.id,
-                      caption: content.caption.slice(0, 80),
-                    },
-                  });
-                } catch (err) {
-                  cycleErrors++;
-                  log('warn', `Post creation failed: ${err}`);
-                  logEvent({
-                    eventType: 'post_published',
-                    agentname: agent.agentname,
-                    persona: agent.personaId,
-                    success: false,
-                    durationMs: Date.now() - postStartedAt,
-                    error: err instanceof Error ? err.message : String(err),
-                    details: errorDetails(err),
-                  });
-                }
               }
             }
           }

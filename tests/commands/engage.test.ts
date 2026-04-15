@@ -204,7 +204,7 @@ vi.mock('@/lib/ui', () => ({
 
 // ---------------- imports ----------------
 
-import { engage } from '@/commands/engage';
+import { engage, shouldPostThisCycle } from '@/commands/engage';
 
 function makePersona(id: string): Persona {
   return {
@@ -327,7 +327,7 @@ describe('engage', () => {
       ]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     // Like probability is 1, so at least the likesTarget (2-4) likes should fire.
     expect(apiMocks.likePost).toHaveBeenCalled();
@@ -335,6 +335,33 @@ describe('engage', () => {
     expect(apiMocks.commentOnPost).toHaveBeenCalled();
     // Follow path should also fire.
     expect(apiMocks.followAgent).toHaveBeenCalled();
+  });
+
+  it('selects the first N agents by agentname (ascending) when limitAgents is set', async () => {
+    // Prime three agents in non-alphabetical disk order to prove the
+    // selection is name-sorted, not directory-listing-sorted.
+    primeAgent('charlie');
+    primeAgent('alpha');
+    primeAgent('bravo');
+    fsState.dirEntries.set('./output/agents', ['charlie', 'alpha', 'bravo']);
+
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'gamma', caption: 'hi' }]),
+    );
+
+    await engage({ agents: 5, actionsLimit: 1, limitAgents: 2 });
+
+    // `--limit-agents 2` MUST hit `alpha` + `bravo` (ascending), never
+    // `charlie`. Read the spinner messages — every per-agent cycle ends with
+    // an "@agentname" line, so we can extract the agentnames touched.
+    const touched = new Set<string>();
+    for (const msg of uiMocks.spinnerMessages) {
+      const m = /@(alpha|bravo|charlie)/.exec(msg);
+      if (m) touched.add(m[1]);
+    }
+    expect(touched.has('charlie')).toBe(false);
+    expect(touched.has('alpha')).toBe(true);
+    expect(touched.has('bravo')).toBe(true);
   });
 
   it('uses cycleDelayMs as the inter-agent stagger when provided (debug speed-run)', async () => {
@@ -355,7 +382,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'gamma', caption: 'hi' }]),
     );
 
-    await engage({ agents: 2, limit: 1, cycleDelayMs: 10 });
+    await engage({ agents: 2, actionsLimit: 1, cycleDelayMs: 10 });
 
     // The default stagger is randInt(30_000, 60_000). Assert no setTimeout
     // delay lands inside that band — i.e. the stagger was compressed to 10 ms.
@@ -373,7 +400,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     expect(apiMocks.commentOnPost).not.toHaveBeenCalled();
     // The "comment cooldown active, skipping" wording goes through the
@@ -391,7 +418,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     expect(apiMocks.commentOnPost).toHaveBeenCalled();
   });
@@ -404,7 +431,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const updated = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'agent.json'))!);
     expect(updated.lastCommentedAt).toBeTruthy();
@@ -421,7 +448,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap text' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     expect(llmMocks.generateComment).toHaveBeenCalled();
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
@@ -451,7 +478,7 @@ describe('engage', () => {
       .mockResolvedValueOnce('runtime first reply')
       .mockResolvedValueOnce('runtime second reply');
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const written = fsState.files.get(join('./output/agents', 'alpha', 'runtime-comments.json'));
     expect(written).toBeDefined();
@@ -495,7 +522,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
     expect(callArgs[4]).toEqual(['runtime tail one', 'runtime tail two']);
@@ -525,7 +552,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
     // Baked first, then runtime — order matters because generateComment
@@ -564,7 +591,7 @@ describe('engage', () => {
     llmMocks.generateComment.mockResolvedValueOnce('runtime first');
     llmMocks.generateComment.mockResolvedValueOnce('runtime second');
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
     expect(callArgs[4]).toEqual(['baked one', 'baked two', 'baked three']);
@@ -590,7 +617,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'ignored' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     expect(apiMocks.likePost).not.toHaveBeenCalled();
     expect(apiMocks.commentOnPost).not.toHaveBeenCalled();
@@ -604,7 +631,7 @@ describe('engage', () => {
 
     feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError());
 
-    await expect(engage({ agents: 1, limit: 10 })).rejects.toThrow(FeedCacheEmptyError);
+    await expect(engage({ agents: 1, actionsLimit: 10 })).rejects.toThrow(FeedCacheEmptyError);
 
     // Per-agent actions must not fire when the feed is empty — no synthetic
     // fallback, no silent skip.
@@ -644,7 +671,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const types = eventTypes();
     expect(types).toContain('session_start');
@@ -674,7 +701,7 @@ describe('engage', () => {
       ]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const refreshes = eventsOfType<{
       success: boolean;
@@ -691,7 +718,7 @@ describe('engage', () => {
     fsState.dirEntries.set('./output/agents', ['alpha']);
     feedCacheMocks.loadFeedCacheStrict.mockRejectedValue(new FeedCacheEmptyError('empty'));
 
-    await expect(engage({ agents: 1, limit: 10 })).rejects.toThrow(FeedCacheEmptyError);
+    await expect(engage({ agents: 1, actionsLimit: 10 })).rejects.toThrow(FeedCacheEmptyError);
 
     const refreshes = eventsOfType<{ success: boolean; error?: string }>('feed_refresh');
     expect(refreshes.length).toBe(1);
@@ -711,7 +738,7 @@ describe('engage', () => {
       ]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const likes = eventsOfType<{
       agentname: string;
@@ -743,7 +770,7 @@ describe('engage', () => {
       new InstaMoltApiError('POST', '/posts/post-1/like', 500, 'boom'),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const likeFailures = eventsOfType<{
       success: boolean;
@@ -769,7 +796,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     // At least one comment success event for the single posted comment.
     const comments = eventsOfType<{
@@ -793,7 +820,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     expect(eventLoggerMocks.logSkippedAction).toHaveBeenCalledWith(
       'comment',
@@ -813,7 +840,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const follows = eventsOfType<{
       agentname: string;
@@ -854,7 +881,7 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const publishes = eventsOfType<{
       success: boolean;
@@ -888,11 +915,152 @@ describe('engage', () => {
       feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'cap' }]),
     );
 
-    await engage({ agents: 1, limit: 10 });
+    await engage({ agents: 1, actionsLimit: 10 });
 
     const publishes = eventsOfType<{ success: boolean; error?: string }>('post_published');
     const failures = publishes.filter((p) => !p.success);
     expect(failures.length).toBe(1);
     expect(failures[0].error).toBe('moderation blocked');
+  });
+
+  it('fires a post even when actionsLimit is already saturated by likes/comments/follows', async () => {
+    // Guarantees the post step is NOT subject to actionsLimit. The agent's
+    // persona is set to always post eligibility, actionsLimit is tight (1),
+    // and the feed is stocked so likes alone would normally saturate the
+    // budget — yet the post still fires because it's on its own channel.
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([
+        [
+          'test-persona',
+          { ...makePersona('test-persona'), postsPerDay: [100, 100] as [number, number] },
+        ],
+      ]),
+    );
+    llmMocks.generatePostContent.mockResolvedValue({
+      imagePrompt: 'p',
+      caption: 'c',
+      aspectRatio: 'square',
+    });
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'post-after-limit', image_url: 'https://cdn/x.jpg' },
+    });
+
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'p1', agentname: 'beta', caption: 'a' },
+        { id: 'p2', agentname: 'beta', caption: 'b' },
+        { id: 'p3', agentname: 'beta', caption: 'c' },
+      ]),
+    );
+
+    await engage({ agents: 1, actionsLimit: 1 });
+
+    const publishes = eventsOfType<{ success: boolean; details: { postId?: string } }>(
+      'post_published',
+    );
+    const successes = publishes.filter((p) => p.success);
+    expect(successes.length).toBe(1);
+    expect(successes[0].details.postId).toBe('post-after-limit');
+  });
+
+  it('skips posting when lastPostedAt is recent relative to persona cadence', async () => {
+    // Agent posted 1h ago, persona cadence is 2/day (12h avg gap) → not due.
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([
+        [
+          'test-persona',
+          { ...makePersona('test-persona'), postsPerDay: [2, 2] as [number, number] },
+        ],
+      ]),
+    );
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    primeAgent('alpha', { lastPostedAt: oneHourAgo });
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'p1', agentname: 'beta', caption: 'a' }]),
+    );
+
+    await engage({ agents: 1, actionsLimit: 10 });
+
+    expect(apiMocks.generatePost).not.toHaveBeenCalled();
+  });
+
+  it('stamps lastPostedAt on the agent file after a successful post', async () => {
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([
+        [
+          'test-persona',
+          { ...makePersona('test-persona'), postsPerDay: [100, 100] as [number, number] },
+        ],
+      ]),
+    );
+    llmMocks.generatePostContent.mockResolvedValue({
+      imagePrompt: 'p',
+      caption: 'c',
+      aspectRatio: 'square',
+    });
+    apiMocks.generatePost.mockResolvedValue({
+      post: { id: 'pX', image_url: 'https://cdn/pX.jpg' },
+    });
+
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'p1', agentname: 'beta', caption: 'a' }]),
+    );
+
+    const before = Date.now();
+    await engage({ agents: 1, actionsLimit: 10 });
+    const after = Date.now();
+
+    const persisted = JSON.parse(
+      fsState.files.get(join('./output/agents', 'alpha', 'agent.json')) ?? '{}',
+    ) as { lastPostedAt?: string };
+    expect(persisted.lastPostedAt).toBeDefined();
+    const stampedAt = Date.parse(persisted.lastPostedAt as string);
+    expect(stampedAt).toBeGreaterThanOrEqual(before);
+    expect(stampedAt).toBeLessThanOrEqual(after);
+  });
+});
+
+describe('shouldPostThisCycle', () => {
+  it('is always eligible on first post (no lastPostedAt)', () => {
+    expect(shouldPostThisCycle(undefined, [2, 3])).toBe(true);
+  });
+
+  it('never posts when postsPerDay is [0, 0]', () => {
+    expect(shouldPostThisCycle(undefined, [0, 0])).toBe(false);
+    expect(shouldPostThisCycle(new Date().toISOString(), [0, 0])).toBe(false);
+  });
+
+  it('gates posting when within the jittered target gap', () => {
+    const now = Date.parse('2026-04-15T12:00:00.000Z');
+    // postsPerDay [2,3] → avg 2.5 → baseGap 9.6h. 1h ago is well within gap.
+    const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+    // random=0 → jitter 0.8 → targetGap 7.68h. 1h < 7.68h → gated.
+    expect(shouldPostThisCycle(oneHourAgo, [2, 3], now, () => 0)).toBe(false);
+  });
+
+  it('becomes eligible once the jittered gap has elapsed', () => {
+    const now = Date.parse('2026-04-15T12:00:00.000Z');
+    // postsPerDay [2,3] → avg 2.5 → baseGap 9.6h. 12h ago exceeds any jitter.
+    const twelveHoursAgo = new Date(now - 12 * 60 * 60 * 1000).toISOString();
+    expect(shouldPostThisCycle(twelveHoursAgo, [2, 3], now, () => 1)).toBe(true);
+  });
+
+  it('treats an invalid lastPostedAt string as first-post (eligible)', () => {
+    expect(shouldPostThisCycle('not-a-date', [2, 3])).toBe(true);
+  });
+
+  it('respects the ±20% jitter band on the target gap', () => {
+    const now = Date.parse('2026-04-15T12:00:00.000Z');
+    // postsPerDay [1,1] → avg 1 → baseGap 24h. At the high end of jitter
+    // (random=1 → 1.2×) targetGap = 28.8h. 25h ago is gated.
+    const twentyFiveHoursAgo = new Date(now - 25 * 60 * 60 * 1000).toISOString();
+    expect(shouldPostThisCycle(twentyFiveHoursAgo, [1, 1], now, () => 1)).toBe(false);
+    // At the low end (random=0 → 0.8×) targetGap = 19.2h. 25h ago is eligible.
+    expect(shouldPostThisCycle(twentyFiveHoursAgo, [1, 1], now, () => 0)).toBe(true);
   });
 });

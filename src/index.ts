@@ -119,14 +119,32 @@ async function main() {
         }
         limitAgents = parsed;
       }
-      await publish({ agent, limit, limitAgents });
+      const yes = args.includes('--yes') || args.includes('-y');
+      await publish({ agent, limit, limitAgents, yes });
       break;
     }
 
     case 'engage': {
       const agents = parseInt(getFlag('agents') ?? '10', 10);
-      const limit = parseInt(getFlag('limit') ?? '5', 10);
+      const actionsLimitRaw = getFlag('actions-limit');
+      const actionsLimit = parseInt(actionsLimitRaw ?? '5', 10);
+      if (Number.isNaN(actionsLimit) || actionsLimit <= 0) {
+        throw new Error(
+          `engage: --actions-limit must be a positive integer (got "${actionsLimitRaw}")`,
+        );
+      }
       const loop = args.includes('--loop');
+      const limitAgentsFlag = getFlag('limit-agents');
+      let limitAgents: number | undefined;
+      if (limitAgentsFlag !== undefined) {
+        const parsed = parseInt(limitAgentsFlag, 10);
+        if (Number.isNaN(parsed) || parsed <= 0) {
+          throw new Error(
+            `engage: --limit-agents must be a positive integer (got "${limitAgentsFlag}")`,
+          );
+        }
+        limitAgents = parsed;
+      }
       const cycleDelayFlag = getFlag('cycle-delay');
       let cycleDelayMs: number | undefined;
       if (cycleDelayFlag !== undefined) {
@@ -138,7 +156,8 @@ async function main() {
         }
         cycleDelayMs = Math.round(seconds * 1000);
       }
-      await engage({ agents, limit, loop, cycleDelayMs });
+      const yes = args.includes('--yes') || args.includes('-y');
+      await engage({ agents, actionsLimit, loop, limitAgents, cycleDelayMs, yes });
       break;
     }
 
@@ -223,6 +242,7 @@ async function main() {
       }
       const noGrowth = args.includes('--no-growth');
       const verbose = args.includes('--verbose');
+      const yes = args.includes('--yes') || args.includes('-y');
       await engageContinuous({
         feedCachePages: feedPages,
         feedCacheLimit: feedLimit,
@@ -235,6 +255,7 @@ async function main() {
         postsMax,
         noGrowth,
         verbose,
+        yes,
       });
       break;
     }
@@ -313,7 +334,7 @@ ${head('Usage (via Docker):')}
   ${cmd('docker compose run cli seed-personas')} ${flag('[--count <N>] [--force] [--catalog | --hybrid]')}
   ${cmd('docker compose run cli generate')} ${flag('--agents 50 --posts 20  |  --agents 50 --min-posts 5 --max-posts 25')}
   ${cmd('docker compose run cli publish')} ${flag('[--agent <name>] [--limit <N>]')}
-  ${cmd('docker compose run cli engage')} ${flag('[--agents <N>] [--limit <N>] [--loop]')}
+  ${cmd('docker compose run cli engage')} ${flag('[--agents <N>] [--actions-limit <N>] [--limit-agents <N>] [--loop]')}
   ${cmd('docker compose run cli engage-continuous')} ${flag('[--feed-pages <N>] [--feed-limit <N>] [--max-actions <N>] [--dry-run]')}
   ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>]')}
   ${cmd('docker compose run cli status')}

@@ -114,7 +114,22 @@ export class InstaMoltClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, auth = true): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    auth = true,
+    /**
+     * HTTP statuses the caller treats as expected control flow (e.g. 404 for
+     * `isAgentnameAvailable` where a missing agent is the "available" signal).
+     * When a response matches one of these statuses the call still throws an
+     * `InstaMoltApiError` so the caller's existing try/catch is unchanged, but
+     * the event logger emits `api_call` (success: true) instead of `api_error`
+     * so these control-flow probes don't inflate failure metrics or
+     * `errors.jsonl` volume.
+     */
+    expectedStatuses: readonly number[] = [],
+  ): Promise<T> {
     const url = `${BASE}${path}`;
     const init: RequestInit = {
       method,
@@ -122,127 +137,182 @@ export class InstaMoltClient {
       body: body ? JSON.stringify(body) : undefined,
     };
 
-    // Transient-failure retry loop. Covers fetch rejection (status 0 —
-    // ECONNRESET, connection refused, Next.js dev/Turbopack stall) and
-    // 502/503/504 gateway statuses. 429 has its own dedicated retry branch
-    // below; 4xx propagate immediately so validation/auth/moderation errors
-    // surface without delay. Full jitter on the backoff because 10–25
-    // concurrent workers would otherwise resynchronize on the next wave.
-    let res: Response;
-    let lastNetworkErr: unknown;
-    const maxAttempts = config.retryMaxAttempts;
-    let attempt = 0;
-    while (true) {
-      let networkErr: unknown;
-      let fetched: Response | undefined;
-      try {
-        fetched = await fetch(url, init);
-      } catch (err) {
-        networkErr = err;
-      }
-      const transientStatus =
-        fetched !== undefined &&
-        (fetched.status === 502 || fetched.status === 503 || fetched.status === 504);
-      const isTransient = networkErr !== undefined || transientStatus;
-      if (isTransient && attempt < maxAttempts - 1) {
-        const cap = Math.min(config.retryBaseMs * 2 ** attempt, config.retryMaxDelayMs);
-        const delayMs = Math.floor(Math.random() * cap);
-        logEvent({
-          eventType: 'api_retry',
-          success: false,
-          error: networkErr
-            ? `network on ${method} ${path}: ${String(networkErr)}`
-            : `HTTP ${fetched?.status} on ${method} ${path}`,
-          details: {
-            httpStatus: fetched?.status ?? 0,
-            attempt: attempt + 1,
-            maxAttempts,
-            delayMs,
-            requestContext: { method, path },
-          },
-        });
-        // Drain the body on transient HTTP errors so the socket can be
-        // returned to the keep-alive pool instead of lingering.
-        if (fetched) await fetched.text().catch(() => '');
-        await new Promise((r) => setTimeout(r, delayMs));
-        attempt++;
-        lastNetworkErr = networkErr;
-        continue;
-      }
-      if (networkErr !== undefined) {
-        throw new InstaMoltApiError(
+    const startedAt = Date.now();
+    // Tracks total fetch attempts made (including the dedicated 429 retry).
+    // Used both for the per-call attempt field on api_call / api_error and
+    // for the legacy "network after N attempt(s)" error message.
+    let attemptCount = 0;
+
+    const logSuccess = (httpStatus: number): void => {
+      logEvent({
+        eventType: 'api_call',
+        success: true,
+        durationMs: Date.now() - startedAt,
+        details: {
           method,
           path,
-          0,
-          `network after ${attempt + 1} attempt(s): ${String(networkErr)}`,
-        );
-      }
-      // fetched is defined here because networkErr is undefined.
-      res = fetched as Response;
-      break;
-    }
-    // Silence unused-variable lint — lastNetworkErr is read implicitly via
-    // the thrown message above when the final attempt is a network failure.
-    void lastNetworkErr;
+          httpStatus,
+          attempt: attemptCount,
+        },
+      });
+    };
 
-    if (res.status === 429) {
-      const parsed = parseInt(res.headers.get('Retry-After') ?? '60', 10);
-      // Retry-After can be missing, non-numeric, or 0/negative — fall back
-      // to 60s in those cases so we don't busy-loop or schedule with NaN.
-      const retryAfterSec = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
-      const retryAfterMs = retryAfterSec * 1000;
-      console.warn(`\u23F3 Rate limited on ${path}, waiting ${retryAfterSec}s`);
-      // Surface the 429 to the event stream even when the retry succeeds —
-      // it's the signal that upstream rate limits are biting. The logger is
-      // a no-op when not initialized (e.g. from `generate` / `preview`),
-      // so this is safe to call unconditionally.
+    const logFailure = (httpStatus: number, errorMessage: string): void => {
+      // Statuses the caller flagged as expected control flow emit as
+      // successful api_call events so probes like `isAgentnameAvailable` (404
+      // = name free) don't inflate failure metrics. The call still throws —
+      // only the telemetry differs.
+      if (expectedStatuses.includes(httpStatus)) {
+        logSuccess(httpStatus);
+        return;
+      }
       logEvent({
-        eventType: 'api_429',
+        eventType: 'api_error',
         success: false,
-        error: `rate-limited on ${method} ${path}`,
+        durationMs: Date.now() - startedAt,
+        error: errorMessage,
         details: {
-          httpStatus: 429,
-          retryAfterMs,
+          httpStatus,
+          attempt: attemptCount,
           requestContext: { method, path },
         },
       });
-      await new Promise((r) => setTimeout(r, retryAfterMs));
-      let retry: Response;
-      try {
-        retry = await fetch(url, init);
-      } catch (err) {
-        throw new InstaMoltApiError(method, path, 0, `network (retry): ${String(err)}`);
-      }
-      if (!retry.ok) {
-        const retryBody = await retry.text().catch(() => '');
-        let retryRetryAfterMs: number | undefined;
-        if (retry.status === 429) {
-          // Mirror the clamp from the first 429 branch above — a missing,
-          // non-numeric, or 0/negative Retry-After on a follow-up 429 would
-          // otherwise pass NaN into InstaMoltApiError.retryAfterMs and leak
-          // into telemetry / call-site scheduling math.
-          const parsedRetry = parseInt(retry.headers.get('Retry-After') ?? '60', 10);
-          const retryAfterSecRetry =
-            Number.isFinite(parsedRetry) && parsedRetry > 0 ? parsedRetry : 60;
-          retryRetryAfterMs = retryAfterSecRetry * 1000;
+    };
+
+    try {
+      // Transient-failure retry loop. Covers fetch rejection (status 0 —
+      // ECONNRESET, connection refused, Next.js dev/Turbopack stall) and
+      // 502/503/504 gateway statuses. 429 has its own dedicated retry branch
+      // below; 4xx propagate immediately so validation/auth/moderation errors
+      // surface without delay. Full jitter on the backoff because 10–25
+      // concurrent workers would otherwise resynchronize on the next wave.
+      let res: Response;
+      let lastNetworkErr: unknown;
+      const maxAttempts = config.retryMaxAttempts;
+      let attempt = 0;
+      while (true) {
+        let networkErr: unknown;
+        let fetched: Response | undefined;
+        try {
+          fetched = await fetch(url, init);
+        } catch (err) {
+          networkErr = err;
         }
-        throw new InstaMoltApiError(
-          method,
-          path,
-          retry.status,
-          retryBody || 'after retry',
-          retryRetryAfterMs,
-        );
+        attemptCount++;
+        const transientStatus =
+          fetched !== undefined &&
+          (fetched.status === 502 || fetched.status === 503 || fetched.status === 504);
+        const isTransient = networkErr !== undefined || transientStatus;
+        if (isTransient && attempt < maxAttempts - 1) {
+          const cap = Math.min(config.retryBaseMs * 2 ** attempt, config.retryMaxDelayMs);
+          const delayMs = Math.floor(Math.random() * cap);
+          logEvent({
+            eventType: 'api_retry',
+            success: false,
+            error: networkErr
+              ? `network on ${method} ${path}: ${String(networkErr)}`
+              : `HTTP ${fetched?.status} on ${method} ${path}`,
+            details: {
+              httpStatus: fetched?.status ?? 0,
+              attempt: attempt + 1,
+              maxAttempts,
+              delayMs,
+              requestContext: { method, path },
+            },
+          });
+          // Drain the body on transient HTTP errors so the socket can be
+          // returned to the keep-alive pool instead of lingering.
+          if (fetched) await fetched.text().catch(() => '');
+          await new Promise((r) => setTimeout(r, delayMs));
+          attempt++;
+          lastNetworkErr = networkErr;
+          continue;
+        }
+        if (networkErr !== undefined) {
+          throw new InstaMoltApiError(
+            method,
+            path,
+            0,
+            `network after ${attempt + 1} attempt(s): ${String(networkErr)}`,
+          );
+        }
+        // fetched is defined here because networkErr is undefined.
+        res = fetched as Response;
+        break;
       }
-      return parseJson<T>(method, path, retry);
-    }
+      // Silence unused-variable lint — lastNetworkErr is read implicitly via
+      // the thrown message above when the final attempt is a network failure.
+      void lastNetworkErr;
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new InstaMoltApiError(method, path, res.status, text);
-    }
+      if (res.status === 429) {
+        const parsed = parseInt(res.headers.get('Retry-After') ?? '60', 10);
+        // Retry-After can be missing, non-numeric, or 0/negative — fall back
+        // to 60s in those cases so we don't busy-loop or schedule with NaN.
+        const retryAfterSec = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+        const retryAfterMs = retryAfterSec * 1000;
+        // Surface the 429 to the event stream even when the retry succeeds —
+        // it's the signal that upstream rate limits are biting. The logger is
+        // a no-op when not initialized (e.g. from `generate` / `preview`),
+        // so this is safe to call unconditionally.
+        logEvent({
+          eventType: 'api_429',
+          success: false,
+          error: `rate-limited on ${method} ${path}`,
+          details: {
+            httpStatus: 429,
+            retryAfterMs,
+            requestContext: { method, path },
+          },
+        });
+        await new Promise((r) => setTimeout(r, retryAfterMs));
+        let retry: Response;
+        try {
+          retry = await fetch(url, init);
+        } catch (err) {
+          attemptCount++;
+          throw new InstaMoltApiError(method, path, 0, `network (retry): ${String(err)}`);
+        }
+        attemptCount++;
+        if (!retry.ok) {
+          const retryBody = await retry.text().catch(() => '');
+          let retryRetryAfterMs: number | undefined;
+          if (retry.status === 429) {
+            // Mirror the clamp from the first 429 branch above — a missing,
+            // non-numeric, or 0/negative Retry-After on a follow-up 429 would
+            // otherwise pass NaN into InstaMoltApiError.retryAfterMs and leak
+            // into telemetry / call-site scheduling math.
+            const parsedRetry = parseInt(retry.headers.get('Retry-After') ?? '60', 10);
+            const retryAfterSecRetry =
+              Number.isFinite(parsedRetry) && parsedRetry > 0 ? parsedRetry : 60;
+            retryRetryAfterMs = retryAfterSecRetry * 1000;
+          }
+          throw new InstaMoltApiError(
+            method,
+            path,
+            retry.status,
+            retryBody || 'after retry',
+            retryRetryAfterMs,
+          );
+        }
+        const parsedRetry = await parseJson<T>(method, path, retry);
+        logSuccess(retry.status);
+        return parsedRetry;
+      }
 
-    return parseJson<T>(method, path, res);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new InstaMoltApiError(method, path, res.status, text);
+      }
+
+      const parsed = await parseJson<T>(method, path, res);
+      logSuccess(res.status);
+      return parsed;
+    } catch (err) {
+      const httpStatus = err instanceof InstaMoltApiError ? err.status : 0;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logFailure(httpStatus, errorMessage);
+      throw err;
+    }
   }
 
   async startChallenge(agentname: string, description: string): Promise<ChallengeResponse> {
@@ -266,7 +336,13 @@ export class InstaMoltClient {
    */
   async isAgentnameAvailable(agentname: string): Promise<boolean> {
     try {
-      await this.request('GET', `/agents/${encodeURIComponent(agentname)}`, undefined, false);
+      await this.request(
+        'GET',
+        `/agents/${encodeURIComponent(agentname)}`,
+        undefined,
+        false,
+        [404],
+      );
       return false;
     } catch (err) {
       if (err instanceof InstaMoltApiError && err.status === 404) return true;

@@ -25,8 +25,10 @@ export interface GrowthConfig {
   growthRate: number;
   /** Milliseconds between growth ticks. */
   growthIntervalMs: number;
-  /** Posts generated per new agent. */
-  postsPerNewAgent: number;
+  /** Minimum posts generated per new agent (inclusive). */
+  postsMin: number;
+  /** Maximum posts generated per new agent (inclusive). Equal to postsMin for a fixed count. */
+  postsMax: number;
   /** When false, growth display still shows but no ticks fire. */
   enabled: boolean;
 }
@@ -36,7 +38,8 @@ export const GROWTH_DEFAULTS = {
   maxAgents: 200,
   growthRate: 3,
   growthIntervalHours: 4,
-  postsPerNewAgent: 10,
+  postsMin: 10,
+  postsMax: 10,
 } as const;
 
 /**

@@ -25,6 +25,8 @@ const ENGAGE_FLAGS = new Set([
   'growth-rate',
   'growth-interval',
   'posts-per-new',
+  'min-posts-per-new',
+  'max-posts-per-new',
   'no-growth',
   'verbose',
 ]);
@@ -88,8 +90,40 @@ function runPhase(phase: string, args: string[]): void {
   }
 }
 
+function printHelp(): void {
+  console.log(`
+  bootstrap — Wrapper: generate → publish-drafts → engage-continuous in one invocation.
+
+  Usage:
+    pnpm bootstrap --agents <N> --min-posts <n> --max-posts <N> \\
+      --max-agents <N> --growth-rate <N> --growth-interval <h> \\
+      --min-posts-per-new <n> --max-posts-per-new <N>
+
+  Flags are routed per-phase:
+    generate:           --agents, --posts, --min-posts, --max-posts
+    publish:            --agent, --limit
+    engage-continuous:  --feed-pages, --feed-limit, --max-actions, --dry-run,
+                        --max-agents, --growth-rate, --growth-interval,
+                        --posts-per-new, --min-posts-per-new, --max-posts-per-new,
+                        --no-growth, --verbose
+
+  Notes:
+    - Unknown flags abort upfront so a typo can't silently get dropped on the
+      way to a long-running engage loop.
+    - Thin wrapper — every phase is idempotent, re-run the same args to resume.
+    - For per-phase details: pnpm <phase> --help
+
+  Docs: scripts/bootstrap.ts · docs/SEEDING.md
+`);
+}
+
 function main(): void {
-  const parsed = parseArgs(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs.includes('--help')) {
+    printHelp();
+    return;
+  }
+  const parsed = parseArgs(rawArgs);
   assertAllFlagsRouted(parsed);
 
   runPhase('generate', flagsFor(parsed, GENERATE_FLAGS));

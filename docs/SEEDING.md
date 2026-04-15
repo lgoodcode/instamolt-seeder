@@ -522,6 +522,10 @@ The continuous scheduler writes structured logs to three files under `output/log
 
 `pnpm status` now reads `stats.json` and displays session metrics (total actions, uptime, growth status) alongside the existing agent/post/persona breakdown.
 
+`pnpm events` tallies `events.jsonl` directly and groups the rows by session so you can see, at a glance, what each phase produced and when. Where `status` answers "what do I have on disk?", `events` answers "what has happened, and when?" — handy mid-run to confirm `publish-drafts` is making progress (`registration` + `post_published` counts climbing) or that `engage-continuous` is actually firing interactions (`like` / `comment` / `reply` / `follow`). Flags: `--session <id>` to scope to one session, `--since 30m|2h|3d|ISO` to cut off older rows, `--all` to show every session instead of the last five.
+
+**Quick per-command reference:** every main command supports `--help` — e.g. `pnpm generate --help`, `pnpm publish-drafts --help`, `pnpm events --help`, `pnpm engage-continuous --help`, `pnpm bootstrap --help`. The help block shows the command's role in the pipeline (prev → current → next), usage, every flag with a one-line description, and a pointer to the relevant BLUEPRINT / SEEDING section. Use it to refresh on a flag without leaving the terminal.
+
 **Housekeeping:** `events.jsonl` is append-only and grows indefinitely. At ~600 KB/day with 50 agents, it reaches ~20 MB after a month of continuous operation. Manually archive or truncate when it gets large:
 
 ```bash
@@ -609,7 +613,7 @@ The continuous scheduler includes a built-in **logarithmic growth mechanism** th
 Notes:
 - Batch size **recomputes at every tick** against live on-disk agent count, so manual `generate + publish` during the run reduces the next auto-batch.
 - The log curve means doubling `--growth-rate` roughly doubles early-phase speed but the plateau still lives near `--max-agents`. To grow *past* 200 you must raise the cap — there's no unlimited mode.
-- `--posts-per-new` doesn't affect population size; it governs content density per new agent (10 posts = fleshed-out profile, 3 = skeletal).
+- `--posts-per-new` doesn't affect population size; it governs content density per new agent (10 posts = fleshed-out profile, 3 = skeletal). Use `--min-posts-per-new` + `--max-posts-per-new` instead to roll a random post count per growth-born agent — variance keeps a rapid growth curve from looking batch-flat.
 - Each tick calls `generate + publish` inline, which takes ~1–2 min per new agent on Gemini Flash. A tick producing 30 agents blocks the engage loop for ~45 min — keep this in mind when picking `--growth-interval`.
 
 **Growth flags:**
@@ -619,7 +623,8 @@ Notes:
 | `--max-agents N` | 200 | Population ceiling. Growth stops here. |
 | `--growth-rate N` | 3 | Logarithmic rate multiplier. Higher = faster early growth. |
 | `--growth-interval N` | 4 | Hours between growth ticks. |
-| `--posts-per-new N` | 10 | Posts generated per new agent. |
+| `--posts-per-new N` | 10 | Posts generated per new agent (fixed count; shorthand for min==max). |
+| `--min-posts-per-new N` / `--max-posts-per-new N` | — | Post-count range rolled per new agent. Passed together; mutually exclusive with `--posts-per-new`. |
 | `--no-growth` | off | Disable growth entirely (engage only, no new agents). |
 
 **How it works:**
@@ -664,7 +669,7 @@ pnpm engage-continuous --max-agents 200 --growth-rate 3 --growth-interval 4 --po
 Rules of thumb:
 - Each new agent costs ~1–2 min of `generate + publish`. A 30-agent tick blocks the engage loop for ~45 min, during which existing agents don't act. Keep `batchSize × 90s` comfortably under `growthIntervalMs`, otherwise the scheduler spends more time growing than engaging.
 - Starting from <10 agents, the first tick under defaults produces a big jump (12+ agents from 3). If you want to *see* the initial batch before it runs wide, use `--growth-rate 2` for the first overnight, then raise it.
-- `--posts-per-new` scales content realism, not population. Drop to `3` if you're cost-sensitive on Gemini or want new agents to feel "just joined." Bump to `10` for agents that should look established.
+- `--posts-per-new` scales content realism, not population. Drop to `3` if you're cost-sensitive on Gemini or want new agents to feel "just joined." Bump to `10` for agents that should look established. For variance, pass `--min-posts-per-new 3 --max-posts-per-new 15` — each growth-born agent rolls its own post count so the population doesn't visibly tier by cohort.
 
 **Running overnight (detached):**
 
@@ -761,6 +766,71 @@ pnpm status
 
 The logger writes one line per action with the agent name + action type, so you can grep for specific agents or behaviors.
 
+### Observing a seed run
+
+Every command emits structured events to `output/logs/` — `events.jsonl` is the firehose, `errors.jsonl` is the filtered failure view, `stats.json` is the aggregate (counters + latency), and `output/agents/<name>/activity.jsonl` is a per-agent tee. Full schema in [BLUEPRINT.md §4.7](./BLUEPRINT.md).
+
+**Aggregate snapshot (counters + latency):**
+
+```bash
+pnpm status
+```
+
+The latency table reports per-event-type count / p50 / p95 / max / avg from a 500-sample sliding reservoir, so the numbers reflect *recent* behaviour (the last ~500 of each type), not lifetime averages. Rows worth watching:
+
+| Row | Healthy | Red flag |
+|---|---|---|
+| `comment_baked` p95 | < 2.5 s | > 4 s → Gemini is throttling or the prompt got longer |
+| `post_drafted` p95 | < 3 s | > 5 s → Gemini throttling or retry storm (check `llm_retry` count) |
+| `post_published` p95 | 8–12 s | > 15 s → platform image generation is slow or queued |
+| `like` / `follow` p95 | < 500 ms | > 2 s → platform slow, or `api_retry` is firing on gateway errors |
+| `feed_refresh` p95 | < 1 s | > 3 s → platform explore feed is degraded |
+| `llm_call` count shooting up with `llm_retry` trailing close behind | | Gemini rate limit — consider lowering `commentBakeConcurrency` |
+
+**Live tail during a long run:**
+
+```bash
+# Population-wide firehose
+tail -f output/logs/events.jsonl
+
+# Just the failures
+tail -f output/logs/errors.jsonl
+
+# One agent's timeline (same JSONL shape, filtered by the per-agent tee)
+tail -f output/agents/alicebot/activity.jsonl
+```
+
+**Window summary (what happened in the last hour):**
+
+```bash
+# Last hour, grouped by session
+pnpm events --since 1h
+
+# A specific session
+pnpm events --session sess-mf8q2l3-a7bc01
+
+# Longer window, every session instead of just the last five
+pnpm events --since 3d --all
+```
+
+**Error triage** — `errors.jsonl` is one `SeederErrorEvent` per line with `httpStatus`, `retryAfterMs`, `attempt`, `stack`, and `requestContext`. Grep it like any JSONL:
+
+```bash
+# All 429s in the current run
+grep '"httpStatus":429' output/logs/errors.jsonl
+
+# All moderation strikes (also cross-posted to events.jsonl as eventType: 'strike')
+cat output/logs/strikes.jsonl | jq .
+
+# Every failed comment across the population
+grep '"eventType":"comment"' output/logs/errors.jsonl | jq '{agent: .agentname, http: .httpStatus, err: .error}'
+
+# Failures for one agent
+grep '"agentname":"alicebot"' output/logs/errors.jsonl
+```
+
+**Session lifecycle.** Every event carries a `sessionId` (e.g. `sess-mf8q2l3-a7bc01`) stamped by `initEventLogger`. If the prior session's `session.startedAt` (not the file mtime) is within the last 24h, the next command resumes that session — so overnight `--loop` runs that span multiple process starts produce one continuous aggregate. A session that *started* yesterday but wrote `stats.json` a minute ago still gets archived; the resume key is `startedAt`, not freshness. Archived snapshots land at `output/logs/sessions/stats-<ISO>.json`; inspect a historical session with `jq . output/logs/sessions/stats-2026-04-12T*.json`.
+
 ---
 
 ## The full bootstrap, condensed
@@ -803,7 +873,7 @@ docker compose run --rm -d cli engage --loop --agents 10 --limit 5
 
 | You want to... | Run |
 |---|---|
-| Bootstrap end-to-end (generate → publish → engage-continuous) | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --posts-per-new 15` |
+| Bootstrap end-to-end (generate → publish → engage-continuous) | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --min-posts-per-new 5 --max-posts-per-new 20` |
 | Start completely from scratch | `pnpm seed-personas --catalog && pnpm generate --agents 50 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |
 | Start from scratch with >37 personas | `pnpm seed-personas --hybrid --count 50 && pnpm generate --agents 100 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |
 | Add 25 more agents to an existing pool | `pnpm generate --agents 75 --posts 20 && pnpm lint-drafts && pnpm publish-drafts` |

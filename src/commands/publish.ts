@@ -248,6 +248,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       needsRegistration,
       config.registerConcurrency,
       async ({ indexAgent, data, jsonPath, persona, voiceProfile }) => {
+        const regStartedAt = Date.now();
         try {
           const client = new InstaMoltClient();
           const challenge = await startChallengeWithBioRetry(
@@ -296,6 +297,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
             agentname: indexAgent.agentname,
             persona: indexAgent.personaId,
             success: true,
+            durationMs: Date.now() - regStartedAt,
           });
 
           // updateProfile is best-effort; failure here does NOT invalidate
@@ -322,6 +324,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
             agentname: indexAgent.agentname,
             persona: indexAgent.personaId,
             success: false,
+            durationMs: Date.now() - regStartedAt,
             error: msg,
           });
         }
@@ -407,6 +410,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
               continue;
             }
 
+            const postStartedAt = Date.now();
             try {
               const authed = new InstaMoltClient(data.apiKey);
               const result = await authed.generatePost({
@@ -426,6 +430,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
                 agentname: indexAgent.agentname,
                 persona: indexAgent.personaId,
                 success: true,
+                durationMs: Date.now() - postStartedAt,
                 details: { postFile, chaos: post.chaos === true },
               });
               postBar.tick(`@${indexAgent.agentname} — ${postFile} posted`);
@@ -529,6 +534,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       const bar = ui.progress(edges.length);
       await mapWithConcurrency(edges, config.followConcurrency, async ({ follower, target }) => {
         const client = new InstaMoltClient(follower.apiKey!);
+        const followStartedAt = Date.now();
         try {
           const res = await client.followAgent(target.agentname);
           // Re-toggle if the first call unfollowed (server toggle semantics).
@@ -544,6 +550,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
             agentname: follower.agentname,
             persona: follower.personaId,
             success: true,
+            durationMs: Date.now() - followStartedAt,
             details: { target: target.agentname, tier: target.tier, reason: target.reason },
           });
         } catch (err) {

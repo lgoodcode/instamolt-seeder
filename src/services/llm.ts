@@ -1,4 +1,5 @@
 import { config } from '@/config';
+import { logEvent } from '@/lib/event-logger';
 import type {
   CommentRegister,
   ExampleComment,
@@ -8,6 +9,21 @@ import type {
   PersonaRelationships,
   VoiceProfile,
 } from '@/types';
+
+/**
+ * Tag describing which generator a `callGemini` invocation is serving. Stamped
+ * into `llm_call` / `llm_retry` events under `details.kind` so latency buckets
+ * and retry counters can be sliced per-generator without parsing prompts.
+ */
+export type LlmCallKind =
+  | 'agentname'
+  | 'bio'
+  | 'post'
+  | 'comment'
+  | 'reply'
+  | 'persona'
+  | 'image_prompt'
+  | 'challenge';
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = config.geminiModel;
@@ -53,7 +69,7 @@ function isCreditExhaustedBody(body: string): boolean {
  * 429s whose body indicates billing exhaustion throw `GeminiQuotaError`
  * immediately without retrying — there's nothing to wait for.
  */
-async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
+async function callGemini(prompt: string, maxTokens = 200, kind?: LlmCallKind): Promise<string> {
   const url = `${GEMINI_URL}/${MODEL}:generateContent?key=${config.geminiApiKey}`;
 
   const isGemini3 = MODEL.includes('gemini-3');
@@ -70,50 +86,93 @@ async function callGemini(prompt: string, maxTokens = 200): Promise<string> {
     generationConfig,
   });
 
+  const startedAt = Date.now();
   const MAX_RETRIES = 3;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
+  let attempt = 0;
+  try {
+    for (attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+
+      if (res.status === 429 || res.status >= 500) {
+        // Read the body once so we can inspect it for the billing-exhaustion
+        // signal AND include it in the final error if retries are exhausted.
+        // If credits are gone, retrying just burns wall time — bail out with
+        // a typed error the top-level handler can turn into a friendly
+        // fail-fast message. Per-retry warnings only log status + wait time.
+        const text = await res.text();
+        if (res.status === 429 && isCreditExhaustedBody(text)) {
+          throw new GeminiQuotaError(text.slice(0, 500));
+        }
+        if (attempt < MAX_RETRIES - 1) {
+          const waitMs = 2 ** attempt * 1000 + Math.random() * 1000;
+          logEvent({
+            eventType: 'llm_retry',
+            success: false,
+            error: `Gemini ${res.status}`,
+            details: {
+              kind,
+              attempt: attempt + 1,
+              maxAttempts: MAX_RETRIES,
+              delayMs: waitMs,
+              httpStatus: res.status,
+            },
+          });
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw new Error(`Gemini API error ${res.status}: ${text}`);
+      }
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Gemini API error ${res.status}: ${text}`);
+      }
+
+      const data = (await res.json()) as GeminiResponse;
+      const parts = data.candidates?.[0]?.content?.parts ?? [];
+      const textParts = parts.filter((p) => !p.thought && p.text);
+      const out = textParts
+        .map((p) => p.text!)
+        .join('')
+        .trim();
+      logEvent({
+        eventType: 'llm_call',
+        success: true,
+        durationMs: Date.now() - startedAt,
+        details: { kind, model: MODEL, maxTokens, attempts: attempt + 1 },
+      });
+      return out;
+    }
+
+    throw new Error('Gemini API: unreachable');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const httpStatusMatch =
+      err instanceof GeminiQuotaError ? 429 : (message.match(/error\s+(\d{3})/)?.[1] ?? undefined);
+    const httpStatus =
+      typeof httpStatusMatch === 'number'
+        ? httpStatusMatch
+        : typeof httpStatusMatch === 'string'
+          ? Number.parseInt(httpStatusMatch, 10)
+          : undefined;
+    logEvent({
+      eventType: 'llm_call',
+      success: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      details: {
+        kind,
+        model: MODEL,
+        attempts: attempt + 1,
+        ...(httpStatus !== undefined ? { httpStatus } : {}),
+      },
     });
-
-    if (res.status === 429 || res.status >= 500) {
-      // Read the body once so we can inspect it for the billing-exhaustion
-      // signal AND include it in the final error if retries are exhausted.
-      // If credits are gone, retrying just burns wall time — bail out with
-      // a typed error the top-level handler can turn into a friendly
-      // fail-fast message. Per-retry warnings only log status + wait time.
-      const text = await res.text();
-      if (res.status === 429 && isCreditExhaustedBody(text)) {
-        throw new GeminiQuotaError(text.slice(0, 500));
-      }
-      if (attempt < MAX_RETRIES - 1) {
-        const waitMs = 2 ** attempt * 1000 + Math.random() * 1000;
-        console.warn(
-          `\u23F3 Gemini ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${(waitMs / 1000).toFixed(1)}s`,
-        );
-        await new Promise((r) => setTimeout(r, waitMs));
-        continue;
-      }
-      throw new Error(`Gemini API error ${res.status}: ${text}`);
-    }
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Gemini API error ${res.status}: ${text}`);
-    }
-
-    const data = (await res.json()) as GeminiResponse;
-    const parts = data.candidates?.[0]?.content?.parts ?? [];
-    const textParts = parts.filter((p) => !p.thought && p.text);
-    return textParts
-      .map((p) => p.text!)
-      .join('')
-      .trim();
+    throw err;
   }
-
-  throw new Error('Gemini API: unreachable');
 }
 
 /** How many lexicon tokens are sampled into the voice prompt block. */
@@ -171,7 +230,7 @@ ${style.examples.map((e) => `- ${e}`).join('\n')}
 
 Reply with ONLY the username, nothing else.`;
 
-  const raw = await callGemini(prompt, 30);
+  const raw = await callGemini(prompt, 30, 'agentname');
   const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
   return style.preserveCase ? sanitized : sanitized.toLowerCase();
 }
@@ -273,9 +332,9 @@ Reply with ONLY the bio text, nothing else.`;
   // Retry once on sub-3-word output so both the primary generate.ts path and
   // the publish.ts moderation-retry path honor the bio floor. Callers may
   // layer additional fallback (e.g. persona.personality) on top.
-  let bio = (await callGemini(prompt, 80)).slice(0, 150).trim();
+  let bio = (await callGemini(prompt, 80, 'bio')).slice(0, 150).trim();
   if (bio.split(/\s+/).filter(Boolean).length < MIN_BIO_WORDS) {
-    bio = (await callGemini(prompt, 80)).slice(0, 150).trim();
+    bio = (await callGemini(prompt, 80, 'bio')).slice(0, 150).trim();
   }
   return bio;
 }
@@ -404,7 +463,7 @@ Generate a post. Reply with ONLY valid JSON, no markdown fences, no explanation:
 
 The aspectRatio should be "square", "landscape", or "portrait" -- pick what fits the image best.`;
 
-  const raw = await callGemini(prompt, 300);
+  const raw = await callGemini(prompt, 300, 'post');
   const cleaned = raw
     .replace(/^```json\s*/i, '')
     .replace(/\s*```$/i, '')
@@ -415,7 +474,10 @@ The aspectRatio should be "square", "landscape", or "portrait" -- pick what fits
     const rawImagePrompt: string = parsed.imagePrompt ?? parsed.image_prompt ?? '';
     let imagePrompt = rawImagePrompt;
     if (imagePrompt.length > 500) {
-      console.warn(`\u26A0\uFE0F  imagePrompt ${imagePrompt.length} chars > 500, truncating`);
+      // Silent truncation — not a retry and not a failure. The downstream
+      // imagePrompt is always bounded at 500 chars regardless of what Gemini
+      // returned; surfacing this as an event type conflated it with real
+      // transient retries in the `llm_retry` telemetry.
       imagePrompt = imagePrompt.slice(0, 500);
     }
     return {
@@ -634,7 +696,7 @@ Rules:
 - Be CREATIVE. Avoid generic "I am an AI" personas. Lean into specific subcultures, weird internet aesthetics, or contradictions
 - Avoid duplicating the personality, aesthetic, or virality strategy of any existing persona above`;
 
-  const raw = await callGemini(prompt, 800);
+  const raw = await callGemini(prompt, 800, 'persona');
   const cleaned = raw
     .replace(/^```json\s*/i, '')
     .replace(/\s*```$/i, '')
@@ -898,7 +960,7 @@ Write a comment in YOUR voice — not a generic persona voice. The length should
 
 Reply with ONLY the comment text, nothing else.`;
 
-  return callGemini(prompt, 150);
+  return callGemini(prompt, 150, 'comment');
 }
 
 // --- Reply generation (threaded comments) ---
@@ -987,5 +1049,5 @@ Write a REPLY in YOUR voice that directly engages with what @${parent.author} sa
 
 Reply with ONLY the comment text, nothing else.`;
 
-  return callGemini(prompt, 200);
+  return callGemini(prompt, 200, 'reply');
 }

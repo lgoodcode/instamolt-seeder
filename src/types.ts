@@ -615,6 +615,16 @@ export type SeederEventType =
   | 'api_error'
   | 'api_429'
   | 'api_retry'
+  // LLM (Gemini) call lifecycle. `llm_call` is the outer-boundary event —
+  // one per `callGemini` invocation, carrying total `durationMs` and a
+  // prompt-kind tag (`bio`, `post`, `comment`, `reply`, `agentname`,
+  // `persona`, `image_prompt`) in `details.kind`. `llm_retry` mirrors
+  // `api_retry` and fires per intermediate transient failure. Both flow
+  // through the same latency-bucket aggregation so `pnpm status` can
+  // surface "avg bio latency" or "Gemini retry rate" without reparsing
+  // events.jsonl.
+  | 'llm_call'
+  | 'llm_retry'
   | 'strike'
   | 'registration'
   | 'post_published'
@@ -695,6 +705,33 @@ export interface StrikeEvent {
   apiResponse?: Record<string, unknown>;
 }
 
+/**
+ * Bounded-reservoir latency aggregate. One of these is maintained per
+ * {@link SeederEventType} that emits a `durationMs` — the raw samples buffer
+ * is capped at 500 (sliding FIFO) so p50/p95 reflect *recent* run latency
+ * rather than lifetime averages, and memory stays bounded on long-running
+ * `engage --loop` processes. Percentiles are recomputed on every push via a
+ * cheap in-place sort of the samples array (500 entries sorts in sub-ms).
+ */
+export interface LatencyBucket {
+  /**
+   * Lifetime event count for this bucket. Unlike the other numeric fields,
+   * this is NOT reservoir-bounded — it increments on every timed event of
+   * the matching type for the life of the session. Use `samples.length`
+   * (not `count`) as the denominator when computing window-scoped
+   * averages from `sumMs`.
+   */
+  count: number;
+  /** Sum of `durationMs` across the recent-500-sample reservoir. */
+  sumMs: number;
+  /** Max `durationMs` across the recent-500-sample reservoir. */
+  maxMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  /** Recent raw `durationMs` samples, sliding FIFO capped at 500. */
+  samples: number[];
+}
+
 /** Aggregated session metrics, persisted at `output/logs/stats.json`. */
 export interface SeederStats {
   lastUpdatedAt: string;
@@ -725,6 +762,14 @@ export interface SeederStats {
     agentsAdded: number;
   };
   personas: Record<string, { actions: number; errors: number; strikes: number }>;
+  /**
+   * Per-event-type latency aggregates. Populated only for events that carry
+   * `durationMs`. Keyed by `SeederEventType`; read by `pnpm status` to
+   * render the latency table. Partial: entries are created lazily on first
+   * timed event of that type, so absent keys simply mean "no timed samples
+   * yet this session".
+   */
+  latency: Partial<Record<SeederEventType, LatencyBucket>>;
 }
 
 // --- Follow algorithm types ---

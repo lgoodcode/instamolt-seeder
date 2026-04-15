@@ -90,8 +90,15 @@ export interface ContinuousOptions {
   growthRate?: number;
   /** Hours between growth ticks. Default 4. */
   growthIntervalHours?: number;
-  /** Posts generated per new agent during growth. Default 10. */
-  postsPerNewAgent?: number;
+  /**
+   * Minimum posts generated per new agent during growth. Default 10.
+   * When `postsMax` is also set and greater, each growth-born agent rolls a
+   * random post count in `[postsMin, postsMax]` so population variance looks
+   * organic rather than batch-flat.
+   */
+  postsMin?: number;
+  /** Maximum posts generated per new agent during growth. Defaults to `postsMin`. */
+  postsMax?: number;
   /** Disable growth entirely (engage only, no new agents). */
   noGrowth?: boolean;
   /** Log every event to stdout in addition to events.jsonl. */
@@ -202,12 +209,21 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
   const maxActions = options.maxActions ?? Number.POSITIVE_INFINITY;
   const dryRun = options.dryRun ?? false;
 
+  const postsMin = options.postsMin ?? GROWTH_DEFAULTS.postsMin;
+  const postsMax = options.postsMax ?? postsMin;
+  if (postsMin < 0) {
+    throw new Error(`engage-continuous: postsMin must be >= 0 (got ${postsMin})`);
+  }
+  if (postsMax < postsMin) {
+    throw new Error(`engage-continuous: postsMax (${postsMax}) must be >= postsMin (${postsMin})`);
+  }
   const growthConfig: GrowthConfig = {
     maxAgents: options.maxAgents ?? GROWTH_DEFAULTS.maxAgents,
     growthRate: options.growthRate ?? GROWTH_DEFAULTS.growthRate,
     growthIntervalMs:
       (options.growthIntervalHours ?? GROWTH_DEFAULTS.growthIntervalHours) * 60 * 60 * 1000,
-    postsPerNewAgent: options.postsPerNewAgent ?? GROWTH_DEFAULTS.postsPerNewAgent,
+    postsMin,
+    postsMax,
     enabled: !(options.noGrowth ?? false),
   };
   let lastGrowthAt = 0;
@@ -270,6 +286,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       'Feed cache loaded',
       `${feedCache.file.posts.length} posts from [${feedCache.file.sources.join(', ')}]`,
     );
+    const sessionStartedAt = Date.now();
     logEvent({
       eventType: 'session_start',
       success: true,
@@ -402,8 +419,8 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
               // loaded when growth actually fires.
               const { generate } = await import('@/commands/generate');
               const { publish } = await import('@/commands/publish');
-              await generate(targetTotal, growthConfig.postsPerNewAgent);
-              await publish({ limit: growthConfig.postsPerNewAgent });
+              await generate(targetTotal, growthConfig.postsMin, growthConfig.postsMax);
+              await publish({ limit: growthConfig.postsMax });
               lastGrowthAt = Date.now();
               log(
                 'info',
@@ -469,6 +486,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       const sp = ui.spinner();
       sp.start(`@${agent.agentname} — ${actionKind}`);
 
+      const actionStartedAt = Date.now();
       const result = await dispatchAction(
         actionKind,
         ctx,
@@ -477,6 +495,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         quota,
         ACTIVITY_REPLY_PROBABILITY,
       );
+      const actionDurationMs = Date.now() - actionStartedAt;
 
       lastGlobalActionAt = Date.now();
       actionsPerformed++;
@@ -511,6 +530,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           agentname: agent.agentname,
           persona: agent.personaId,
           success: true,
+          durationMs: actionDurationMs,
           details: { detail, ...(chaos ? { chaos: true } : {}) },
         });
       } else if (result.status === 'skipped') {
@@ -521,6 +541,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           agentname: agent.agentname,
           persona: agent.personaId,
           success: false,
+          durationMs: actionDurationMs,
           details: { skipped: true, reason: 'reason' in result ? result.reason : '' },
         });
       } else {
@@ -537,6 +558,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             agentname: agent.agentname,
             persona: agent.personaId,
             success: false,
+            durationMs: actionDurationMs,
             details: { skipped: true, reason: 'rate_limited', error: errMsg },
           });
         } else {
@@ -547,6 +569,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             agentname: agent.agentname,
             persona: agent.personaId,
             success: false,
+            durationMs: actionDurationMs,
             error: errMsg,
           });
         }
@@ -572,6 +595,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     logEvent({
       eventType: 'session_end',
       success: true,
+      durationMs: Date.now() - sessionStartedAt,
       details: {
         actionsPerformed,
         likes: cycleLikes,

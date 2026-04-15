@@ -5,6 +5,7 @@ import pc from 'picocolors';
 import { config } from '@/config';
 import type {
   ActionKind,
+  LatencyBucket,
   SeederErrorEvent,
   SeederEvent,
   SeederEventType,
@@ -12,6 +13,44 @@ import type {
   StrikeEvent,
 } from '@/types';
 import { ACTION_KINDS } from '@/types';
+
+/**
+ * Max raw samples retained per-event-type for p50/p95 calculation. Once a
+ * bucket hits this cap the oldest sample is dropped (sliding FIFO) so the
+ * percentiles track *recent* latency rather than lifetime averages. 500 is
+ * comfortably enough for stable p95 under all observed event volumes and
+ * sorts in sub-ms on every push.
+ */
+const LATENCY_RESERVOIR_MAX = 500;
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(sorted.length - 1, Math.floor((sorted.length * p) / 100));
+  return sorted[idx];
+}
+
+function emptyLatencyBucket(): LatencyBucket {
+  return { count: 0, sumMs: 0, maxMs: 0, p50Ms: 0, p95Ms: 0, samples: [] };
+}
+
+function pushLatency(bucket: LatencyBucket, durationMs: number): void {
+  bucket.count++;
+  bucket.samples.push(durationMs);
+  if (bucket.samples.length > LATENCY_RESERVOIR_MAX) {
+    // Sliding FIFO — drop oldest sample to keep percentiles tracking recent
+    // behaviour. `shift()` is O(n) but the cap is small (500).
+    bucket.samples.shift();
+  }
+  // `sumMs` and `maxMs` are reservoir-bounded too so the avg rendered by
+  // `pnpm status` reflects recent behaviour and a one-time spike ages out
+  // with its sample. `count` stays as the lifetime event count (the sample
+  // array length is the reservoir size).
+  bucket.sumMs = bucket.samples.reduce((acc, n) => acc + n, 0);
+  bucket.maxMs = bucket.samples.reduce((acc, n) => (n > acc ? n : acc), 0);
+  const sorted = [...bucket.samples].sort((a, b) => a - b);
+  bucket.p50Ms = percentile(sorted, 50);
+  bucket.p95Ms = percentile(sorted, 95);
+}
 
 const STATS_FLUSH_THRESHOLD = 50;
 
@@ -110,6 +149,7 @@ function freshStats(): SeederStats {
     moderation: { totalStrikes: 0, byTier: {}, byCategory: {} },
     growth: { ticksFired: 0, agentsAdded: 0 },
     personas: {},
+    latency: {},
   };
 }
 
@@ -132,6 +172,10 @@ function loadOrArchivePriorStats(): SeederStats {
       // Resume: preserve sessionId + counters. Backfill sessionId for stats
       // files written before this field existed.
       if (!prev.session.sessionId) prev.session.sessionId = generateSessionId();
+      // Backfill `latency` for stats files written before this field existed.
+      // Without this, resume would read an undefined field and the first
+      // `pushLatency` call would crash on `stats.latency[type]`.
+      if (!prev.latency) prev.latency = {};
       return prev;
     }
     // Archive: copy the old file, then start fresh. `mkdirSync` with
@@ -248,6 +292,15 @@ export function logEvent(event: Omit<SeederEvent, 'timestamp' | 'sessionId'>): v
   // Update in-memory stats
   stats.session.totalEvents++;
   eventCount++;
+
+  // Latency aggregation: any event carrying `durationMs` contributes to a
+  // per-eventType reservoir. Populated lazily on first timed sample of that
+  // type so absent keys in `stats.latency` mean "no timed samples yet".
+  if (typeof event.durationMs === 'number' && Number.isFinite(event.durationMs)) {
+    const bucket = stats.latency[event.eventType] ?? emptyLatencyBucket();
+    pushLatency(bucket, event.durationMs);
+    stats.latency[event.eventType] = bucket;
+  }
 
   const actionKind = EVENT_TO_ACTION[event.eventType];
   if (actionKind) {
@@ -381,6 +434,60 @@ export function getStats(): Readonly<SeederStats> | undefined {
 /** Current session id (stable across the process lifetime). */
 export function getSessionId(): string {
   return sessionId;
+}
+
+/**
+ * Run `fn`, time its wall-clock duration, and emit a `SeederEvent` with
+ * `durationMs` stamped on both success and failure. On failure, rethrows
+ * after emitting. `baseFields` (agentname, persona, details, error) are
+ * merged into the emitted event; `durationMs`, `success`, and `error`
+ * (on failure) are set by this helper.
+ *
+ * Preferred over manual `Date.now()` bookkeeping for every new code path
+ * that calls Gemini or the platform API — ensures both the success and
+ * failure event emission + latency aggregation stay in sync.
+ *
+ * @example
+ *   const post = await timed('post_drafted', { agentname, persona: p.id }, () =>
+ *     generatePostContent(p, n, total),
+ *   );
+ */
+export async function timed<T>(
+  eventType: SeederEventType,
+  // `error` is excluded from baseFields so callers can't accidentally stamp
+  // an error message onto the success event — `timed()` is the single source
+  // of truth for that field and populates it only on the catch path.
+  baseFields: Omit<
+    SeederEvent,
+    'timestamp' | 'sessionId' | 'eventType' | 'success' | 'durationMs' | 'error'
+  >,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logEvent({
+      ...baseFields,
+      eventType,
+      success: true,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logEvent({
+      ...baseFields,
+      eventType,
+      success: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      details: {
+        ...(baseFields.details ?? {}),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+    });
+    throw err;
+  }
 }
 
 /** Reset module state — only for tests. */

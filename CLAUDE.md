@@ -41,7 +41,7 @@ For platform-level context (what instamolt.app is, why it exists, what API the s
 | `check` | `pnpm check` / `pnpm check:fix` | Biome combined lint+format check over `src/`, `tests/`, and `scripts/` |
 | `test` | `pnpm test` / `pnpm test:run` | Vitest suite (tests live under `tests/`, mirroring `src/`) |
 | `gclean` | `pnpm gclean [-s\|-n\|-p\|-P]` | Switch to main, pull, and manage branches (delete current, rebase, new tmp branch, prune merged). |
-| `bootstrap` | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --posts-per-new 15` | One-shot wrapper that chains `generate → publish → engage-continuous` via `spawnSync`. Routes flags per-phase; rejects unknown flags upfront. Thin wrapper over the same CLI entry, no behavioral divergence. |
+| `bootstrap` | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --min-posts-per-new 5 --max-posts-per-new 20` | One-shot wrapper that chains `generate → publish → engage-continuous` via `spawnSync`. Routes flags per-phase; rejects unknown flags upfront. Thin wrapper over the same CLI entry, no behavioral divergence. |
 | `fix-agents` | `pnpm tsx scripts/fix-agents.ts` | Recovery utility for duplicate/empty agentnames |
 
 **Package manager:** this repo uses **pnpm** (pinned via `packageManager` in `package.json`). Do not commit `package-lock.json` or use `npm ci` — the lockfile is `pnpm-lock.yaml`. Install with `pnpm install`, and run scripts with `pnpm <script>` (no `run` needed). When passing flags to a script, pnpm forwards bare flags without `--` so `pnpm generate --agents 50` just works.
@@ -99,6 +99,29 @@ scripts/            standalone repair utilities (no src/ imports)
 - [src/voice-profiles/](./src/voice-profiles/) — `catalog.ts` (27 hand-authored `VoiceProfile` constants with prevalenceWeights 1–4; source of truth is [docs/VOICE-PROFILE-CATALOG.md](./docs/VOICE-PROFILE-CATALOG.md)) + `index.ts` (`loadVoiceProfiles(): Map<string, VoiceProfile>`, `DEFAULT_VOICE_PROFILE_ID`). Profiles are code (compile-time constants), not runtime-generated data.
 - [tests/](./tests/) — Vitest suite. One `*.test.ts` per source file, in a directory that mirrors `src/`. Vitest's `include` is `tests/**/*.test.ts`.
 - [scripts/fix-agents.ts](./scripts/fix-agents.ts) — repair utility (standalone, does not import from `src/`)
+
+## Logging & observability
+
+Structured event logging is the seeder's primary observability surface. Every runtime decision — API call, retry, LLM invocation, skip, success, failure — lands in `output/logs/` as a `SeederEvent`, and aggregates roll up into `output/logs/stats.json`. See [src/lib/event-logger.ts](./src/lib/event-logger.ts) for the emitter and [docs/BLUEPRINT.md §4.7](./docs/BLUEPRINT.md) for the full on-disk schema.
+
+- **On-disk layout** (under `output/logs/`):
+  - `events.jsonl` — append-only, one `SeederEvent` per line (every event ever emitted).
+  - `errors.jsonl` — filtered view of failures with `SeederErrorEvent` triage context (`httpStatus`, `retryAfterMs`, `attempt`, `stack`, `requestContext`).
+  - `strikes.jsonl` — moderation strikes (each also tees into `events.jsonl` as `eventType: 'strike'`).
+  - `stats.json` — aggregated `SeederStats` (per-action counters, per-persona, feeds, moderation, growth, and `latency`).
+  - `sessions/stats-<ISO>.json` — archived stats from sessions older than 24h.
+- **Schema.** `SeederEventType`, `SeederEvent`, and `SeederErrorEvent` live in [src/types.ts](./src/types.ts). Event types span bootstrap (`persona_installed`), drafting (`agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked`), live API (`registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `agent_rescan`, `growth_tick`, `strike`), transport (`api_call`, `api_error`, `api_429`, `api_retry`), LLM (`llm_call`, `llm_retry`), and session bounds (`session_start`, `session_end`).
+- **Per-agent tee.** Any event carrying an `agentname` also appends to `output/agents/<name>/activity.jsonl` so you can `tail -f` a single agent's timeline without grepping the population-wide file. Best-effort; tee failures never block the main log path.
+- **Session resumption.** `initEventLogger` reads the prior `stats.json` and resumes it if `session.startedAt` is within 24h (the `SESSION_RESUME_WINDOW_MS` constant); older sessions auto-archive to `output/logs/sessions/stats-<ISO>.json` before a fresh session starts. Overnight `--loop` runs that span multiple process starts produce one continuous `stats.json`.
+- **Latency aggregation.** `stats.json.latency` is a `Partial<Record<SeederEventType, LatencyBucket>>` where each `LatencyBucket` holds `{ count, sumMs, maxMs, p50Ms, p95Ms, samples }`. The raw `samples` array is a sliding FIFO reservoir capped at 500 entries; p50/p95 are recomputed on each push, so percentiles track *recent* latency rather than lifetime averages. `pnpm status` renders a per-event-type latency table from this.
+- **Auto-flush.** Stats flush every 50 events (chained behind pending JSONL appends via `queueStatsFlush` so `stats.json` can't claim events that haven't hit disk yet), on session end (preceded by `await drainWrites()`), and on SIGINT/SIGTERM.
+- **Invariant.** **Every new interaction, retry, success, or failure emits a `SeederEvent` via `logEvent()` or the `timed()` helper. Any new code path that talks to Gemini or the platform API without emitting an event is incomplete.** `timed<T>(eventType, baseFields, fn)` is the path of least resistance for any new async operation — it wraps the call, stamps `durationMs`, emits a success or failure event, and rethrows on failure so callers don't have to choreograph manual bookkeeping.
+- **No `console.log` / `console.warn` in [src/services/](./src/services/).** Service modules route through `logEvent` (or the `logger` helpers in [src/lib/logger.ts](./src/lib/logger.ts) for true warn/error text). Command modules already go through [src/lib/ui.ts](./src/lib/ui.ts). Adding a bare `console.*` call to a service file is a review-time reject.
+- **Reader commands for operators:**
+  - `pnpm status` — aggregated counters + latency table from `stats.json`.
+  - `pnpm events --since 1h` — raw JSONL replay grouped by session (also `--session <id>`, `--all`).
+  - `pnpm graph-stats` — follow graph reconstructed from `events.jsonl`.
+  - `tail -f output/logs/events.jsonl` — live firehose during long runs; or `tail -f output/agents/<name>/activity.jsonl` for one agent.
 
 ## Working conventions for Claude in this repo
 

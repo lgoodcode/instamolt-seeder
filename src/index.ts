@@ -5,6 +5,7 @@ import { previewComments } from '@/commands/preview-comments';
 import { publish } from '@/commands/publish';
 import { seedPersonasCommand } from '@/commands/seed-personas';
 import { status } from '@/commands/status';
+import { maybePrintCommandHelp } from '@/lib/command-help';
 import { drainWrites, flushStats } from '@/lib/event-logger';
 import * as ui from '@/lib/ui';
 import { GeminiQuotaError } from '@/services/llm';
@@ -62,6 +63,8 @@ function getFlag(name: string): string | undefined {
 }
 
 async function main() {
+  if (maybePrintCommandHelp(command, args)) return;
+
   switch (command) {
     case 'generate': {
       const agents = parseInt(getFlag('agents') ?? '50', 10);
@@ -156,9 +159,46 @@ async function main() {
       const growthIntervalHours = getFlag('growth-interval')
         ? Number.parseFloat(getFlag('growth-interval')!)
         : undefined;
-      const postsPerNewAgent = getFlag('posts-per-new')
-        ? parseInt(getFlag('posts-per-new')!, 10)
-        : undefined;
+      // Mirror `generate`'s XOR rule: `--posts-per-new` is a fixed-count
+      // shorthand; `--min-posts-per-new` + `--max-posts-per-new` is the
+      // explicit range. Combining them is a typo, not a feature.
+      const minPostsPerNewFlag = getFlag('min-posts-per-new');
+      const maxPostsPerNewFlag = getFlag('max-posts-per-new');
+      let postsMin: number | undefined;
+      let postsMax: number | undefined;
+      if (minPostsPerNewFlag !== undefined || maxPostsPerNewFlag !== undefined) {
+        if (getFlag('posts-per-new') !== undefined) {
+          throw new Error(
+            'engage-continuous: --posts-per-new cannot be combined with --min-posts-per-new/--max-posts-per-new',
+          );
+        }
+        if (minPostsPerNewFlag === undefined || maxPostsPerNewFlag === undefined) {
+          throw new Error(
+            'engage-continuous: --min-posts-per-new and --max-posts-per-new must be passed together',
+          );
+        }
+        postsMin = parseInt(minPostsPerNewFlag, 10);
+        postsMax = parseInt(maxPostsPerNewFlag, 10);
+        if (Number.isNaN(postsMin) || Number.isNaN(postsMax)) {
+          throw new Error(
+            'engage-continuous: --min-posts-per-new and --max-posts-per-new must be integers',
+          );
+        }
+        if (postsMin > postsMax) {
+          throw new Error(
+            `engage-continuous: --min-posts-per-new (${postsMin}) must be <= --max-posts-per-new (${postsMax})`,
+          );
+        }
+      } else if (getFlag('posts-per-new') !== undefined) {
+        const fixed = parseInt(getFlag('posts-per-new')!, 10);
+        if (Number.isNaN(fixed)) {
+          throw new Error(
+            `engage-continuous: --posts-per-new must be an integer (got "${getFlag('posts-per-new')}")`,
+          );
+        }
+        postsMin = fixed;
+        postsMax = fixed;
+      }
       const noGrowth = args.includes('--no-growth');
       const verbose = args.includes('--verbose');
       await engageContinuous({
@@ -169,7 +209,8 @@ async function main() {
         maxAgents,
         growthRate,
         growthIntervalHours,
-        postsPerNewAgent,
+        postsMin,
+        postsMax,
         noGrowth,
         verbose,
       });
@@ -209,6 +250,15 @@ async function main() {
       await status();
       break;
 
+    case 'events': {
+      const { events } = await import('@/commands/events');
+      const session = getFlag('session');
+      const since = getFlag('since');
+      const all = args.includes('--all');
+      await events({ session, since, all });
+      break;
+    }
+
     case 'reset': {
       const { reset } = await import('@/commands/reset');
       const agent = getFlag('agent');
@@ -244,7 +294,11 @@ ${head('Usage (via Docker):')}
   ${cmd('docker compose run cli engage-continuous')} ${flag('[--feed-pages <N>] [--feed-limit <N>] [--max-actions <N>] [--dry-run]')}
   ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>]')}
   ${cmd('docker compose run cli status')}
+  ${cmd('docker compose run cli events')} ${flag('[--session <id>] [--since 2h|30m|3d|ISO] [--all]')}
   ${cmd('docker compose run cli reset')} ${flag('[--agent <name> | --persona <id>] [--cache] [--logs] [--all] [--force]')}
+
+${head('Per-command help:')}
+  ${cmd('pnpm <command> --help')}   ${dim('e.g. pnpm generate --help — shows usage, flags, and pipeline context.')}
 
 ${head('Flags:')}
   ${flag('--loop')}        ${dim('(engage only) Run engage cycles forever, sleeping 5-15 minutes')}

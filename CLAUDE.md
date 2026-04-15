@@ -100,6 +100,29 @@ scripts/            standalone repair utilities (no src/ imports)
 - [tests/](./tests/) — Vitest suite. One `*.test.ts` per source file, in a directory that mirrors `src/`. Vitest's `include` is `tests/**/*.test.ts`.
 - [scripts/fix-agents.ts](./scripts/fix-agents.ts) — repair utility (standalone, does not import from `src/`)
 
+## Logging & observability
+
+Structured event logging is the seeder's primary observability surface. Every runtime decision — API call, retry, LLM invocation, skip, success, failure — lands in `output/logs/` as a `SeederEvent`, and aggregates roll up into `output/logs/stats.json`. See [src/lib/event-logger.ts](./src/lib/event-logger.ts) for the emitter and [docs/BLUEPRINT.md §4.7](./docs/BLUEPRINT.md) for the full on-disk schema.
+
+- **On-disk layout** (under `output/logs/`):
+  - `events.jsonl` — append-only, one `SeederEvent` per line (every event ever emitted).
+  - `errors.jsonl` — filtered view of failures with `SeederErrorEvent` triage context (`httpStatus`, `retryAfterMs`, `attempt`, `stack`, `requestContext`).
+  - `strikes.jsonl` — moderation strikes (each also tees into `events.jsonl` as `eventType: 'strike'`).
+  - `stats.json` — aggregated `SeederStats` (per-action counters, per-persona, feeds, moderation, growth, and `latency`).
+  - `sessions/stats-<ISO>.json` — archived stats from sessions older than 24h.
+- **Schema.** `SeederEventType`, `SeederEvent`, and `SeederErrorEvent` live in [src/types.ts](./src/types.ts). Event types span bootstrap (`persona_installed`), drafting (`agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked`), live API (`registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `agent_rescan`, `growth_tick`, `strike`), transport (`api_call`, `api_error`, `api_429`, `api_retry`), LLM (`llm_call`, `llm_retry`), and session bounds (`session_start`, `session_end`).
+- **Per-agent tee.** Any event carrying an `agentname` also appends to `output/agents/<name>/activity.jsonl` so you can `tail -f` a single agent's timeline without grepping the population-wide file. Best-effort; tee failures never block the main log path.
+- **Session resumption.** `initEventLogger` reads the prior `stats.json` and resumes it if `session.startedAt` is within 24h (the `SESSION_RESUME_WINDOW_MS` constant); older sessions auto-archive to `output/logs/sessions/stats-<ISO>.json` before a fresh session starts. Overnight `--loop` runs that span multiple process starts produce one continuous `stats.json`.
+- **Latency aggregation.** `stats.json.latency` is a `Partial<Record<SeederEventType, LatencyBucket>>` where each `LatencyBucket` holds `{ count, sumMs, maxMs, p50Ms, p95Ms, samples }`. The raw `samples` array is a sliding FIFO reservoir capped at 500 entries; p50/p95 are recomputed on each push, so percentiles track *recent* latency rather than lifetime averages. `pnpm status` renders a per-event-type latency table from this.
+- **Auto-flush.** Stats flush every 50 events (chained behind pending JSONL appends via `queueStatsFlush` so `stats.json` can't claim events that haven't hit disk yet), on session end (preceded by `await drainWrites()`), and on SIGINT/SIGTERM.
+- **Invariant.** **Every new interaction, retry, success, or failure emits a `SeederEvent` via `logEvent()` or the `timed()` helper. Any new code path that talks to Gemini or the platform API without emitting an event is incomplete.** `timed<T>(eventType, baseFields, fn)` is the path of least resistance for any new async operation — it wraps the call, stamps `durationMs`, emits a success or failure event, and rethrows on failure so callers don't have to choreograph manual bookkeeping.
+- **No `console.log` / `console.warn` in [src/services/](./src/services/).** Service modules route through `logEvent` (or the `logger` helpers in [src/lib/logger.ts](./src/lib/logger.ts) for true warn/error text). Command modules already go through [src/lib/ui.ts](./src/lib/ui.ts). Adding a bare `console.*` call to a service file is a review-time reject.
+- **Reader commands for operators:**
+  - `pnpm status` — aggregated counters + latency table from `stats.json`.
+  - `pnpm events --since 1h` — raw JSONL replay grouped by session (also `--session <id>`, `--all`).
+  - `pnpm graph-stats` — follow graph reconstructed from `events.jsonl`.
+  - `tail -f output/logs/events.jsonl` — live firehose during long runs; or `tail -f output/agents/<name>/activity.jsonl` for one agent.
+
 ## Working conventions for Claude in this repo
 
 - **Do not add a database.** JSON-on-disk persistence under `output/` is intentional — it makes the seeder portable, inspectable, and trivially resumable. If you feel the pull toward a DB, update BLUEPRINT.md's open-questions section instead.

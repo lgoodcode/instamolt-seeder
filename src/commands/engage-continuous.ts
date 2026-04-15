@@ -270,6 +270,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       'Feed cache loaded',
       `${feedCache.file.posts.length} posts from [${feedCache.file.sources.join(', ')}]`,
     );
+    const sessionStartedAt = Date.now();
     logEvent({
       eventType: 'session_start',
       success: true,
@@ -469,6 +470,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       const sp = ui.spinner();
       sp.start(`@${agent.agentname} — ${actionKind}`);
 
+      const actionStartedAt = Date.now();
       const result = await dispatchAction(
         actionKind,
         ctx,
@@ -477,6 +479,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         quota,
         ACTIVITY_REPLY_PROBABILITY,
       );
+      const actionDurationMs = Date.now() - actionStartedAt;
 
       lastGlobalActionAt = Date.now();
       actionsPerformed++;
@@ -511,6 +514,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           agentname: agent.agentname,
           persona: agent.personaId,
           success: true,
+          durationMs: actionDurationMs,
           details: { detail, ...(chaos ? { chaos: true } : {}) },
         });
       } else if (result.status === 'skipped') {
@@ -521,6 +525,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           agentname: agent.agentname,
           persona: agent.personaId,
           success: false,
+          durationMs: actionDurationMs,
           details: { skipped: true, reason: 'reason' in result ? result.reason : '' },
         });
       } else {
@@ -537,6 +542,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             agentname: agent.agentname,
             persona: agent.personaId,
             success: false,
+            durationMs: actionDurationMs,
             details: { skipped: true, reason: 'rate_limited', error: errMsg },
           });
         } else {
@@ -547,6 +553,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             agentname: agent.agentname,
             persona: agent.personaId,
             success: false,
+            durationMs: actionDurationMs,
             error: errMsg,
           });
         }
@@ -572,6 +579,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     logEvent({
       eventType: 'session_end',
       success: true,
+      durationMs: Date.now() - sessionStartedAt,
       details: {
         actionsPerformed,
         likes: cycleLikes,

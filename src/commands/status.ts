@@ -3,7 +3,14 @@ import { join } from 'node:path';
 import Table from 'cli-table3';
 import { config } from '@/config';
 import * as ui from '@/lib/ui';
-import type { AgentCommentsFile, AgentsIndex, GeneratedPost, SeederStats } from '@/types';
+import type {
+  AgentCommentsFile,
+  AgentsIndex,
+  GeneratedPost,
+  LatencyBucket,
+  SeederEventType,
+  SeederStats,
+} from '@/types';
 
 export async function status(): Promise<void> {
   let index: AgentsIndex;
@@ -170,5 +177,83 @@ export async function status(): Promise<void> {
     // No stats file — skip silently
   }
 
+  // --- Latency ---
+  ui.section('Latency');
+  await renderLatency();
+
   ui.outro(ui.color.green(`${ui.symbol.ok} status done`));
+}
+
+async function renderLatency(): Promise<void> {
+  let stats: SeederStats;
+  try {
+    const raw = await readFile(join(config.logsDir, 'stats.json'), 'utf-8');
+    stats = JSON.parse(raw);
+  } catch {
+    ui.note('Latency', 'No latency samples yet.');
+    return;
+  }
+
+  const latency = stats.latency;
+  if (!latency) {
+    ui.note('Latency', 'No latency samples yet.');
+    return;
+  }
+
+  const rows: Array<{
+    event: SeederEventType;
+    bucket: LatencyBucket;
+  }> = [];
+  for (const [event, bucket] of Object.entries(latency) as Array<
+    [SeederEventType, LatencyBucket | undefined]
+  >) {
+    if (bucket && bucket.count > 0) {
+      rows.push({ event, bucket });
+    }
+  }
+
+  if (rows.length === 0) {
+    ui.note('Latency', 'No latency samples yet.');
+    return;
+  }
+
+  rows.sort((a, b) => b.bucket.count - a.bucket.count);
+
+  if (ui.isInteractive()) {
+    const table = new Table({
+      head: [
+        ui.color.bold('Event'),
+        ui.color.bold('Count'),
+        ui.color.bold('p50 (ms)'),
+        ui.color.bold('p95 (ms)'),
+        ui.color.bold('Max (ms)'),
+        ui.color.bold('Avg (ms)'),
+      ],
+      style: { head: [], border: ['gray'] },
+      colWidths: [24, 10, 12, 12, 12, 12],
+      wordWrap: true,
+    });
+
+    for (const { event, bucket } of rows) {
+      const avg = Math.round(bucket.sumMs / bucket.count);
+      table.push([
+        ui.color.cyan(event),
+        String(bucket.count),
+        String(Math.round(bucket.p50Ms)),
+        String(Math.round(bucket.p95Ms)),
+        String(Math.round(bucket.maxMs)),
+        String(avg),
+      ]);
+    }
+
+    console.log(table.toString());
+  } else {
+    console.log('\nLatency by event:');
+    for (const { event, bucket } of rows) {
+      const avg = Math.round(bucket.sumMs / bucket.count);
+      console.log(
+        `  ${event.padEnd(24)} count=${String(bucket.count).padStart(6)}  p50=${String(Math.round(bucket.p50Ms)).padStart(6)}ms  p95=${String(Math.round(bucket.p95Ms)).padStart(6)}ms  max=${String(Math.round(bucket.maxMs)).padStart(6)}ms  avg=${String(avg).padStart(6)}ms`,
+      );
+    }
+  }
 }

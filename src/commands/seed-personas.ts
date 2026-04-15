@@ -59,6 +59,7 @@ export async function seedPersonasCommand(options: SeedPersonasOptions = {}): Pr
         : `${count} personas via Gemini`;
   sp.start(`Seeding ${target} into ${config.personasDir}`);
   let created: Awaited<ReturnType<typeof seedPersonas>> = [];
+  const seedStartedAt = Date.now();
   try {
     created = await seedPersonas(count, mode);
     sp.stop(`Seeded ${created.length} personas`);
@@ -75,11 +76,19 @@ export async function seedPersonasCommand(options: SeedPersonasOptions = {}): Pr
     throw err;
   }
 
+  // Per-persona durationMs is approximated by spreading the batch wall-clock
+  // evenly across created personas. `seedPersonas` internally calls Gemini
+  // sequentially in the non-catalog modes, so even spread is a fair proxy
+  // for "this persona's share of the seed". Catalog mode is near-instant
+  // (file copy), so the spread approaches zero per persona.
+  const perPersonaMs =
+    created.length > 0 ? Math.round((Date.now() - seedStartedAt) / created.length) : 0;
   for (const persona of created) {
     logEvent({
       eventType: 'persona_installed',
       persona: persona.id,
       success: true,
+      durationMs: perPersonaMs,
       details: { source: mode, tagline: persona.tagline },
     });
   }

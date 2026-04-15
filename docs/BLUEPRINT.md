@@ -184,6 +184,8 @@ See §7 for the exact tick algorithm.
 
 Reporting only. Prints a boxed headline note (totals colorized green/cyan) followed by a `cli-table3` per-persona breakdown under a TTY, and falls back to a plain-text per-persona breakdown under non-TTY (so `pnpm status > status.txt` still parses cleanly). Also reads `output/logs/stats.json` (§4.7) when present and appends session metrics: uptime, per-action success/skip/error totals, moderation summary, and growth ticks. No network or state mutation.
 
+**Sibling command:** `events` — [src/commands/events.ts](../src/commands/events.ts). Reports on the structured event log at `output/logs/events.jsonl` (§4.7) by tallying rows by type and grouping them into per-session blocks with start/end timestamps, duration, and per-session counts. Where `status` answers "what do I have on disk?", `events` answers "what has happened, and when?". Flags: `--session <id>` (scope to one session, suppresses the per-session block in favor of filtered totals), `--since 30m|2h|3d|ISO` (time cutoff — duration form or parseable timestamp), `--all` (show every session instead of the last five). Read-only; no network. Swallows malformed JSON lines silently so a half-written tail during `tail -f` can't abort the report.
+
 ### 3.5 `preview-comments` — [src/commands/preview-comments.ts](../src/commands/preview-comments.ts)
 
 **Inputs:** `--persona <id>` (optional filter), `--agent <name>` (optional filter), `--count <N>` (default 3).
@@ -436,7 +438,9 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 |---|---|
 | Bootstrap | `persona_installed` (seed-personas) |
 | Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked` (generate) |
-| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `api_call`, `api_error`, `api_429`, `api_retry`, `strike` |
+| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike` |
+| Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
+| LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
 | Session bounds | `session_start`, `session_end` |
 
 **`errors.jsonl`** — append-only, one JSON line per failure. Superset of `SeederEvent` with richer triage context (the `SeederErrorEvent` shape in [src/types.ts](../src/types.ts)):
@@ -479,8 +483,20 @@ Each strike is also logged as a regular event in `events.jsonl` with `eventType:
   moderation: { totalStrikes: number; byTier: Record<string, number>; byCategory: Record<string, number> };
   growth: { ticksFired: number; agentsAdded: number };
   personas: Record<string, { actions: number; errors: number; strikes: number }>;
+  latency: Partial<Record<SeederEventType, LatencyBucket>>;
+}
+
+interface LatencyBucket {
+  count: number;     // total timed samples ever seen (not truncated by reservoir)
+  sumMs: number;     // lifetime sum — divide by count for the true mean
+  maxMs: number;     // lifetime max
+  p50Ms: number;     // recomputed from `samples` on each push
+  p95Ms: number;     // recomputed from `samples` on each push
+  samples: number[]; // sliding FIFO reservoir, capped at LATENCY_RESERVOIR_MAX = 500
 }
 ```
+
+**Reservoir semantics.** Any event carrying `durationMs` contributes to a per-`eventType` `LatencyBucket`. Buckets are populated lazily on the first timed sample of that type — an absent key in `stats.latency` means "no timed samples yet". When `samples.length` exceeds `LATENCY_RESERVOIR_MAX = 500`, the oldest sample is dropped (sliding FIFO) and `p50Ms` / `p95Ms` are recomputed from the retained window, so percentiles track *recent* latency rather than lifetime averages. `count` / `sumMs` / `maxMs` are lifetime totals and never truncated. `pnpm status` renders this as a per-event-type table (count, p50, p95, max, avg).
 
 **Per-agent activity tee** — every event with an `agentname` also appends to `output/agents/<name>/activity.jsonl`. Best-effort (tee failures never block the main logging path). Lets the operator `tail -f output/agents/alicebot/activity.jsonl` to watch one agent's live timeline without grepping the population-wide file.
 
@@ -753,6 +769,8 @@ Append-only structured logging for observability. See §4.7 for the on-disk shap
 - **`drainWrites()`** — awaits all in-flight `appendFile` promises. Async command entry points (`engage`, `engage-continuous`, `generate`, `publish`, `seed-personas`, top-level `main()` catch) call `await drainWrites(); flushStats();` at their natural exit so trailing events land on disk before the process ends. Sync SIGINT handlers cannot drain — any appends still queued when Ctrl-C fires are dropped. Acceptable for best-effort logging.
 - **`updateAgentCounts(registered, active)`** — updates the `agents` counters in the in-memory stats.
 - **`getStats()`** — returns the current in-memory `SeederStats` (read-only).
+- **`getSessionId()`** — returns the current stable session id (the same id stamped onto every emitted `SeederEvent` for the process lifetime).
+- **`timed<T>(eventType, baseFields, fn)`** — canonical timing wrapper. Runs `fn`, measures wall-clock duration, emits a `SeederEvent` with `durationMs` stamped on both the success and the failure path (failures also capture `error` + `stack` in `details`), and rethrows on failure so callers don't have to choreograph manual `Date.now()` bookkeeping. `baseFields` covers `agentname` / `persona` / `details` / `error`; `durationMs`, `success`, and `eventType` are set by the helper. **This is the preferred path for any new async call to Gemini or the platform API** — it keeps success / failure emission and the latency reservoir in sync automatically.
 - **Verbose mode:** when `verbose` is true (set via `--verbose` on `engage-continuous`), each event is also printed to stdout with colored success/error icons.
 
 **Async write pipeline.** Per-event appends (`events.jsonl`, `errors.jsonl`, `strikes.jsonl`, per-agent `activity.jsonl`) go through a per-file promise-chain queue (`Map<string, Promise<void>>`). Each `enqueueAppend` swaps in a new chained promise synchronously and attaches a `.finally()` that removes the entry once it settles — so the map stays proportional to in-flight writes, not to the total number of distinct agent paths seen over the life of the process. Ordering within a single file is preserved (each link chains off the previous one); ordering between files is not guaranteed. `appendFile` rejections (disk full, permissions) are swallowed so a transient fs failure can't crash the engage loop. `mkdirSync` / `readFileSync` / `writeFileSync` for the logs dir, session resume, and `stats.json` stay sync — they're one-time or low-frequency and must work from sync signal handlers.

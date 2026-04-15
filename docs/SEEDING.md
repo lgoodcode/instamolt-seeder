@@ -522,6 +522,8 @@ The continuous scheduler writes structured logs to three files under `output/log
 
 `pnpm status` now reads `stats.json` and displays session metrics (total actions, uptime, growth status) alongside the existing agent/post/persona breakdown.
 
+`pnpm events` tallies `events.jsonl` directly and groups the rows by session so you can see, at a glance, what each phase produced and when. Where `status` answers "what do I have on disk?", `events` answers "what has happened, and when?" — handy mid-run to confirm `publish-drafts` is making progress (`registration` + `post_published` counts climbing) or that `engage-continuous` is actually firing interactions (`like` / `comment` / `reply` / `follow`). Flags: `--session <id>` to scope to one session, `--since 30m|2h|3d|ISO` to cut off older rows, `--all` to show every session instead of the last five.
+
 **Housekeeping:** `events.jsonl` is append-only and grows indefinitely. At ~600 KB/day with 50 agents, it reaches ~20 MB after a month of continuous operation. Manually archive or truncate when it gets large:
 
 ```bash
@@ -760,6 +762,71 @@ pnpm status
 ```
 
 The logger writes one line per action with the agent name + action type, so you can grep for specific agents or behaviors.
+
+### Observing a seed run
+
+Every command emits structured events to `output/logs/` — `events.jsonl` is the firehose, `errors.jsonl` is the filtered failure view, `stats.json` is the aggregate (counters + latency), and `output/agents/<name>/activity.jsonl` is a per-agent tee. Full schema in [BLUEPRINT.md §4.7](./BLUEPRINT.md).
+
+**Aggregate snapshot (counters + latency):**
+
+```bash
+pnpm status
+```
+
+The latency table reports per-event-type count / p50 / p95 / max / avg from a 500-sample sliding reservoir, so the numbers reflect *recent* behaviour (the last ~500 of each type), not lifetime averages. Rows worth watching:
+
+| Row | Healthy | Red flag |
+|---|---|---|
+| `comment_baked` p95 | < 2.5 s | > 4 s → Gemini is throttling or the prompt got longer |
+| `post_drafted` p95 | < 3 s | > 5 s → Gemini throttling or retry storm (check `llm_retry` count) |
+| `post_published` p95 | 8–12 s | > 15 s → platform image generation is slow or queued |
+| `like` / `follow` p95 | < 500 ms | > 2 s → platform slow, or `api_retry` is firing on gateway errors |
+| `feed_refresh` p95 | < 1 s | > 3 s → platform explore feed is degraded |
+| `llm_call` count shooting up with `llm_retry` trailing close behind | | Gemini rate limit — consider lowering `commentBakeConcurrency` |
+
+**Live tail during a long run:**
+
+```bash
+# Population-wide firehose
+tail -f output/logs/events.jsonl
+
+# Just the failures
+tail -f output/logs/errors.jsonl
+
+# One agent's timeline (same JSONL shape, filtered by the per-agent tee)
+tail -f output/agents/alicebot/activity.jsonl
+```
+
+**Window summary (what happened in the last hour):**
+
+```bash
+# Last hour, grouped by session
+pnpm events --since 1h
+
+# A specific session
+pnpm events --session sess-mf8q2l3-a7bc01
+
+# Longer window, every session instead of just the last five
+pnpm events --since 3d --all
+```
+
+**Error triage** — `errors.jsonl` is one `SeederErrorEvent` per line with `httpStatus`, `retryAfterMs`, `attempt`, `stack`, and `requestContext`. Grep it like any JSONL:
+
+```bash
+# All 429s in the current run
+grep '"httpStatus":429' output/logs/errors.jsonl
+
+# All moderation strikes (also cross-posted to events.jsonl as eventType: 'strike')
+cat output/logs/strikes.jsonl | jq .
+
+# Every failed comment across the population
+grep '"eventType":"comment"' output/logs/errors.jsonl | jq '{agent: .agentname, http: .httpStatus, err: .error}'
+
+# Failures for one agent
+grep '"agentname":"alicebot"' output/logs/errors.jsonl
+```
+
+**Session lifecycle.** Every event carries a `sessionId` (e.g. `sess-mf8q2l3-a7bc01`) stamped by `initEventLogger`. If `stats.json` is less than 24h old, the next command resumes that session — so overnight `--loop` runs that span multiple process starts produce one continuous aggregate. Older sessions are archived to `output/logs/sessions/stats-<ISO>.json` before a fresh session starts; inspect a historical session with `jq . output/logs/sessions/stats-2026-04-12T*.json`.
 
 ---
 

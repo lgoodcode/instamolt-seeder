@@ -207,6 +207,7 @@ export async function generate(
     for (let i = 0; i < specsToCreate.length; i++) {
       const spec = specsToCreate[i];
       const postsForAgent = postCounts[i];
+      const agentStartedAt = Date.now();
       try {
         // --- Identity ---
         // Bounded retry loop: generate → local dedup → platform availability
@@ -370,23 +371,33 @@ export async function generate(
         localTaken.add(agentname);
         created++;
         log('success', `@${agentname} [${spec.voiceProfile.id}] — ${bio.slice(0, 60)}...`);
+        const agentDurationMs = Date.now() - agentStartedAt;
         logEvent({
           eventType: 'agent_drafted',
           agentname,
           persona: persona.id,
           success: true,
+          durationMs: agentDurationMs,
           details: {
             voiceProfileId: spec.voiceProfile.id,
             postsDrafted: agentPosts.length,
             bioPreview: bio.slice(0, 80),
           },
         });
+        // Per-post timing isn't tracked in the inner loop (would require
+        // restructuring to capture pre/post timestamps around the LLM call).
+        // Approximate by spreading the agent's total wall-clock across posts —
+        // good enough for p50/p95 trend tracking; precise per-post latency is
+        // already captured by the underlying `llm_call` events of kind 'post'.
+        const perPostMs =
+          agentPosts.length > 0 ? Math.round(agentDurationMs / agentPosts.length) : 0;
         for (const post of agentPosts) {
           logEvent({
             eventType: 'post_drafted',
             agentname,
             persona: persona.id,
             success: true,
+            durationMs: perPostMs,
             details: {
               postId: post.id,
               caption: post.caption.slice(0, 80),
@@ -402,6 +413,7 @@ export async function generate(
           eventType: 'agent_drafted',
           persona: persona.id,
           success: false,
+          durationMs: Date.now() - agentStartedAt,
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -635,19 +647,23 @@ async function bakeCommentSamplesPhase(
       return;
     }
 
+    const commentBakeStartedAt = Date.now();
     try {
       const commentSamples = await bakeAgentComments(persona, agent, sources);
+      const commentBakeDurationMs = Date.now() - commentBakeStartedAt;
       const commentSamplesTagged = commentSamples.map((s) => ({
         ...s,
         kind: 'comment' as const,
       }));
 
       let replySamples: typeof commentSamples = [];
+      let replyBakeDurationMs = 0;
       if (replyBakeEnabled && plan.replies > 0) {
         const replyPosts = pickPostsWithComments(feed, plan.replies, agent.agentname);
         if (replyPosts.length > 0) {
           const priorTexts = commentSamples.map((s) => s.text);
           const depthTargets = plan.depthTargets.slice(0, replyPosts.length);
+          const replyBakeStartedAt = Date.now();
           replySamples = await bakeAgentReplies(
             persona,
             agent,
@@ -656,6 +672,7 @@ async function bakeCommentSamplesPhase(
             depthTargets,
             priorTexts,
           );
+          replyBakeDurationMs = Date.now() - replyBakeStartedAt;
         }
       }
 
@@ -676,6 +693,7 @@ async function bakeCommentSamplesPhase(
         agentname: agent.agentname,
         persona: agent.personaId,
         success: true,
+        durationMs: commentBakeDurationMs,
         details: { count: commentSamplesTagged.length },
       });
       if (replySamples.length > 0) {
@@ -684,6 +702,7 @@ async function bakeCommentSamplesPhase(
           agentname: agent.agentname,
           persona: agent.personaId,
           success: true,
+          durationMs: replyBakeDurationMs,
           details: { count: replySamples.length },
         });
       }
@@ -696,6 +715,7 @@ async function bakeCommentSamplesPhase(
         agentname: agent.agentname,
         persona: agent.personaId,
         success: false,
+        durationMs: Date.now() - commentBakeStartedAt,
         error: err instanceof Error ? err.message : String(err),
       });
     }

@@ -72,10 +72,10 @@ describe('InstaMoltClient 429 event emission', () => {
     // sibling test file's dotenv race breaks).
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    // logEvent called exactly once — BEFORE the retry sleep, even though the
-    // retry ultimately succeeded.
-    expect(logEventMock).toHaveBeenCalledTimes(1);
-    expect(logEventMock).toHaveBeenCalledWith({
+    // logEvent called twice: api_429 (before the retry sleep) and api_call
+    // (after the retry succeeds, carrying durationMs).
+    expect(logEventMock).toHaveBeenCalledTimes(2);
+    expect(logEventMock).toHaveBeenNthCalledWith(1, {
       eventType: 'api_429',
       success: false,
       error: 'rate-limited on POST /posts/p1/like',
@@ -85,6 +85,18 @@ describe('InstaMoltClient 429 event emission', () => {
         requestContext: { method: 'POST', path: '/posts/p1/like' },
       },
     });
+    const successCall = logEventMock.mock.calls[1][0] as {
+      eventType: string;
+      success: boolean;
+      durationMs: number;
+      details: { method: string; path: string; httpStatus: number };
+    };
+    expect(successCall.eventType).toBe('api_call');
+    expect(successCall.success).toBe(true);
+    expect(successCall.durationMs).toBeGreaterThanOrEqual(0);
+    expect(successCall.details.method).toBe('POST');
+    expect(successCall.details.path).toBe('/posts/p1/like');
+    expect(successCall.details.httpStatus).toBe(200);
   });
 
   it('falls back to 60s (60000ms) retryAfterMs when Retry-After header is absent', async () => {
@@ -101,11 +113,13 @@ describe('InstaMoltClient 429 event emission', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await promise;
 
-    expect(logEventMock).toHaveBeenCalledTimes(1);
+    // api_429 + api_call (retry succeeded).
+    expect(logEventMock).toHaveBeenCalledTimes(2);
     const call = logEventMock.mock.calls[0][0] as {
       details: { retryAfterMs: number };
     };
     expect(call.details.retryAfterMs).toBe(60_000);
+    expect(logEventMock.mock.calls[1][0].eventType).toBe('api_call');
   });
 
   it('throws InstaMoltApiError with retryAfterMs from the SECOND response on 429 -> retry -> 429', async () => {
@@ -132,13 +146,25 @@ describe('InstaMoltClient 429 event emission', () => {
     // not the first (2s).
     expect(apiErr.retryAfterMs).toBe(7_000);
 
-    // The initial 429 still emitted exactly once (the second 429 is thrown,
-    // not logged — the request() method only logs on the first 429 before
-    // the retry sleep).
-    expect(logEventMock).toHaveBeenCalledTimes(1);
+    // The initial 429 still emitted once (the second 429 is thrown, not
+    // logged via api_429). A final api_error is now also emitted before the
+    // throw, carrying durationMs + the final 429 status.
+    expect(logEventMock).toHaveBeenCalledTimes(2);
     const firstCall = logEventMock.mock.calls[0][0] as {
+      eventType: string;
       details: { retryAfterMs: number };
     };
+    expect(firstCall.eventType).toBe('api_429');
     expect(firstCall.details.retryAfterMs).toBe(2_000);
+    const errCall = logEventMock.mock.calls[1][0] as {
+      eventType: string;
+      success: boolean;
+      durationMs: number;
+      details: { httpStatus: number; requestContext: { method: string; path: string } };
+    };
+    expect(errCall.eventType).toBe('api_error');
+    expect(errCall.success).toBe(false);
+    expect(errCall.details.httpStatus).toBe(429);
+    expect(errCall.details.requestContext).toEqual({ method: 'POST', path: '/posts/p1/like' });
   });
 });

@@ -209,6 +209,15 @@ async function main() {
       await status();
       break;
 
+    case 'events': {
+      const { events } = await import('@/commands/events');
+      const session = getFlag('session');
+      const since = getFlag('since');
+      const all = args.includes('--all');
+      await events({ session, since, all });
+      break;
+    }
+
     case 'reset': {
       const { reset } = await import('@/commands/reset');
       const agent = getFlag('agent');
@@ -244,6 +253,7 @@ ${head('Usage (via Docker):')}
   ${cmd('docker compose run cli engage-continuous')} ${flag('[--feed-pages <N>] [--feed-limit <N>] [--max-actions <N>] [--dry-run]')}
   ${cmd('docker compose run cli preview-comments')} ${flag('[--persona <id>] [--agent <name>] [--count <N>]')}
   ${cmd('docker compose run cli status')}
+  ${cmd('docker compose run cli events')} ${flag('[--session <id>] [--since 2h|30m|3d|ISO] [--all]')}
   ${cmd('docker compose run cli reset')} ${flag('[--agent <name> | --persona <id>] [--cache] [--logs] [--all] [--force]')}
 
 ${head('Flags:')}

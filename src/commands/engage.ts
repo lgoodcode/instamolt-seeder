@@ -198,6 +198,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       // Pick a random subset
       const selected = shuffle(allAgents).slice(0, Math.min(maxAgents, allAgents.length));
       cycleNumber++;
+      const cycleStartedAt = Date.now();
       updateAgentCounts(allAgents.length, selected.length);
       logEvent({
         eventType: 'session_start',
@@ -313,6 +314,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             const adjustedLikeProb = Math.min(1, persona.likeProbability * likeMult);
             if (Math.random() > adjustedLikeProb) continue;
 
+            const likeStartedAt = Date.now();
             try {
               const res = await client.likePost(post.id);
               // Re-toggle if the first call un-liked (server toggle semantics).
@@ -328,6 +330,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 agentname: agent.agentname,
                 persona: agent.personaId,
                 success: true,
+                durationMs: Date.now() - likeStartedAt,
                 details: { postId: post.id, targetAuthor: post.author.agentname },
               });
               await sleep(randomInt(3000, 10000));
@@ -339,6 +342,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 agentname: agent.agentname,
                 persona: agent.personaId,
                 success: false,
+                durationMs: Date.now() - likeStartedAt,
                 error: err instanceof Error ? err.message : String(err),
                 details: {
                   postId: post.id,
@@ -395,6 +399,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
               const adjustedCommentProb = Math.min(1, persona.commentProbability * commentMult);
               if (Math.random() > adjustedCommentProb) continue;
 
+              const commentStartedAt = Date.now();
               try {
                 // Pick a comment register hint based on the relationship
                 // between this agent's persona and the post author's persona.
@@ -441,6 +446,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   agentname: agent.agentname,
                   persona: agent.personaId,
                   success: true,
+                  durationMs: Date.now() - commentStartedAt,
                   details: {
                     postId: post.id,
                     targetAuthor: post.author.agentname,
@@ -457,6 +463,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   agentname: agent.agentname,
                   persona: agent.personaId,
                   success: false,
+                  durationMs: Date.now() - commentStartedAt,
                   error: err instanceof Error ? err.message : String(err),
                   details: {
                     postId: post.id,
@@ -484,6 +491,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             const adjustedFollowProb = Math.min(1, persona.followProbability * followMult);
             if (Math.random() > adjustedFollowProb) continue;
 
+            const followStartedAt = Date.now();
             try {
               const res = await client.followAgent(post.author.agentname);
               // Re-toggle if the first call unfollowed (server toggle semantics).
@@ -497,6 +505,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 agentname: agent.agentname,
                 persona: agent.personaId,
                 success: true,
+                durationMs: Date.now() - followStartedAt,
                 details: { targetAuthor: post.author.agentname },
               });
               await sleep(randomInt(5000, 15000));
@@ -508,6 +517,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 agentname: agent.agentname,
                 persona: agent.personaId,
                 success: false,
+                durationMs: Date.now() - followStartedAt,
                 error: err instanceof Error ? err.message : String(err),
                 details: {
                   targetAuthor: post.author.agentname,
@@ -540,6 +550,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 });
               } else {
                 const voiceProfile = resolved.profile;
+                const postStartedAt = Date.now();
                 try {
                   sp.message(`@${agent.agentname} — generating a fresh post`);
                   const content = await generatePostContent(
@@ -566,6 +577,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                     agentname: agent.agentname,
                     persona: agent.personaId,
                     success: true,
+                    durationMs: Date.now() - postStartedAt,
                     details: {
                       postId: result.post.id,
                       caption: content.caption.slice(0, 80),
@@ -579,6 +591,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                     agentname: agent.agentname,
                     persona: agent.personaId,
                     success: false,
+                    durationMs: Date.now() - postStartedAt,
                     error: err instanceof Error ? err.message : String(err),
                     details: errorDetails(err),
                   });
@@ -625,6 +638,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       logEvent({
         eventType: 'session_end',
         success: true,
+        durationMs: Date.now() - cycleStartedAt,
         details: {
           cycleNumber,
           likes: cycleLikes,

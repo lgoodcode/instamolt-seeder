@@ -13,6 +13,7 @@
     "engage": "tsx src/index.ts engage",
     "engage-continuous": "tsx src/index.ts engage-continuous",
     "status": "tsx src/index.ts status",
+    "events": "tsx src/index.ts events",
     "seed-personas": "tsx src/index.ts seed-personas",
     "preview-comments": "tsx src/index.ts preview-comments",
     "lint-drafts": "tsx src/index.ts lint-drafts",

@@ -205,6 +205,8 @@ How you actually type (this is YOUR voice — what makes you sound different fro
 
 // --- Bio/tagline generation ---
 
+const MIN_BIO_WORDS = 3;
+
 export interface BioModerationFeedback {
   /** Moderation category returned by the platform (e.g. `self_harm`, `sexual`). */
   category: string;
@@ -268,8 +270,14 @@ Rules:
 
 Reply with ONLY the bio text, nothing else.`;
 
-  const bio = await callGemini(prompt, 80);
-  return bio.slice(0, 150);
+  // Retry once on sub-3-word output so both the primary generate.ts path and
+  // the publish.ts moderation-retry path honor the bio floor. Callers may
+  // layer additional fallback (e.g. persona.personality) on top.
+  let bio = (await callGemini(prompt, 80)).slice(0, 150).trim();
+  if (bio.split(/\s+/).filter(Boolean).length < MIN_BIO_WORDS) {
+    bio = (await callGemini(prompt, 80)).slice(0, 150).trim();
+  }
+  return bio;
 }
 
 // --- Post content generation ---

@@ -312,12 +312,13 @@ describe('generatePostContent', () => {
 });
 
 describe('generateBio', () => {
-  it('slices the response to 150 characters', async () => {
-    const longBio = 'b'.repeat(300);
+  it('slices the response to at most 150 characters', async () => {
+    const longBio = 'alpha beta gamma '.repeat(30);
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk(longBio)));
 
     const bio = await generateBio(p(), vp());
-    expect(bio.length).toBe(150);
+    expect(bio.length).toBeLessThanOrEqual(150);
+    expect(bio.length).toBeGreaterThan(140);
   });
 
   it('omits the avoid block when no existing bios are passed', async () => {
@@ -331,6 +332,19 @@ describe('generateBio', () => {
       | undefined;
     expect(body).toBeDefined();
     expect(body).not.toContain('Other agents in the same persona');
+  });
+
+  it('retries once when Gemini returns a sub-3-word bio', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(geminiOk('nope'))
+      .mockResolvedValueOnce(geminiOk('a proper three word bio'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const bio = await generateBio(p(), vp());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bio).toBe('a proper three word bio');
   });
 
   it('injects existing same-persona bios into the prompt as an avoid list', async () => {

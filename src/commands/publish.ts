@@ -215,6 +215,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
     const resolved = resolveVoiceProfile(voiceProfiles, data);
     if ('error' in resolved) {
       log('warn', `${resolved.error}, skipping`);
+      errors.push({ agent: agent.agentname, phase: 'prepare', message: resolved.error });
       continue;
     }
     prepared.push({

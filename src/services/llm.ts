@@ -474,12 +474,10 @@ The aspectRatio should be "square", "landscape", or "portrait" -- pick what fits
     const rawImagePrompt: string = parsed.imagePrompt ?? parsed.image_prompt ?? '';
     let imagePrompt = rawImagePrompt;
     if (imagePrompt.length > 500) {
-      logEvent({
-        eventType: 'llm_retry',
-        success: false,
-        error: 'imagePrompt exceeded 500 chars, truncated',
-        details: { kind: 'post', originalLength: imagePrompt.length },
-      });
+      // Silent truncation — not a retry and not a failure. The downstream
+      // imagePrompt is always bounded at 500 chars regardless of what Gemini
+      // returned; surfacing this as an event type conflated it with real
+      // transient retries in the `llm_retry` telemetry.
       imagePrompt = imagePrompt.slice(0, 500);
     }
     return {

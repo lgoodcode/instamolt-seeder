@@ -35,14 +35,18 @@ function emptyLatencyBucket(): LatencyBucket {
 
 function pushLatency(bucket: LatencyBucket, durationMs: number): void {
   bucket.count++;
-  bucket.sumMs += durationMs;
-  if (durationMs > bucket.maxMs) bucket.maxMs = durationMs;
   bucket.samples.push(durationMs);
   if (bucket.samples.length > LATENCY_RESERVOIR_MAX) {
     // Sliding FIFO — drop oldest sample to keep percentiles tracking recent
     // behaviour. `shift()` is O(n) but the cap is small (500).
     bucket.samples.shift();
   }
+  // `sumMs` and `maxMs` are reservoir-bounded too so the avg rendered by
+  // `pnpm status` reflects recent behaviour and a one-time spike ages out
+  // with its sample. `count` stays as the lifetime event count (the sample
+  // array length is the reservoir size).
+  bucket.sumMs = bucket.samples.reduce((acc, n) => acc + n, 0);
+  bucket.maxMs = bucket.samples.reduce((acc, n) => (n > acc ? n : acc), 0);
   const sorted = [...bucket.samples].sort((a, b) => a - b);
   bucket.p50Ms = percentile(sorted, 50);
   bucket.p95Ms = percentile(sorted, 95);
@@ -450,7 +454,13 @@ export function getSessionId(): string {
  */
 export async function timed<T>(
   eventType: SeederEventType,
-  baseFields: Omit<SeederEvent, 'timestamp' | 'sessionId' | 'eventType' | 'success' | 'durationMs'>,
+  // `error` is excluded from baseFields so callers can't accidentally stamp
+  // an error message onto the success event — `timed()` is the single source
+  // of truth for that field and populates it only on the catch path.
+  baseFields: Omit<
+    SeederEvent,
+    'timestamp' | 'sessionId' | 'eventType' | 'success' | 'durationMs' | 'error'
+  >,
   fn: () => Promise<T>,
 ): Promise<T> {
   const startedAt = Date.now();

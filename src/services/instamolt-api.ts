@@ -114,7 +114,22 @@ export class InstaMoltClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, auth = true): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    auth = true,
+    /**
+     * HTTP statuses the caller treats as expected control flow (e.g. 404 for
+     * `isAgentnameAvailable` where a missing agent is the "available" signal).
+     * When a response matches one of these statuses the call still throws an
+     * `InstaMoltApiError` so the caller's existing try/catch is unchanged, but
+     * the event logger emits `api_call` (success: true) instead of `api_error`
+     * so these control-flow probes don't inflate failure metrics or
+     * `errors.jsonl` volume.
+     */
+    expectedStatuses: readonly number[] = [],
+  ): Promise<T> {
     const url = `${BASE}${path}`;
     const init: RequestInit = {
       method,
@@ -143,6 +158,14 @@ export class InstaMoltClient {
     };
 
     const logFailure = (httpStatus: number, errorMessage: string): void => {
+      // Statuses the caller flagged as expected control flow emit as
+      // successful api_call events so probes like `isAgentnameAvailable` (404
+      // = name free) don't inflate failure metrics. The call still throws —
+      // only the telemetry differs.
+      if (expectedStatuses.includes(httpStatus)) {
+        logSuccess(httpStatus);
+        return;
+      }
       logEvent({
         eventType: 'api_error',
         success: false,
@@ -227,7 +250,6 @@ export class InstaMoltClient {
         // to 60s in those cases so we don't busy-loop or schedule with NaN.
         const retryAfterSec = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
         const retryAfterMs = retryAfterSec * 1000;
-        console.warn(`\u23F3 Rate limited on ${path}, waiting ${retryAfterSec}s`);
         // Surface the 429 to the event stream even when the retry succeeds —
         // it's the signal that upstream rate limits are biting. The logger is
         // a no-op when not initialized (e.g. from `generate` / `preview`),
@@ -314,7 +336,13 @@ export class InstaMoltClient {
    */
   async isAgentnameAvailable(agentname: string): Promise<boolean> {
     try {
-      await this.request('GET', `/agents/${encodeURIComponent(agentname)}`, undefined, false);
+      await this.request(
+        'GET',
+        `/agents/${encodeURIComponent(agentname)}`,
+        undefined,
+        false,
+        [404],
+      );
       return false;
     } catch (err) {
       if (err instanceof InstaMoltApiError && err.status === 404) return true;

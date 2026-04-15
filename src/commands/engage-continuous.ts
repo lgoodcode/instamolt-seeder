@@ -238,6 +238,15 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
   // Initialize structured event logging (output/logs/).
   initEventLogger({ verbose: options.verbose });
 
+  ui.intro('Engage Continuous');
+
+  if (!(await confirmTarget('engage-continuous', { yes: options.yes }))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage-continuous aborted — target not confirmed`));
+    return;
+  }
+
+  // Register SIGINT only after the target check passes. Registering before the
+  // early-return would leak the listener across repeated in-process calls.
   let stopRequested = false;
   const onSigint = (): void => {
     if (!stopRequested) {
@@ -247,13 +256,6 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     }
   };
   process.on('SIGINT', onSigint);
-
-  ui.intro('Engage Continuous');
-
-  if (!(await confirmTarget('engage-continuous', { yes: options.yes }))) {
-    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage-continuous aborted — target not confirmed`));
-    return;
-  }
 
   // Hard-require the bypass secret for continuous mode. Without it, 50+
   // agents will immediately saturate platform rate limits and every action

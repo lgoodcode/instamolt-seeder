@@ -227,7 +227,10 @@ async function pass2_generateAvatars(agents: LoadedAgent[], regenerate: boolean)
 async function main(): Promise<void> {
   const flags = parseFlags(process.argv.slice(2));
   initEventLogger();
-  const personas = await loadPersonas();
+  // Avatar backfill should not silently bootstrap a fresh persona set if
+  // output/personas/ is missing — that would spend Gemini budget for an
+  // operation the operator didn't ask for. Fail fast instead.
+  const personas = await loadPersonas({ autoSeed: false });
   const agents = await loadAgents(flags, personas);
 
   if (agents.length === 0) {

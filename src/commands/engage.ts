@@ -241,8 +241,16 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
 
   let cycleNumber = 0;
 
-  // SIGINT handling for graceful shutdown of the outer --loop.
-  // The current cycle finishes and then the while-loop exits cleanly.
+  ui.intro('Engage');
+
+  if (!(await confirmTarget('engage', { yes: options.yes }))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage aborted — target not confirmed`));
+    return;
+  }
+
+  // SIGINT handling for graceful shutdown of the outer --loop. Registered
+  // after the target check so a declined confirmation doesn't leak the
+  // listener across repeated in-process calls.
   let stopRequested = false;
   const onSigint = () => {
     if (!stopRequested) {
@@ -252,13 +260,6 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
   };
   if (loopEnabled) {
     process.on('SIGINT', onSigint);
-  }
-
-  ui.intro('Engage');
-
-  if (!(await confirmTarget('engage', { yes: options.yes }))) {
-    ui.outro(ui.color.yellow(`${ui.symbol.warn} engage aborted — target not confirmed`));
-    return;
   }
 
   try {
@@ -276,11 +277,19 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       // - Debug: `--limit-agents N` deterministically takes the first N
       //   agents by agentname (ascending) so repeat invocations hit the same
       //   subset. Mirrors `publish-drafts --limit-agents`.
+      // Non-positive `limitAgents` values (0 or negative) are already rejected
+      // by the flag parser, but defensively normalize here so the selector
+      // only activates on a real positive integer.
+      const normalizedLimitAgents =
+        limitAgents !== undefined && limitAgents > 0 ? limitAgents : undefined;
       const ordered =
-        limitAgents !== undefined && limitAgents > 0
+        normalizedLimitAgents !== undefined
           ? [...allAgents].sort((a, b) => a.agentname.localeCompare(b.agentname))
           : shuffle(allAgents);
-      const subsetCap = limitAgents !== undefined ? Math.min(limitAgents, maxAgents) : maxAgents;
+      const subsetCap =
+        normalizedLimitAgents !== undefined
+          ? Math.min(normalizedLimitAgents, maxAgents)
+          : maxAgents;
       const selected = ordered.slice(0, Math.min(subsetCap, ordered.length));
       cycleNumber++;
       const cycleStartedAt = Date.now();

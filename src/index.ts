@@ -126,7 +126,13 @@ async function main() {
 
     case 'engage': {
       const agents = parseInt(getFlag('agents') ?? '10', 10);
-      const actionsLimit = parseInt(getFlag('actions-limit') ?? '5', 10);
+      const actionsLimitRaw = getFlag('actions-limit');
+      const actionsLimit = parseInt(actionsLimitRaw ?? '5', 10);
+      if (Number.isNaN(actionsLimit) || actionsLimit <= 0) {
+        throw new Error(
+          `engage: --actions-limit must be a positive integer (got "${actionsLimitRaw}")`,
+        );
+      }
       const loop = args.includes('--loop');
       const limitAgentsFlag = getFlag('limit-agents');
       let limitAgents: number | undefined;

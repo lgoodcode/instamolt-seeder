@@ -260,6 +260,10 @@ export class CircuitBreaker {
   }
 
   private close(): void {
+    // Capture trips before the reset so the emitted event carries the
+    // trip-count that survived; matches the `{ trips }` shape documented on
+    // SeederEventType.
+    const priorTrips = this.trips;
     this.state = 'closed';
     this.trips = 0;
     this.currentCoolOffMs = this.opts.coolOffMs;
@@ -270,7 +274,7 @@ export class CircuitBreaker {
     logEvent({
       eventType: 'circuit_closed',
       success: true,
-      details: { name: this.opts.name },
+      details: { name: this.opts.name, trips: priorTrips },
     });
     this.wakeAllWaiters();
   }

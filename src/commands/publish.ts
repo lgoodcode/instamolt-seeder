@@ -395,6 +395,22 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       `Phase A.5 — generate ${needsAvatar.length} avatars (concurrency ${config.avatarConcurrency})`,
     );
     const avBar = ui.progress(needsAvatar.length);
+
+    // Avatar generation hits the same Together AI FLUX.1 Schnell pipeline as
+    // Phase B posts and is subject to the same saturation-shaped 429 / 502
+    // bursts. Guard it with a dedicated breaker so a fleet-wide spike pauses
+    // avatar workers instead of hammering the endpoint across
+    // `avatarConcurrency` parallel callers.
+    const avatarBreaker = new CircuitBreaker({
+      name: 'publish.generateAvatar',
+      failureThreshold: config.publishCircuitFailureThreshold,
+      windowMs: config.publishCircuitWindowMs,
+      coolOffMs: config.publishCircuitCoolOffMs,
+      maxCoolOffMs: config.publishCircuitMaxCoolOffMs,
+      maxTrips: config.publishCircuitMaxTrips,
+    });
+    let avatarAborted = false;
+
     await mapWithConcurrency(
       needsAvatar,
       config.avatarConcurrency,
@@ -411,6 +427,33 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
               reason === 'error' ? { reason, ...details } : { skipped: true, reason, ...details },
           });
         };
+        if (avatarAborted) {
+          logSkipped('circuit_aborted');
+          avBar.tick(`@${indexAgent.agentname} — skipped (circuit)`);
+          return;
+        }
+        try {
+          await avatarBreaker.gate();
+        } catch (err) {
+          if (err instanceof CircuitAbortError) {
+            if (!avatarAborted) {
+              avatarAborted = true;
+              log(
+                'error',
+                `Phase A.5 aborting — ${err.message}. Rerun publish-drafts (or pnpm avatars) to resume.`,
+              );
+              errors.push({
+                agent: '(fleet)',
+                phase: 'avatar (circuit)',
+                message: err.message,
+              });
+            }
+            logSkipped('circuit_aborted');
+            avBar.tick(`@${indexAgent.agentname} — skipped (circuit)`);
+            return;
+          }
+          throw err;
+        }
         try {
           if (!data.avatarPrompt) {
             // Just-in-time prompt draft so a legacy population (no avatarPrompt
@@ -437,6 +480,7 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
 
           const authed = new InstaMoltClient(data.apiKey);
           const res = await authed.generateAvatar(data.avatarPrompt);
+          avatarBreaker.recordSuccess();
           data.avatarUrl = res.avatar_url;
           data.avatarGenerationSeed = res.generation_seed ?? undefined;
           data.avatarGeneratedAt = new Date().toISOString();
@@ -456,6 +500,20 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
           });
           avBar.tick(`@${indexAgent.agentname} — avatar set`);
         } catch (err) {
+          // Only saturation-shaped failures (fleet/per-agent rate limit +
+          // image-gen service unavailable) feed the breaker. 403s, 400s, and
+          // auth failures are caller/content problems — counting them would
+          // open the breaker for a pause that does nothing to fix them.
+          const apiErr = err instanceof InstaMoltApiError ? err : undefined;
+          const code = apiErr ? parseErrorCode(apiErr.body) : undefined;
+          const status = apiErr?.status ?? 0;
+          const isSaturation =
+            (status === 429 && code === 'RATE_LIMIT_EXCEEDED') ||
+            (status === 502 && code === 'GENERATION_FAILED') ||
+            status === 503 ||
+            status === 504;
+          if (isSaturation) avatarBreaker.recordFailure(apiErr?.retryAfterMs);
+
           // Discriminate the 403 sub-cases so the operator-facing event log
           // tells them WHY an agent was skipped without grepping error text.
           if (err instanceof InstaMoltApiError && err.status === 403) {

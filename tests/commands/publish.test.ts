@@ -42,6 +42,21 @@ const llmMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/services/llm', () => llmMocks);
 
+// ---------------- event-logger mock ----------------
+// Event-logger writes JSONL files via node:fs (sync) and mutates on-disk
+// stats state. Mock it as a no-op so publish() tests never touch the real
+// filesystem or leak session state across runs.
+
+const eventLoggerMocks = vi.hoisted(() => ({
+  initEventLogger: vi.fn(),
+  logEvent: vi.fn(),
+  logSkippedAction: vi.fn(),
+  flushStats: vi.fn(),
+  updateAgentCounts: vi.fn(),
+  drainWrites: vi.fn(async () => {}),
+}));
+vi.mock('@/lib/event-logger', () => eventLoggerMocks);
+
 // ---------------- instamolt-api mock ----------------
 // Constructor mock: must be a `function` not an arrow so `new` works.
 

@@ -268,6 +268,10 @@ export interface CommentSample {
   sourceAuthor: string;
   /** PersonaId of the source caption — useful for diversity reporting. */
   sourcePersonaId?: string;
+  /** PostId of the source caption, when available. Populated by the bake
+   * path so the `generate` caller can stamp `postId` on fan-out `mention`
+   * events without re-plumbing the source post through its own scope. */
+  sourcePostId?: string;
   /**
    * Parent comment the reply was written against. Populated only when
    * `kind === 'reply'`.

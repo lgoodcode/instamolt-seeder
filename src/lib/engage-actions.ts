@@ -201,14 +201,24 @@ export async function executeComment(
   const registerHint = pickRegisterHint(persona, authorPid);
   const chaos = rollChaos(persona);
 
-  const mentionState = buildMentionLookup(ctx.authorPersonaLookup);
+  // Lazy mention-lookup cache — `buildMentionLookup` walks the full agent
+  // map, so defer it until either the probability gate passes (for
+  // candidate surfacing) or the generated text actually contains `@` (for
+  // post-hoc parsing). On the hot path (persona with `mentionProbability
+  // = 0` and no `@` in the output), we skip both.
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
   const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'comment')
     ? buildCommentCandidates({
         selfAgentname: agent.agentname,
         postAuthor: post.author.agentname,
         relatedAgentnames: resolveRelatedAgentnames(
           persona,
-          mentionState.personaToAgentnames,
+          getMentionState().personaToAgentnames,
           agent.agentname,
         ),
       })
@@ -256,22 +266,27 @@ export async function executeComment(
   });
 
   // Mention fan-out — emit after the comment succeeds so stats.mentions
-  // only credits resolvable targets that landed on the platform.
-  const resolvedMentions = parseResolvedMentions(
-    text,
-    agent.agentname,
-    mentionState.knownAgentnames,
-  );
-  if (resolvedMentions.length > 0) {
-    logMentions({
-      agentname: agent.agentname,
-      persona: persona.id,
-      targets: resolvedMentions,
-      context: 'comment',
-      phase: 'runtime',
-      postId: post.id,
-      sourceCommentId: commentResponse.comment.id,
-    });
+  // only credits resolvable targets that landed on the platform. Cheap
+  // `text.includes('@')` short-circuit avoids the full-population
+  // `buildMentionLookup` walk on the overwhelming majority of comments
+  // that have no `@` in the body.
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'comment',
+        phase: 'runtime',
+        postId: post.id,
+        sourceCommentId: commentResponse.comment.id,
+      });
+    }
   }
 
   return {
@@ -534,7 +549,12 @@ export async function executeReply(
   const priorComments = await loadPriorComments(agent.agentname);
   const chaos = rollChaos(persona);
 
-  const mentionState = buildMentionLookup(ctx.authorPersonaLookup);
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
   const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'reply')
     ? buildReplyCandidates({
         selfAgentname: agent.agentname,
@@ -543,7 +563,7 @@ export async function executeReply(
         siblingAuthors: target.siblings.map((s) => s.author.agentname),
         relatedAgentnames: resolveRelatedAgentnames(
           persona,
-          mentionState.personaToAgentnames,
+          getMentionState().personaToAgentnames,
           agent.agentname,
         ),
       })
@@ -599,21 +619,23 @@ export async function executeReply(
     againstAuthor: target.parent.author.agentname,
   });
 
-  const resolvedMentions = parseResolvedMentions(
-    text,
-    agent.agentname,
-    mentionState.knownAgentnames,
-  );
-  if (resolvedMentions.length > 0) {
-    logMentions({
-      agentname: agent.agentname,
-      persona: persona.id,
-      targets: resolvedMentions,
-      context: 'reply',
-      phase: 'runtime',
-      postId: post.id,
-      sourceCommentId: replyResponse.comment.id,
-    });
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'reply',
+        phase: 'runtime',
+        postId: post.id,
+        sourceCommentId: replyResponse.comment.id,
+      });
+    }
   }
 
   return {
@@ -712,7 +734,12 @@ export async function executeActivityDrivenReply(
   const priorComments = await loadPriorComments(agent.agentname);
   const chaos = rollChaos(persona);
 
-  const mentionState = buildMentionLookup(ctx.authorPersonaLookup);
+  let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
+  const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
+    mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
+    return mentionStateCache;
+  };
+
   const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'reply')
     ? buildReplyCandidates({
         selfAgentname: agent.agentname,
@@ -721,7 +748,7 @@ export async function executeActivityDrivenReply(
         siblingAuthors: siblingComments.map((s) => s.author.agentname),
         relatedAgentnames: resolveRelatedAgentnames(
           persona,
-          mentionState.personaToAgentnames,
+          getMentionState().personaToAgentnames,
           agent.agentname,
         ),
       })
@@ -780,21 +807,23 @@ export async function executeActivityDrivenReply(
     repliedToActivityId: activity.id,
   });
 
-  const resolvedMentions = parseResolvedMentions(
-    text,
-    agent.agentname,
-    mentionState.knownAgentnames,
-  );
-  if (resolvedMentions.length > 0) {
-    logMentions({
-      agentname: agent.agentname,
-      persona: persona.id,
-      targets: resolvedMentions,
-      context: 'reply',
-      phase: 'runtime',
-      postId: activity.post.id,
-      sourceCommentId: activityReplyResponse.comment.id,
-    });
+  if (text.includes('@')) {
+    const resolvedMentions = parseResolvedMentions(
+      text,
+      agent.agentname,
+      getMentionState().knownAgentnames,
+    );
+    if (resolvedMentions.length > 0) {
+      logMentions({
+        agentname: agent.agentname,
+        persona: persona.id,
+        targets: resolvedMentions,
+        context: 'reply',
+        phase: 'runtime',
+        postId: activity.post.id,
+        sourceCommentId: activityReplyResponse.comment.id,
+      });
+    }
   }
 
   // ── Activity momentum: detect high inbound engagement ──

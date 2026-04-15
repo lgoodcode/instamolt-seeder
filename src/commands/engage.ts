@@ -35,6 +35,13 @@ interface EngageOptions {
   agents?: number;
   limit?: number;
   loop?: boolean;
+  /**
+   * Debug-only: force a fixed inter-cycle sleep (in milliseconds) instead of
+   * the default `randomInt(5min, 15min)`. Lets operators run a tight feedback
+   * loop to eyeball agent behavior before committing to an overnight run.
+   * Production seeding should leave this unset.
+   */
+  cycleDelayMs?: number;
 }
 
 const COMMENT_COOLDOWN_MS = 65_000;
@@ -166,6 +173,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
   const maxAgents = options.agents ?? 10;
   const actionsLimit = options.limit ?? 5;
   const loopEnabled = options.loop ?? false;
+  const cycleDelayMs = options.cycleDelayMs;
   const personas = await loadPersonas();
   const voiceProfiles = loadVoiceProfiles();
 
@@ -492,22 +500,26 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 // Emit one `mention` event per resolved target. Runs AFTER
                 // the `comment` event so the events.jsonl order is
                 // `comment → mention...` and `stats.mentions` is only
-                // credited when the underlying comment succeeded.
-                const resolvedMentions = parseResolvedMentions(
-                  comment,
-                  agentData.agentname,
-                  knownAgentnames,
-                );
-                if (resolvedMentions.length > 0) {
-                  logMentions({
-                    agentname: agent.agentname,
-                    persona: agent.personaId,
-                    targets: resolvedMentions,
-                    context: 'comment',
-                    phase: 'runtime',
-                    postId: post.id,
-                    sourceCommentId: commentRes.comment.id,
-                  });
+                // credited when the underlying comment succeeded. Short-
+                // circuit on `!includes('@')` — the overwhelming majority
+                // of comments have no mention so we skip the regex walk.
+                if (comment.includes('@')) {
+                  const resolvedMentions = parseResolvedMentions(
+                    comment,
+                    agentData.agentname,
+                    knownAgentnames,
+                  );
+                  if (resolvedMentions.length > 0) {
+                    logMentions({
+                      agentname: agent.agentname,
+                      persona: agent.personaId,
+                      targets: resolvedMentions,
+                      context: 'comment',
+                      phase: 'runtime',
+                      postId: post.id,
+                      sourceCommentId: commentRes.comment.id,
+                    });
+                  }
                 }
                 await sleep(randomInt(10000, 30000));
               } catch (err) {
@@ -707,7 +719,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       flushStats();
 
       if (loopEnabled && !stopRequested) {
-        const wait = randomInt(5 * 60 * 1000, 15 * 60 * 1000);
+        const wait = cycleDelayMs ?? randomInt(5 * 60 * 1000, 15 * 60 * 1000);
         await loopSleep(wait, () => stopRequested);
       }
     } while (loopEnabled && !stopRequested);

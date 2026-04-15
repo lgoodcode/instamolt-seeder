@@ -23,7 +23,13 @@ import {
   readDedupIndex,
   writeDedupIndex,
 } from '@/lib/dedup-index';
-import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-logger';
+import {
+  drainWrites,
+  flushStats,
+  initEventLogger,
+  logEvent,
+  logMentions,
+} from '@/lib/event-logger';
 import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import { maxSimilarity, pickDiverseAndRecent } from '@/lib/similarity';
@@ -709,6 +715,20 @@ async function bakeCommentSamplesPhase(
         durationMs: commentBakeDurationMs,
         details: { count: commentSamplesTagged.length },
       });
+      // Mention fan-out — emitted AFTER `comment_baked` so events.jsonl
+      // orders aggregate-then-per-target. Each sample's resolved mention
+      // list was stamped during the bake by `parseResolvedMentions`.
+      for (const sample of commentSamplesTagged) {
+        if (!sample.mentions || sample.mentions.length === 0) continue;
+        logMentions({
+          agentname: agent.agentname,
+          persona: agent.personaId,
+          targets: sample.mentions,
+          context: 'comment',
+          phase: 'bake',
+          postId: sample.sourcePostId,
+        });
+      }
       if (replySamples.length > 0) {
         logEvent({
           eventType: 'reply_baked',
@@ -718,6 +738,17 @@ async function bakeCommentSamplesPhase(
           durationMs: replyBakeDurationMs,
           details: { count: replySamples.length },
         });
+        for (const sample of replySamples) {
+          if (!sample.mentions || sample.mentions.length === 0) continue;
+          logMentions({
+            agentname: agent.agentname,
+            persona: agent.personaId,
+            targets: sample.mentions,
+            context: 'reply',
+            phase: 'bake',
+            postId: sample.sourcePostId,
+          });
+        }
       }
     } catch (err) {
       failed++;

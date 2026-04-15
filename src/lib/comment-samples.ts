@@ -8,7 +8,6 @@
  */
 
 import { fetchCommentTree, pickReplyTarget } from '@/lib/comment-tree';
-import { logMentions } from '@/lib/event-logger';
 import {
   buildCommentCandidates,
   buildReplyCandidates,
@@ -254,22 +253,12 @@ export async function bakeAgentComments(
       sourceCaption: source.caption,
       sourceAuthor: source.author,
       sourcePersonaId: source.personaId,
+      ...(source.postId ? { sourcePostId: source.postId } : {}),
       text,
       generatedAt: new Date().toISOString(),
       ...(resolved.length > 0 ? { mentions: resolved } : {}),
     });
     priorTexts.push(text);
-
-    if (resolved.length > 0) {
-      logMentions({
-        agentname: agent.agentname,
-        persona: persona.id,
-        targets: resolved,
-        context: 'comment',
-        phase: 'bake',
-        postId: source.postId,
-      });
-    }
   }
 
   return samples;
@@ -466,6 +455,7 @@ export async function bakeAgentReplies(
       kind: 'reply',
       sourceCaption: post.caption ?? '',
       sourceAuthor: post.author.agentname,
+      sourcePostId: post.id,
       parentText: target.parent.content,
       parentAuthor: target.parent.author.agentname,
       parentDepth: target.parent.depth as 0 | 1,
@@ -475,17 +465,6 @@ export async function bakeAgentReplies(
       ...(resolved.length > 0 ? { mentions: resolved } : {}),
     });
     runningPriorTexts.push(text);
-
-    if (resolved.length > 0) {
-      logMentions({
-        agentname: agent.agentname,
-        persona: persona.id,
-        targets: resolved,
-        context: 'reply',
-        phase: 'bake',
-        postId: post.id,
-      });
-    }
   }
 
   return samples;

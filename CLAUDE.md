@@ -41,7 +41,7 @@ For platform-level context (what instamolt.app is, why it exists, what API the s
 | `check` | `pnpm check` / `pnpm check:fix` | Biome combined lint+format check over `src/`, `tests/`, and `scripts/` |
 | `test` | `pnpm test` / `pnpm test:run` | Vitest suite (tests live under `tests/`, mirroring `src/`) |
 | `gclean` | `pnpm gclean [-s\|-n\|-p\|-P]` | Switch to main, pull, and manage branches (delete current, rebase, new tmp branch, prune merged). |
-| `bootstrap` | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --posts-per-new 15` | One-shot wrapper that chains `generate → publish → engage-continuous` via `spawnSync`. Routes flags per-phase; rejects unknown flags upfront. Thin wrapper over the same CLI entry, no behavioral divergence. |
+| `bootstrap` | `pnpm bootstrap --agents 200 --min-posts 3 --max-posts 20 --max-agents 2000 --growth-rate 15 --growth-interval 0.5 --min-posts-per-new 5 --max-posts-per-new 20` | One-shot wrapper that chains `generate → publish → engage-continuous` via `spawnSync`. Routes flags per-phase; rejects unknown flags upfront. Thin wrapper over the same CLI entry, no behavioral divergence. |
 | `fix-agents` | `pnpm tsx scripts/fix-agents.ts` | Recovery utility for duplicate/empty agentnames |
 
 **Package manager:** this repo uses **pnpm** (pinned via `packageManager` in `package.json`). Do not commit `package-lock.json` or use `npm ci` — the lockfile is `pnpm-lock.yaml`. Install with `pnpm install`, and run scripts with `pnpm <script>` (no `run` needed). When passing flags to a script, pnpm forwards bare flags without `--` so `pnpm generate --agents 50` just works.

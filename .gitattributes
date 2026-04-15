@@ -1,0 +1,26 @@
+# Default: normalize line endings to LF in the repo (overrides local core.autocrlf)
+* text=auto
+
+# Scripts that run in Unix environments (e.g. bash in pnpm on Windows) must be LF
+*.sh text eol=lf
+
+# Windows scripts (if added) should use CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files: no line-ending conversion, no diff/merge
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary
+
+# Lockfiles: treat as text but avoid merge conflicts (optional; uncomment if desired)
+# pnpm-lock.yaml merge=binary
+# package-lock.json merge=binary

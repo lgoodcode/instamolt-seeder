@@ -186,7 +186,8 @@ const growthMocks = vi.hoisted(() => ({
     maxAgents: 200,
     growthRate: 3,
     growthIntervalHours: 4,
-    postsPerNewAgent: 10,
+    postsMin: 10,
+    postsMax: 10,
   },
 }));
 vi.mock('@/lib/growth', () => growthMocks);

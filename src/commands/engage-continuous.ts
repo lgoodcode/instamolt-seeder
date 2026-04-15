@@ -90,8 +90,15 @@ export interface ContinuousOptions {
   growthRate?: number;
   /** Hours between growth ticks. Default 4. */
   growthIntervalHours?: number;
-  /** Posts generated per new agent during growth. Default 10. */
-  postsPerNewAgent?: number;
+  /**
+   * Minimum posts generated per new agent during growth. Default 10.
+   * When `postsMax` is also set and greater, each growth-born agent rolls a
+   * random post count in `[postsMin, postsMax]` so population variance looks
+   * organic rather than batch-flat.
+   */
+  postsMin?: number;
+  /** Maximum posts generated per new agent during growth. Defaults to `postsMin`. */
+  postsMax?: number;
   /** Disable growth entirely (engage only, no new agents). */
   noGrowth?: boolean;
   /** Log every event to stdout in addition to events.jsonl. */
@@ -202,12 +209,21 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
   const maxActions = options.maxActions ?? Number.POSITIVE_INFINITY;
   const dryRun = options.dryRun ?? false;
 
+  const postsMin = options.postsMin ?? GROWTH_DEFAULTS.postsMin;
+  const postsMax = options.postsMax ?? postsMin;
+  if (postsMin < 0) {
+    throw new Error(`engage-continuous: postsMin must be >= 0 (got ${postsMin})`);
+  }
+  if (postsMax < postsMin) {
+    throw new Error(`engage-continuous: postsMax (${postsMax}) must be >= postsMin (${postsMin})`);
+  }
   const growthConfig: GrowthConfig = {
     maxAgents: options.maxAgents ?? GROWTH_DEFAULTS.maxAgents,
     growthRate: options.growthRate ?? GROWTH_DEFAULTS.growthRate,
     growthIntervalMs:
       (options.growthIntervalHours ?? GROWTH_DEFAULTS.growthIntervalHours) * 60 * 60 * 1000,
-    postsPerNewAgent: options.postsPerNewAgent ?? GROWTH_DEFAULTS.postsPerNewAgent,
+    postsMin,
+    postsMax,
     enabled: !(options.noGrowth ?? false),
   };
   let lastGrowthAt = 0;
@@ -403,8 +419,8 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
               // loaded when growth actually fires.
               const { generate } = await import('@/commands/generate');
               const { publish } = await import('@/commands/publish');
-              await generate(targetTotal, growthConfig.postsPerNewAgent);
-              await publish({ limit: growthConfig.postsPerNewAgent });
+              await generate(targetTotal, growthConfig.postsMin, growthConfig.postsMax);
+              await publish({ limit: growthConfig.postsMax });
               lastGrowthAt = Date.now();
               log(
                 'info',

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { computeBatchSize, formatGrowthStatus } from '@/lib/growth';
+import { computeBatchSize, formatGrowthStatus, GROWTH_DEFAULTS } from '@/lib/growth';
+
+describe('GROWTH_DEFAULTS', () => {
+  it('exposes a post-count range (min/max), not a single fixed count', () => {
+    expect(GROWTH_DEFAULTS).toHaveProperty('postsMin');
+    expect(GROWTH_DEFAULTS).toHaveProperty('postsMax');
+    expect(GROWTH_DEFAULTS.postsMin).toBeLessThanOrEqual(GROWTH_DEFAULTS.postsMax);
+  });
+});
 
 describe('computeBatchSize', () => {
   it('returns 5 for initial catalog population (37/200)', () => {

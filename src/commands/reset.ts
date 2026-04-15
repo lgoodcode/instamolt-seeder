@@ -46,6 +46,14 @@ export interface ResetOptions {
   logs?: boolean;
   /** Wipe agents + cache + logs (personas preserved). */
   all?: boolean;
+  /**
+   * Rewind every agent to "just finished `pnpm generate`" state — keep drafts
+   * (bio, posts, comments.json) and persona assignments, but strip every
+   * artifact written by `publish` / `engage` / `engage-continuous`. For fast
+   * iteration cycles against the seed DB: after a debug run, rewind with this
+   * flag and the next `publish-drafts` invocation re-registers from scratch.
+   */
+  postGenerate?: boolean;
   /** Skip interactive confirmation. */
   force?: boolean;
 }
@@ -59,6 +67,10 @@ export async function reset(options: ResetOptions = {}): Promise<void> {
   }
   if (options.persona) {
     await resetSinglePersona(options.persona, options.force ?? false);
+    return;
+  }
+  if (options.postGenerate) {
+    await resetToPostGenerate(options.force ?? false);
     return;
   }
 
@@ -348,6 +360,168 @@ async function resetSinglePersona(personaId: string, force: boolean): Promise<vo
   sp.stop(`Regenerated ${personaId}`);
 
   ui.outro(ui.color.green(`${ui.symbol.ok} persona ${personaId} regenerated`));
+}
+
+/**
+ * Fields written to `agent.json` by `publish` (apiKey, registeredAt) and
+ * `engage` (lastCommentedAt). Stripped by `--post-generate` so a subsequent
+ * `publish-drafts` re-registers the agent from scratch.
+ */
+const PUBLISH_ENGAGE_AGENT_FIELDS = ['apiKey', 'registeredAt', 'lastCommentedAt'] as const;
+
+/**
+ * Fields written to `post-*.json` by `publish` when it successfully lands the
+ * post on instamolt.app. Stripping them makes the draft eligible for a fresh
+ * publish attempt on the next `publish-drafts` run.
+ */
+const PUBLISH_POST_FIELDS = ['published', 'publishedAt', 'instamoltPostId'] as const;
+
+/**
+ * Per-agent sibling files written during engage cycles. Blown away by
+ * `--post-generate` so the agent starts the next publish/engage round with a
+ * clean runtime state:
+ *   - `runtime-comments.json` — rolling tail of comments posted during engage
+ *   - `activity.jsonl`        — per-agent event log tee
+ */
+const ENGAGE_AGENT_SIBLING_FILES = ['runtime-comments.json', 'activity.jsonl'] as const;
+
+/**
+ * Rewind every agent to "just finished `pnpm generate`" state without
+ * touching the draft content itself. Preserved: bio, post drafts, baked
+ * `comments.json`, persona assignments, `dedup-index.json`. Wiped: every
+ * field written by `publish` / `engage`, plus `runtime-comments.json`,
+ * `activity.jsonl`, `output/logs/`, and `feed-cache.json`.
+ */
+async function resetToPostGenerate(force: boolean): Promise<void> {
+  ui.intro('Reset → post-generate state');
+
+  const agentNames = await listAgentDirs();
+  const agentCount = agentNames.length;
+
+  ui.note(
+    'Will rewind',
+    [
+      `${ui.color.red(ui.symbol.dot)} strip apiKey / registeredAt / lastCommentedAt from ${agentCount} agent.json file${agentCount === 1 ? '' : 's'} + agents.json entries`,
+      `${ui.color.red(ui.symbol.dot)} strip published / publishedAt / instamoltPostId from every post-*.json`,
+      `${ui.color.red(ui.symbol.dot)} delete per-agent runtime-comments.json + activity.jsonl`,
+      `${ui.color.red(ui.symbol.dot)} delete ${config.logsDir}/ and ${config.feedCachePath}`,
+      '',
+      ui.color.dim('Preserved: bios, post drafts, comments.json, personas, dedup-index.json.'),
+      ui.color.yellow(
+        `${ui.symbol.warn} agents registered against instamolt.app keep their remote accounts — the local apiKey is lost, so they become orphaned on the platform`,
+      ),
+    ].join('\n'),
+  );
+
+  if (!force) {
+    const ok = await ui.confirm('Proceed?', false);
+    if (!ok) {
+      ui.outro(ui.color.yellow(`${ui.symbol.warn} aborted`));
+      return;
+    }
+  }
+
+  let strippedAgents = 0;
+  let strippedPosts = 0;
+  let deletedSiblings = 0;
+
+  for (const name of agentNames) {
+    const agentDir = join(config.agentsDir, name);
+    const agentJsonPath = join(agentDir, 'agent.json');
+    try {
+      const raw = await readFile(agentJsonPath, 'utf-8');
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      let mutated = false;
+      for (const field of PUBLISH_ENGAGE_AGENT_FIELDS) {
+        if (field in parsed) {
+          delete parsed[field];
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        await writeFile(agentJsonPath, JSON.stringify(parsed, null, 2));
+        strippedAgents++;
+      }
+    } catch {
+      // Missing agent.json means the agent dir is malformed — skip.
+    }
+
+    let entries: string[] = [];
+    try {
+      entries = await readdir(agentDir);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.startsWith('post-') || !entry.endsWith('.json')) continue;
+      const postPath = join(agentDir, entry);
+      try {
+        const raw = await readFile(postPath, 'utf-8');
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        let mutated = false;
+        for (const field of PUBLISH_POST_FIELDS) {
+          if (field in parsed) {
+            delete parsed[field];
+            mutated = true;
+          }
+        }
+        if (mutated) {
+          await writeFile(postPath, JSON.stringify(parsed, null, 2));
+          strippedPosts++;
+        }
+      } catch {
+        // Unreadable or invalid JSON — leave it alone.
+      }
+    }
+
+    for (const sibling of ENGAGE_AGENT_SIBLING_FILES) {
+      const siblingPath = join(agentDir, sibling);
+      if (!entries.includes(sibling)) continue;
+      await rm(siblingPath, { force: true });
+      deletedSiblings++;
+    }
+  }
+
+  // Rewrite agents.json so `status` and other tooling don't report the
+  // stale apiKey/registeredAt from the in-index copy of each agent.
+  try {
+    const raw = await readFile(config.agentsIndexPath, 'utf-8');
+    const index = JSON.parse(raw) as AgentsIndex;
+    if (Array.isArray(index.agents)) {
+      for (const agent of index.agents) {
+        for (const field of PUBLISH_ENGAGE_AGENT_FIELDS) {
+          delete (agent as unknown as Record<string, unknown>)[field];
+        }
+      }
+      await writeFile(config.agentsIndexPath, JSON.stringify(index, null, 2));
+    }
+  } catch {
+    // Missing or corrupt agents.json — nothing to strip. `generate` rebuilds it.
+  }
+
+  await rm(config.logsDir, { recursive: true, force: true });
+  await rm(config.feedCachePath, { force: true });
+
+  log(
+    'info',
+    `post-generate reset: ${strippedAgents} agent.json, ${strippedPosts} posts, ${deletedSiblings} runtime sibling files, wiped logs/ + feed-cache.json`,
+  );
+  ui.outro(ui.color.green(`${ui.symbol.ok} rewound ${agentCount} agents to post-generate state`));
+}
+
+/**
+ * List subdirectories under `output/agents/`. Filters out stray files so the
+ * post-generate walk doesn't trip over `.DS_Store` or similar. Returns an
+ * empty array when the directory is missing.
+ */
+async function listAgentDirs(): Promise<string[]> {
+  try {
+    const entries = await readdir(config.agentsDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
 }
 
 async function loadOtherPersonas(excludeId: string): Promise<Persona[]> {

@@ -291,6 +291,47 @@ describe('publish', () => {
     expect(apiMocks.startChallenge).toHaveBeenCalledWith('alpha', expect.any(String));
   });
 
+  it('--limit-agents caps the run to the first N agents alphabetically (deterministic)', async () => {
+    // Seed in a non-alphabetical order to prove the slice is alphabetical,
+    // not index-order. Two invocations with the same --limit-agents must hit
+    // the same subset — this is the core determinism contract.
+    for (const name of ['charlie', 'alpha', 'bravo', 'delta']) {
+      primeAgent(name);
+    }
+    primeIndex(['charlie', 'alpha', 'bravo', 'delta']);
+
+    apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockImplementation(async (_rid, _ans) => ({
+      success: true,
+      agent: { agentname: 'n/a', api_key: 'key', is_verified: false },
+    }));
+
+    await publish({ skipFollowGraph: true, limitAgents: 2 });
+
+    const registered = apiMocks.startChallenge.mock.calls.map((args) => args[0]);
+    expect(registered).toEqual(['alpha', 'bravo']);
+  });
+
+  it('--limit-agents is ignored when --agent is also passed', async () => {
+    // --agent is already a single-agent scope — --limit-agents would just be
+    // noise. The flag is documented as ignored in that case.
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      primeAgent(name);
+    }
+    primeIndex(['alpha', 'beta', 'gamma']);
+
+    apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockResolvedValue({
+      success: true,
+      agent: { agentname: 'beta', api_key: 'key-beta', is_verified: false },
+    });
+
+    await publish({ agent: 'beta', limitAgents: 1, skipFollowGraph: true });
+
+    const registered = apiMocks.startChallenge.mock.calls.map((args) => args[0]);
+    expect(registered).toEqual(['beta']);
+  });
+
   it('skips agents with empty or too-short names', async () => {
     fsState.files.set(
       './output/agents.json',

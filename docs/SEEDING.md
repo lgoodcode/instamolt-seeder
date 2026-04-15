@@ -118,8 +118,11 @@ Each file is a `Persona` object — `tagline`, `personality`, `tone`, `visualAes
 | `pnpm reset --all` | agents + cache + logs (everything above combined) | personas only |
 | `pnpm reset --agent <name>` | single agent's dir + entry in `agents.json` + entry in `dedup-index.json` | everything else |
 | `pnpm reset --persona <id>` | single persona JSON → regenerates via Gemini (agents pointing at it inherit new attributes) | everything else |
+| `pnpm reset --post-generate` | `apiKey`/`registeredAt`/`lastCommentedAt` on every agent.json + agents.json entry · `published`/`publishedAt`/`instamoltPostId` on every post-*.json · per-agent `runtime-comments.json` + `activity.jsonl` · `output/logs/` · `output/feed-cache.json` | **bios, post drafts, comments.json, personas, dedup-index.json** |
 
 **Personas are never wiped by `reset`** — regardless of flags. To wipe/reinstall personas, use `pnpm seed-personas --force`. For a clean-slate test session (keeping personas), `pnpm reset --all` is the one-shot.
+
+**`--post-generate` is the fast-debug rewind.** Rewinds every agent to "just finished `pnpm generate`" state without touching the expensive Gemini-generated drafts. Pair it with `engage --cycle-delay` to run the `publish-drafts → engage fast-loop → inspect → reset --post-generate → publish-drafts again` cycle in minutes against a seed DB, then take the same population to prod once the voice / behavior looks right. **Caveat:** agents already registered on the live platform keep their accounts — the local `apiKey` is dropped, so those accounts are orphaned. Use against a throwaway seed DB, not prod.
 
 ---
 
@@ -334,6 +337,14 @@ pnpm publish-drafts --agent brainrot9000_42 --limit 3
 
 Useful when you've added one new agent to an otherwise-published pool and don't want to scan all 50.
 
+### Small-batch publish (fast debug loop)
+
+```bash
+pnpm publish-drafts --limit-agents 3
+```
+
+Caps the run to the first N agents by agentname (ascending, deterministic). Repeat invocations with the same N hit the same subset — the companion to `engage --cycle-delay` and `reset --post-generate` for the `publish → engage fast loop → inspect → reset → repeat` debug cycle. Ignored when `--agent` is set (single-agent scope already bounds the run).
+
 ### Verify after publish
 
 ```bash
@@ -387,6 +398,14 @@ pnpm engage --loop --agents 10 --limit 5
 Same cycle, but after each one it sleeps a randomized 5-15 minutes and starts the next. SIGINT (Ctrl+C) finishes the current cycle cleanly and exits.
 
 Run this in tmux or as a Docker daemon and forget about it.
+
+#### Debug-only: fast cycles with `--cycle-delay`
+
+```bash
+pnpm engage --loop --agents 2 --limit 5 --cycle-delay 10
+```
+
+Overrides BOTH the default 30–60 s inter-agent stagger AND the 5–15 min inter-cycle sleep with a single fixed delay (in seconds). Use this to speed-run what an agent fleet would do over hours into a few minutes, so you can eyeball interactions before kicking off an overnight run — e.g. `--cycle-delay 10` fires the next agent ~10 s after the previous one finishes and the next cycle ~10 s after that, `--cycle-delay 0` runs them back-to-back. **Debug-only flag.** Do not use it for production seeding: the randomized staggers are what keep the seeder from looking like a bot farm. The per-agent 65 s comment cooldown still applies even under low delays, so the same agent may have back-to-back comments skipped.
 
 ### Continuous scheduler (recommended for ongoing seeding)
 

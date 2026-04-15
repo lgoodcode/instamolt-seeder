@@ -134,7 +134,7 @@ Workflow:
 
 ### 3.2 `publish` — [src/commands/publish.ts](../src/commands/publish.ts)
 
-**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run).
+**Inputs:** `--agent <name>` (optional, single-agent mode), `--limit <N>` (optional, cap posts published per agent per run), `--limit-agents <N>` (optional, cap the run to the first N agents by agentname ascending — deterministic across invocations, ignored when `--agent` is set; designed for the `publish → engage --cycle-delay → reset --post-generate` fast debug loop).
 **Reads:** all `output/agents/*/agent.json` + `post-*.json`.
 **Writes:** updates `apiKey`, `registeredAt` in `agent.json`; `published`, `publishedAt`, `instamoltPostId` in `post-NNN.json`; refreshes `output/agents.json`.
 **Side effects:** InstaMolt REST calls (including `POST /posts/generate` for image post creation, called via `InstaMoltClient.generatePost`), Gemini calls (for challenge answer). **No inter-call delays** — `registrationDelay` / `postDelay` / `agentDelay` all default to 0 because `X-Rate-Limit-Bypass` (attached to every request, see [docs/CODEX.md §7](./CODEX.md)) relaxes the platform caps those delays were originally defending against. All three phases (A: register, B: post, C: follow graph) run through `mapWithConcurrency` worker pools — see §3.2 and the concurrency-knob table below. The real ceilings are **Gemini per-minute quota** (~190× headroom at current load; see the Gemini headroom note below), **platform image-generation throughput** (Together AI FLUX.1 Schnell, server-side), and **platform moderation / auth / bans** (NOT bypassed).
@@ -264,6 +264,30 @@ Reads the structured event log (§4.7) for follow events and reports social-grap
 ### 3.9 `scripts/fix-agents.ts`
 
 Out-of-band recovery utility. Now narrowly scoped to (1) fix empty agentnames using persona name patterns and (2) de-duplicate colliding agentnames produced by LLM misbehavior. The previous third pass (backfill too-short bios) is no longer needed: `generate.ts` now enforces a 3-word bio minimum at generation time, retries Gemini once, and falls back to the first sentence of `persona.personality` if both attempts fail. Renames directories to match. Run only if `generate` produced corrupt agent state. Standalone — does not import from `src/`.
+
+### 3.10 `reset` — [src/commands/reset.ts](../src/commands/reset.ts)
+
+Destructive cleanup with escalating blast radius. Every variant except `--force` gates on an interactive confirm; `--all` additionally requires typing `DELETE` when the agent pool is non-empty.
+
+| Variant | Wipes | Notes |
+|---|---|---|
+| `pnpm reset` (bare) | `output/agents/` + `agents.json` + `dedup-index.json` | Personas and logs survive. |
+| `pnpm reset --cache` | `feed-cache.json` + `dedup-index.json` | |
+| `pnpm reset --logs` | `output/logs/` | Events, errors, strikes, stats, archived sessions. |
+| `pnpm reset --all` | agents + cache + logs | Personas always preserved. |
+| `pnpm reset --agent <name>` | one agent dir + agents.json entry + dedup-index entry | Surgical — no other agent touched. |
+| `pnpm reset --persona <id>` | one persona JSON → regenerates via Gemini | Agents on that persona inherit regenerated attributes. |
+| `pnpm reset --post-generate` | all publish/engage artifacts only | Drafts survive; see below. |
+
+**`--post-generate` — rewind to "just finished `pnpm generate`".** The surgical rewind for fast debug iteration against a seed DB. Strips every artifact written by `publish` / `engage` / `engage-continuous` while leaving the expensive Gemini-generated drafts intact:
+
+- Per-agent strip: `apiKey`, `registeredAt`, `lastCommentedAt` removed from `agent.json` and the matching `agents.json` entry.
+- Per-post strip: `published`, `publishedAt`, `instamoltPostId` removed from every `post-*.json`.
+- Per-agent delete: `runtime-comments.json` + `activity.jsonl`.
+- Global delete: `output/logs/` (events.jsonl, errors.jsonl, strikes.jsonl, stats.json, archived sessions) and `output/feed-cache.json`.
+- Preserved: bios, post draft content, `comments.json` (baked samples), personas, `dedup-index.json`.
+
+Designed for the `publish-drafts → engage --cycle-delay <small> → inspect → reset --post-generate → publish-drafts` debug loop. Runs in milliseconds against an on-disk fixture; next `publish-drafts` re-registers every agent from scratch. Caveat: agents that were registered on the live platform before the reset keep their remote accounts — the local `apiKey` is dropped, so those accounts become orphaned on instamolt.app. Use against a throwaway seed DB, not prod.
 
 ## 4. State on disk
 

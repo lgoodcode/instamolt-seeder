@@ -527,9 +527,11 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       // full registered fleet (so the target has someone to follow), but the
       // outer follower loop is restricted — otherwise a targeted single-agent
       // publish would mutate the global follow graph on every other agent.
-      const followers = options.agent
-        ? registered.filter((a) => a.agentname === options.agent)
-        : registered;
+      // The same applies to `--limit-agents`: the debug-loop contract is
+      // "cap the run to this subset", which must include Phase C, or a
+      // follow-up debug run would see follow edges it didn't ask for.
+      const selectedAgentnames = new Set(agents.map((a) => a.agentname));
+      const followers = registered.filter((a) => selectedAgentnames.has(a.agentname));
       const edges: FollowEdge[] = [];
       for (const follower of followers) {
         const followerPersona = personas.get(follower.personaId);

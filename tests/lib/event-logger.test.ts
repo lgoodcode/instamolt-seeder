@@ -59,8 +59,10 @@ import {
   logEvent,
   logSkippedAction,
   logStrike,
+  normalizeMentionsShape,
   updateAgentCounts,
 } from '@/lib/event-logger';
+import type { SeederStats } from '@/types';
 
 const LOGS_DIR = '/tmp/test-logs';
 const AGENTS_DIR = '/tmp/test-agents';
@@ -576,6 +578,128 @@ describe('session resume / archive', () => {
     initEventLogger();
     // Fresh session; no crash.
     expect(getStats()!.session.totalEvents).toBe(0);
+  });
+});
+
+describe('normalizeMentionsShape', () => {
+  // Helper: build a barebones SeederStats so tests can focus on the
+  // `mentions` block. Everything else is set to a valid empty value.
+  function baseStats(): SeederStats {
+    return {
+      lastUpdatedAt: new Date().toISOString(),
+      session: {
+        sessionId: 'sess-test',
+        startedAt: new Date().toISOString(),
+        uptimeMs: 0,
+        totalEvents: 0,
+      },
+      agents: { registered: 0, active: 0 },
+      actions: {} as SeederStats['actions'],
+      feeds: { refreshCount: 0, lastRefreshedAt: null, avgPostCount: 0 },
+      moderation: { totalStrikes: 0, byTier: {}, byCategory: {} },
+      growth: { ticksFired: 0, agentsAdded: 0 },
+      personas: {},
+      mentions: {
+        total: 0,
+        byPhase: { bake: 0, runtime: 0 },
+        byContext: {
+          comment: { bake: 0, runtime: 0 },
+          reply: { bake: 0, runtime: 0 },
+        },
+        byMentioningAgent: {},
+        byTargetAgent: {},
+      },
+      latency: {},
+    };
+  }
+
+  it('seeds a full mentions block when stats.mentions is missing', () => {
+    // A stats.json written before the mention aggregation shipped has no
+    // `mentions` field at all. Must initialize to the full nested shape so
+    // `logEvent`'s increments don't trip on undefined subfields.
+    const stats = baseStats();
+    (stats as { mentions?: unknown }).mentions = undefined;
+
+    normalizeMentionsShape(stats);
+
+    expect(stats.mentions.total).toBe(0);
+    expect(stats.mentions.byPhase).toEqual({ bake: 0, runtime: 0 });
+    expect(stats.mentions.byContext.comment).toEqual({ bake: 0, runtime: 0 });
+    expect(stats.mentions.byContext.reply).toEqual({ bake: 0, runtime: 0 });
+    expect(stats.mentions.byMentioningAgent).toEqual({});
+    expect(stats.mentions.byTargetAgent).toEqual({});
+  });
+
+  it('migrates legacy flat byContext and syncs byPhase.runtime', () => {
+    // PR #11's initial cut persisted `byContext.comment` / `byContext.reply`
+    // as plain numbers. Resuming into the nested shape must collapse those
+    // totals into the `runtime` slot AND sync `byPhase.runtime` — otherwise
+    // the dashboard shows `byPhase={0,0}` alongside non-zero context totals.
+    const stats = baseStats();
+    stats.mentions.byContext = {
+      comment: 12,
+      reply: 3,
+    } as unknown as typeof stats.mentions.byContext;
+    stats.mentions.byPhase = undefined as unknown as typeof stats.mentions.byPhase;
+
+    normalizeMentionsShape(stats);
+
+    expect(stats.mentions.byContext.comment).toEqual({ bake: 0, runtime: 12 });
+    expect(stats.mentions.byContext.reply).toEqual({ bake: 0, runtime: 3 });
+    expect(stats.mentions.byPhase).toEqual({ bake: 0, runtime: 15 });
+  });
+
+  it('backfills missing byPhase without touching a valid nested byContext', () => {
+    // A hand-edited stats.json might have the nested-byContext shape but be
+    // missing `byPhase` (or have a stale partial shape). The normalizer must
+    // add byPhase without clobbering the existing nested context counts —
+    // otherwise runtime mention events would crash on `byPhase[phase]++`.
+    const stats = baseStats();
+    stats.mentions.byContext = {
+      comment: { bake: 2, runtime: 5 },
+      reply: { bake: 1, runtime: 4 },
+    };
+    stats.mentions.byPhase = undefined as unknown as typeof stats.mentions.byPhase;
+
+    normalizeMentionsShape(stats);
+
+    expect(stats.mentions.byPhase).toEqual({ bake: 0, runtime: 0 });
+    expect(stats.mentions.byContext.comment).toEqual({ bake: 2, runtime: 5 });
+    expect(stats.mentions.byContext.reply).toEqual({ bake: 1, runtime: 4 });
+  });
+
+  it('backfills missing per-agent maps when they were never written', () => {
+    const stats = baseStats();
+    stats.mentions.byMentioningAgent = undefined as unknown as Record<string, number>;
+    stats.mentions.byTargetAgent = undefined as unknown as Record<string, number>;
+
+    normalizeMentionsShape(stats);
+
+    expect(stats.mentions.byMentioningAgent).toEqual({});
+    expect(stats.mentions.byTargetAgent).toEqual({});
+  });
+
+  it('is idempotent on a fully-shaped mentions block', () => {
+    // Running the normalizer twice must not mutate a well-shaped block —
+    // otherwise a status call would zero out live counters every time.
+    const stats = baseStats();
+    stats.mentions.total = 5;
+    stats.mentions.byPhase = { bake: 2, runtime: 3 };
+    stats.mentions.byContext = {
+      comment: { bake: 1, runtime: 2 },
+      reply: { bake: 1, runtime: 1 },
+    };
+    stats.mentions.byMentioningAgent = { alpha: 3 };
+    stats.mentions.byTargetAgent = { beta: 2 };
+
+    normalizeMentionsShape(stats);
+    normalizeMentionsShape(stats);
+
+    expect(stats.mentions.total).toBe(5);
+    expect(stats.mentions.byPhase).toEqual({ bake: 2, runtime: 3 });
+    expect(stats.mentions.byContext.comment).toEqual({ bake: 1, runtime: 2 });
+    expect(stats.mentions.byMentioningAgent).toEqual({ alpha: 3 });
+    expect(stats.mentions.byTargetAgent).toEqual({ beta: 2 });
   });
 });
 

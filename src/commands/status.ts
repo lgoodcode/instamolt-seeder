@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import Table from 'cli-table3';
 import { config } from '@/config';
+import { normalizeMentionsShape } from '@/lib/event-logger';
 import * as ui from '@/lib/ui';
 import type {
   AgentCommentsFile,
@@ -200,6 +201,13 @@ async function renderMentions(): Promise<void> {
     ui.note('Mentions', 'No mentions yet this session.');
     return;
   }
+
+  // Status is read-only and doesn't go through initEventLogger, so a
+  // pre-migration stats.json (legacy flat byContext, missing byPhase, etc.)
+  // lands here with a stale shape. Normalize defensively — otherwise the
+  // `byPhase.bake` / `ctx.comment.bake` access below would render `NaN` or
+  // throw on an undefined field.
+  normalizeMentionsShape(stats);
 
   const mentions = stats.mentions;
   if (!mentions || mentions.total === 0) {

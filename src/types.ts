@@ -206,14 +206,22 @@ export interface Persona {
    * hit rates can be correlated to chaotic-vs-normal generations. */
   chaosProbability?: number;
   /**
-   * Probability (0–1) that a generated comment or reply is passed an
-   * `@mention` candidate list. Controls how often this persona reaches out
-   * to other agents by name — tuned to stay RARE (catalog range 0–0.25).
-   * Replies get an internal ×2 bump (capped at 0.4) because threads are the
-   * natural place to address `@parent.author`. A failed roll omits the
-   * candidate list from the LLM prompt entirely, so mentions are deterministic
-   * in their absence. Default 0.1 when a Gemini-generated persona lacks the
-   * field. Hand-authored personas always supply it.
+   * Probability that a generated comment or reply is passed an `@mention`
+   * candidate list. Controls how often this persona reaches out to other
+   * agents by name — tuned to stay RARE.
+   *
+   * **Effective range: 0–0.25** (catalog and hand-authored values). Higher
+   * inputs are hard-clamped by `effectiveMentionProbability` in
+   * [src/lib/mentions.ts](./lib/mentions.ts) via `MENTION_PROBABILITY_MAX`
+   * before context math, so a malformed/hand-edited persona can't break the
+   * documented gate.
+   *
+   * Replies get an internal ×2 bump (capped at `REPLY_MENTION_PROB_CAP = 0.4`)
+   * because threads are the natural place to address `@parent.author`. A
+   * failed roll omits the candidate list from the LLM prompt entirely, so
+   * mentions are deterministic in their absence. Default `0.1` when a
+   * Gemini-generated persona lacks the field; hand-authored personas always
+   * supply it.
    */
   mentionProbability?: number;
 }

@@ -164,6 +164,75 @@ function freshStats(): SeederStats {
 }
 
 /**
+ * Normalize `stats.mentions` to the current nested-by-phase shape. Covers
+ * three shapes that can appear on disk:
+ *   - **Missing** (stats files written before the mention aggregation
+ *     shipped): seed a full empty `mentions` block.
+ *   - **Legacy flat `byContext`** (PR #11 initial cut where `byContext.*`
+ *     were numbers): collapse the legacy totals into the `runtime` slot
+ *     since pre-fix rates were already implicitly runtime-skewed, and sync
+ *     `byPhase.runtime` so downstream counters (`stats.mentions.byPhase[phase]++`
+ *     in `logEvent`) see a consistent total.
+ *   - **Partial** (some subfields missing — e.g. `byPhase`, per-agent maps,
+ *     or `total` absent on a hand-edited file): defensively backfill every
+ *     required subobject so a single missing field can't crash the next
+ *     mention event.
+ *
+ * Exported so both the resume-path migration in `loadOrArchivePriorStats`
+ * and the read-only `pnpm status` renderer share one source of truth —
+ * otherwise a status call on a never-migrated stats.json would render
+ * `NaN` / `undefined` breakdowns.
+ *
+ * Mutates `stats` in place and returns it for chaining.
+ */
+export function normalizeMentionsShape(stats: SeederStats): SeederStats {
+  if (!stats.mentions) {
+    stats.mentions = {
+      total: 0,
+      byPhase: { bake: 0, runtime: 0 },
+      byContext: {
+        comment: { bake: 0, runtime: 0 },
+        reply: { bake: 0, runtime: 0 },
+      },
+      byMentioningAgent: {},
+      byTargetAgent: {},
+    };
+    return stats;
+  }
+
+  if (typeof stats.mentions.total !== 'number') stats.mentions.total = 0;
+  if (!stats.mentions.byPhase) stats.mentions.byPhase = { bake: 0, runtime: 0 };
+  if (!stats.mentions.byMentioningAgent) stats.mentions.byMentioningAgent = {};
+  if (!stats.mentions.byTargetAgent) stats.mentions.byTargetAgent = {};
+  if (!stats.mentions.byContext) {
+    stats.mentions.byContext = {
+      comment: { bake: 0, runtime: 0 },
+      reply: { bake: 0, runtime: 0 },
+    };
+  }
+
+  // Detect the legacy flat-byContext shape (numeric `comment` / `reply`) and
+  // migrate into runtime slots. Sync `byPhase.runtime` to stay consistent
+  // with the aggregated total — without this, `byPhase` ends up at zero
+  // while `byContext.*.runtime` carries the real count.
+  const ctx = stats.mentions.byContext as unknown as {
+    comment: number | { bake: number; runtime: number };
+    reply: number | { bake: number; runtime: number };
+  };
+  if (typeof ctx.comment === 'number' || typeof ctx.reply === 'number') {
+    const commentNum = typeof ctx.comment === 'number' ? ctx.comment : 0;
+    const replyNum = typeof ctx.reply === 'number' ? ctx.reply : 0;
+    stats.mentions.byContext = {
+      comment: { bake: 0, runtime: commentNum },
+      reply: { bake: 0, runtime: replyNum },
+    };
+    stats.mentions.byPhase = { bake: 0, runtime: commentNum + replyNum };
+  }
+
+  return stats;
+}
+
+/**
  * Read the existing stats.json (if any) and decide whether to resume it
  * (continuing the same session counters) or archive it and start fresh.
  *
@@ -186,38 +255,7 @@ function loadOrArchivePriorStats(): SeederStats {
       // Without this, resume would read an undefined field and the first
       // `pushLatency` call would crash on `stats.latency[type]`.
       if (!prev.latency) prev.latency = {};
-      // Backfill `mentions` for stats files written before the mention
-      // aggregation shipped, OR migrate the flat-byContext shape (PR #11
-      // initial cut) to the nested-by-phase shape (PR #11 review fix).
-      if (!prev.mentions) {
-        prev.mentions = {
-          total: 0,
-          byPhase: { bake: 0, runtime: 0 },
-          byContext: {
-            comment: { bake: 0, runtime: 0 },
-            reply: { bake: 0, runtime: 0 },
-          },
-          byMentioningAgent: {},
-          byTargetAgent: {},
-        };
-      } else {
-        // Detect the legacy flat shape (`byContext.comment` is a number).
-        // Older stats files that resume into this version: collapse the
-        // legacy totals into `runtime` since pre-fix rates were already
-        // implicitly runtime-skewed.
-        const ctx = prev.mentions.byContext as unknown as {
-          comment: number | { bake: number; runtime: number };
-          reply: number | { bake: number; runtime: number };
-        };
-        if (typeof ctx.comment === 'number' || typeof ctx.reply === 'number') {
-          const commentNum = typeof ctx.comment === 'number' ? ctx.comment : 0;
-          const replyNum = typeof ctx.reply === 'number' ? ctx.reply : 0;
-          prev.mentions.byContext = {
-            comment: { bake: 0, runtime: commentNum },
-            reply: { bake: 0, runtime: replyNum },
-          };
-        }
-      }
+      normalizeMentionsShape(prev);
       return prev;
     }
     // Archive: copy the old file, then start fresh. `mkdirSync` with

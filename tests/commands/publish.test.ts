@@ -695,6 +695,36 @@ describe('publish', () => {
     expect(apiMocks.followAgent).toHaveBeenCalled();
   });
 
+  it('--limit-agents N only creates follow edges FROM the first N agents in Phase C', async () => {
+    // Regression for coderabbit#3084387624: Phase C was iterating the full
+    // registered fleet as followers regardless of --limit-agents, so a debug
+    // run with --limit-agents 2 would still mutate the follow graph on every
+    // other agent. The subset must apply to Phase C followers the same way
+    // it applies to Phase A/B.
+    for (const name of ['alpha', 'bravo', 'charlie', 'delta']) {
+      primeAgent(name, { apiKey: `key-${name}` });
+    }
+    primeIndex(['charlie', 'alpha', 'delta', 'bravo']);
+
+    const { InstaMoltClient } = await import('@/services/instamolt-api');
+    const ctor = InstaMoltClient as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    await publish({ limitAgents: 2 });
+
+    // alpha + bravo win the ascending-alphabetical slice. Only their keys
+    // should appear as followers — charlie and delta stay out of Phase C.
+    const followerKeys = ctor.mock.calls
+      .map((args: unknown[]) => args[0])
+      .filter((k: unknown): k is string => typeof k === 'string' && k.startsWith('key-'));
+    const unique = new Set(followerKeys);
+    expect(unique.has('key-alpha')).toBe(true);
+    expect(unique.has('key-bravo')).toBe(true);
+    expect(unique.has('key-charlie')).toBe(false);
+    expect(unique.has('key-delta')).toBe(false);
+    expect(apiMocks.followAgent).toHaveBeenCalled();
+  });
+
   it('runs Phase C follow-graph bootstrap when ≥2 registered agents exist', async () => {
     for (const name of ['alpha', 'beta', 'gamma']) {
       primeAgent(name, { apiKey: `key-${name}` });

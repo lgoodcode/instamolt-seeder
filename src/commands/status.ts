@@ -235,7 +235,12 @@ async function renderLatency(): Promise<void> {
     });
 
     for (const { event, bucket } of rows) {
-      const avg = Math.round(bucket.sumMs / bucket.count);
+      // sumMs/maxMs slide with the 500-sample reservoir (see pushLatency in
+      // event-logger.ts), so avg must divide by samples.length, not count
+      // (which is the lifetime event counter). Dividing by lifetime count
+      // drifts avg toward 0 once the reservoir starts sliding.
+      const windowSize = bucket.samples.length > 0 ? bucket.samples.length : 1;
+      const avg = Math.round(bucket.sumMs / windowSize);
       table.push([
         ui.color.cyan(event),
         String(bucket.count),
@@ -250,7 +255,12 @@ async function renderLatency(): Promise<void> {
   } else {
     console.log('\nLatency by event:');
     for (const { event, bucket } of rows) {
-      const avg = Math.round(bucket.sumMs / bucket.count);
+      // sumMs/maxMs slide with the 500-sample reservoir (see pushLatency in
+      // event-logger.ts), so avg must divide by samples.length, not count
+      // (which is the lifetime event counter). Dividing by lifetime count
+      // drifts avg toward 0 once the reservoir starts sliding.
+      const windowSize = bucket.samples.length > 0 ? bucket.samples.length : 1;
+      const avg = Math.round(bucket.sumMs / windowSize);
       console.log(
         `  ${event.padEnd(24)} count=${String(bucket.count).padStart(6)}  p50=${String(Math.round(bucket.p50Ms)).padStart(6)}ms  p95=${String(Math.round(bucket.p95Ms)).padStart(6)}ms  max=${String(Math.round(bucket.maxMs)).padStart(6)}ms  avg=${String(avg).padStart(6)}ms`,
       );

@@ -34,6 +34,7 @@ Cross-directory imports use `@/*` (mapped to `src/*`). Same-directory imports st
 - **No MCP for image posts.** Image post creation goes through `InstaMoltClient.generatePost` (`POST /posts/generate`). The `@instamolt/mcp` stdio shim was removed — do not re-introduce it.
 - **No secrets in logs.** API keys must be truncated if logged at all.
 - **Every Gemini/platform interaction emits a `SeederEvent`.** New code paths that call `callGemini`, the `InstaMoltClient`, or add a CLI phase must emit structured events via `logEvent()` or the `timed()` helper in `@/lib/event-logger`. Skipping event emission (especially on success) breaks the latency aggregates in `stats.json`.
+- **No `console.*` in `src/services/`.** Every retry, rate-limit hit, and transient failure in `src/services/` routes through `logEvent()` from `@/lib/event-logger`, not `console.warn`/`console.error`. Reverting to `console.*` in a service module bypasses `events.jsonl`, `errors.jsonl`, and the latency reservoir — it is a regression and must block.
 - **Keep `docs/BLUEPRINT.md` in lockstep.** Any change under `src/` that touches commands, state shape, pipeline semantics, or behavioral loops must update the matching blueprint section in the same PR.
 
 ## Suggestions (non-blocking)
@@ -47,7 +48,6 @@ Cross-directory imports use `@/*` (mapped to `src/*`). Same-directory imports st
 - **ESM imports only** — never `require()`.
 - **Naming**: files `kebab-case.ts`, types `PascalCase`, functions `camelCase`, constants `UPPER_SNAKE_CASE`.
 - **Terminal output in commands** — prefer `@/lib/ui` (`intro`, `section`, `note`, `spinner`, `progress`, `outro`) over raw `console.log`. Three command files (`status.ts`, `preview-comments.ts`, `events.ts`) are intentional exceptions — they render multi-line grouped output (`cli-table3`, per-agent previews, per-session summaries) that can't flow through `ui.note()`.
-- **Service modules route through `logEvent`** — every retry, rate-limit hit, and transient failure in `src/services/` emits a structured `SeederEvent` via `@/lib/event-logger`, not `console.warn`. `console.*` in `src/services/` is a regression flag.
 - **TTY-aware degradation** — spinners degrade to log lines, progress bars degrade to milestone lines, loop countdowns emit a single line under non-TTY.
 
 ## Testing

@@ -714,8 +714,17 @@ export interface StrikeEvent {
  * cheap in-place sort of the samples array (500 entries sorts in sub-ms).
  */
 export interface LatencyBucket {
+  /**
+   * Lifetime event count for this bucket. Unlike the other numeric fields,
+   * this is NOT reservoir-bounded — it increments on every timed event of
+   * the matching type for the life of the session. Use `samples.length`
+   * (not `count`) as the denominator when computing window-scoped
+   * averages from `sumMs`.
+   */
   count: number;
+  /** Sum of `durationMs` across the recent-500-sample reservoir. */
   sumMs: number;
+  /** Max `durationMs` across the recent-500-sample reservoir. */
   maxMs: number;
   p50Ms: number;
   p95Ms: number;

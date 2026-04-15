@@ -177,6 +177,23 @@ gh api repos/{owner}/{repo}/issues/{number}/comments \
 - **Use `in_reply_to` (not `in_reply_to_id`)** for the GitHub API parameter name.
 - **Escape backticks in reply bodies** — use `\x60` or avoid backtick-heavy code in gh api `-f body=` arguments. Prefer simple prose.
 
+### Step 6.5: Flag reviewer-instruction drift
+
+After evaluating all comments, scan the inventory for patterns that suggest the reviewer instructions need tuning. Specifically look for:
+
+- **Recurring false positives** — the same "Skip" category appears 2+ times (e.g., reviewer keeps flagging `console.log` in a file that's an intentional exception, or flags a convention that CLAUDE.md already blesses)
+- **Suggestions that conflict with project conventions** — reviewer recommends a pattern that `.github/copilot-instructions.md` or `CLAUDE.md` explicitly calls out as wrong for this repo
+- **Missed architecture violations** — a real bug slipped through that one of the "Errors (must block)" rules should have caught, suggesting the rule needs sharpening
+- **Noise categories** — style/formatting/nit comments that `.coderabbit.yaml` is supposed to suppress but didn't
+
+If any of these patterns appear, **pause before Step 7** and prompt the user:
+
+> Noticed {N} comments that look like {false positives / convention conflicts / missed rules}: {1-line list}. Want to discuss updating `.github/copilot-instructions.md` and/or `.coderabbit.yaml` to improve future reviews?
+
+Wait for the user's response. If they want to discuss, propose specific edits to the instruction files (new "Do NOT Flag" entries, tightened path_instructions, new architecture rules). Do NOT make the edits unilaterally — these files shape every future review, so changes need user sign-off.
+
+If the user declines or says "not now," proceed to Step 7. Either way, note the observation in the final summary under a **Reviewer drift** heading so it's not lost.
+
 ### Step 7: Output summary
 
 Present a final summary table:

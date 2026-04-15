@@ -500,19 +500,21 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   // The pipeline is fleet-wide round-robin: all agents' post-001.json drafts
   // are queued first, then all post-002.json, etc. With N concurrent workers
   // pulling from that queue, any single agent's post-002 can't be dispatched
-  // until every other agent's post-001 has been dispatched first. That
-  // guarantees ≥ (agents / N) × avg-latency spacing between two posts from
-  // the same agent — at 200 agents × 4 workers × ~3s/post that's ~150s,
-  // which respects the platform's 1/min per-agent image-gen cap without any
-  // explicit sleep. Sequential-per-agent worker ownership (the previous
-  // design) violated this by firing post-002 the instant post-001 returned.
+  // until every other agent's post-001 has been dispatched first. This
+  // smooths the per-agent burst shape (no back-to-back posts from a single
+  // worker's sequential walk) and keeps the load on Together AI's FLUX
+  // pipeline evenly spread across the fleet. The previous sequential-per-
+  // agent design fired post-002 the instant post-001 returned, which
+  // concentrated calls into per-agent bursts even when fleet-wide
+  // throughput was fine.
   //
-  // A shared {@link CircuitBreaker} wraps every `/posts/generate` call. When
-  // sustained 429 RATE_LIMIT_EXCEEDED or 502 GENERATION_FAILED bursts cross
-  // the configured threshold, the breaker opens and pauses all workers for a
-  // cool-off window (see `publishCircuit*` in src/config.ts). This catches
-  // the 50/min fleet image-gen cap when growth waves in engage-continuous
-  // temporarily push through-put past steady-state.
+  // A shared {@link CircuitBreaker} wraps every `/posts/generate` call.
+  // When sustained 429 RATE_LIMIT_EXCEEDED or 502 GENERATION_FAILED bursts
+  // cross the configured threshold, the breaker opens and pauses all
+  // workers for a cool-off window (see `publishCircuit*` in src/config.ts).
+  // This is the backstop for Together AI saturation — if FLUX is slower
+  // than our steady-state budget allows (600 RPM target ~33%), the breaker
+  // naturally paces us without hand-tuning `publishConcurrency`.
 
   const readyToPost = prepared.filter((p) => p.data.apiKey);
   const postLimit = options.limit ?? Infinity;

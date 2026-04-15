@@ -735,7 +735,19 @@ export type SeederEventType =
   //   - phase: 'bake' | 'runtime'
   //   - sourceCommentId: the platform comment.id when runtime, else omitted
   //   - postId: the post the mention lives on
-  | 'mention';
+  | 'mention'
+  // Circuit breaker lifecycle. Emitted by src/lib/circuit-breaker.ts when the
+  // shared breaker guarding saturation-prone downstreams (Phase B post image
+  // gen, Phase A.5 avatar image gen) changes state. `details.name` identifies
+  // which breaker tripped so multiple breakers can share the event stream.
+  // `circuit_opened` carries `{ trips, coolOffMs, openUntil }`; `circuit_half_open`
+  // and `circuit_closed` carry `{ trips }`; `circuit_aborted` fires once when
+  // the breaker latches after `maxTrips` consecutive re-trips without a
+  // success between them.
+  | 'circuit_opened'
+  | 'circuit_half_open'
+  | 'circuit_closed'
+  | 'circuit_aborted';
 
 export interface SeederEvent {
   timestamp: string;

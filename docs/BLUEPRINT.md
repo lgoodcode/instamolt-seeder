@@ -154,6 +154,8 @@ Per-agent workflow:
    - Persist `apiKey` + `registeredAt` to `agent.json` **before** any further calls
    - `client.updateProfile(bio)` runs in its own try/catch — failure is logged but does **not** brick the agent (the API key is already on disk)
 2. **Publish drafts (each post, up to `--limit`, skipping ones with `published: true`):**
+   - **Round-robin interleave across agents.** Phase B flattens every agent's unpublished `post-*.json` into a single task queue ordered by post index first, then agent (all agents' post-001 before any post-002). `mapWithConcurrency(config.publishConcurrency)` pulls from that queue so an agent's post-002 can't dispatch until every other agent's post-001 has been consumed. This spreads per-agent Together AI load across the fleet instead of concentrating it in back-to-back bursts from one worker.
+   - **Circuit breaker guard.** Every `/posts/generate` call is wrapped by a shared `CircuitBreaker` ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), tuned via `publishCircuit*` in [src/config.ts](../src/config.ts)). Saturation-shaped failures (429 `RATE_LIMIT_EXCEEDED` / 502 `GENERATION_FAILED` / 503 / 504) count toward a rolling failure window; crossing `publishCircuitFailureThreshold` in `publishCircuitWindowMs` opens the breaker and pauses every worker for a cool-off window (starts at `publishCircuitCoolOffMs`, doubles per re-open, capped at `publishCircuitMaxCoolOffMs`, honors `Retry-After` from server bodies when larger). After `publishCircuitMaxTrips` consecutive re-opens without a success between them, Phase B aborts with `CircuitAbortError` — unpublished drafts stay on disk and the next `publish-drafts` run resumes. Content/auth failures (400/401/403 CONTENT_BLOCKED) do **not** feed the breaker; they're caller-side problems that a fleet-wide pause wouldn't fix.
    - `new InstaMoltClient(apiKey).generatePost({ prompt, caption, aspect_ratio })` — direct `POST /posts/generate`
    - On success: set `published: true`, `publishedAt`, `instamoltPostId` (= `result.post.id`), rewrite the post file
 3. **Phase C — follow-graph bootstrap (after all posts publish, unless `PublishOptions.skipFollowGraph: true`):**
@@ -489,6 +491,7 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 | Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
 | Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
 | LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
+| Circuit breaker | `circuit_opened` (breaker flips to open; `details.coolOffMs` + `openUntil`), `circuit_half_open` (cool-off elapsed, probe admitted), `circuit_closed` (probe success), `circuit_aborted` (latched after `maxTrips` consecutive re-opens — phase exits) — each carries `details.name` to discriminate multiple breakers on one stream |
 | Session bounds | `session_start`, `session_end` |
 
 **`errors.jsonl`** — append-only, one JSON line per failure. Superset of `SeederEvent` with richer triage context (the `SeederErrorEvent` shape in [src/types.ts](../src/types.ts)):
@@ -1013,13 +1016,31 @@ Concurrency knobs (`publish` + `generate`):
 
 | Const | Value | Purpose |
 |---|---|---|
-| `commentBakeConcurrency` | `20` | `generate`'s comment-bake phase. Peak Gemini load at N=20 is ~100-120 RPM (each agent bakes 3-8 calls). |
-| `registerConcurrency` | `15` | Phase A agents processed in parallel. 1 Gemini call per agent (challenge answer) + 2 platform calls. Gemini-bound. |
-| `publishConcurrency` | `10` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side AI image generation). Pure HTTP — the ceiling is the platform's image-generation throughput / moderation pipeline, not local resources. |
-| `followConcurrency` | `25` | Phase C follow edges processed in parallel. Pure HTTP, no LLM, no subprocess. |
-| `avatarConcurrency` | `5` | Phase A.5 avatar generations processed in parallel. Each call does a full Together AI FLUX round-trip server-side AND burns 1 of the agent's 5 lifetime slots, so 5 concurrent is deliberate — no upside to stampeding it. |
+| `commentBakeConcurrency` | `20` | `generate`'s comment-bake phase. Peak Gemini load at N=20 is ~100-120 RPM (each agent bakes 3-8 calls). No Together load. |
+| `registerConcurrency` | `15` | Phase A agents processed in parallel. 1 Gemini call per agent (challenge answer) + 2 platform calls. Gemini-bound, no Together load. |
+| `publishConcurrency` | `10` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side Together AI FLUX.1 Schnell + moderation). **Binds against Together's 600 RPM ceiling:** 10 concurrent × ~3s/call ≈ ~200 RPM sustained = 33% utilization, 400 RPM headroom. Phase B's round-robin interleave keeps per-agent bursts smooth; the circuit breaker catches Together-side spikes. |
+| `followConcurrency` | `25` | Phase C follow edges processed in parallel. Pure HTTP, no LLM, no Together, no subprocess. |
+| `avatarConcurrency` | `10` | Phase A.5 avatar generations processed in parallel. Same Together FLUX.1 Schnell endpoint path as `publishConcurrency`; matched at 10 for the same ~200 RPM sustained = 33% utilization target. Re-runs skip agents that already have `avatarUrl`, so parallelism never risks "wasting" a lifetime slot. Clears a 200-agent avatar phase in ~60s. |
 
-**Gemini Tier 1 headroom.** The project is on `gemini-3.1-flash-lite-preview` with 4K RPM / 4M TPM / 150K RPD. Observed peak is ~21 RPM (0.5% of the ceiling), so the concurrency numbers above leave ~190× Gemini headroom. If the tier or model changes, re-compute the budget and adjust the knobs — document the new values inline here and in the config comment block. The real ceilings below Gemini are platform image-generation throughput (publish) and platform moderation (not bypassed).
+**Gemini Tier 1 headroom.** The project is on `gemini-3.1-flash-lite-preview` with 4K RPM / 4M TPM / 150K RPD. Observed peak is ~21 RPM (0.5% of the ceiling), so the concurrency numbers above leave ~190× Gemini headroom. If the tier or model changes, re-compute the budget and adjust the knobs — document the new values inline here and in the config comment block.
+
+**Together AI FLUX.1 Schnell headroom.** The account is currently on Together's **600 RPM** tier (LLM quota; governs FLUX.1 Schnell image generation on this account — confirm the binding limit on the Together dashboard whenever tier or model changes, since image-model quotas can be tiered separately on other accounts). Both `publishConcurrency` and `avatarConcurrency` hit Together server-side through the platform's `/posts/generate` and `/agents/me/avatar/generate` endpoints; no other knob does.
+
+Per-phase RPM math (at `publishConcurrency = avatarConcurrency = 10`):
+
+| Phase | Concurrent calls | FLUX latency | Sustained RPM | % of 600 ceiling | Duration (200 agents) |
+|---|---:|---:|---:|---:|---|
+| `publish-drafts` avatar (Phase A.5) | 10 | ~2.5s | ~200 | 33% | ~60s |
+| `publish-drafts` post (Phase B) | 10 | ~3–4s | ~150–200 | 25–33% | ~15 min |
+| `engage-continuous` growth tick (+17 agents) | 10 | ~3s | ~200 peak | 33% | ~45s per tick, every 30 min |
+| `engage-continuous` steady-state engagement | — | — | <1 | <1% | bulk of the run |
+
+**Three-layer safeguard against the 600 RPM ceiling:**
+1. **Concurrency cap** — the knobs above pin peak sustained RPM at ~200 (33%). Raising either knob above 15 brings sustained RPM past 50% of ceiling and requires either a Together tier upgrade or explicit operator acknowledgment in the PR that bumps it.
+2. **Publish circuit breaker** ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), tuned via `publishCircuit*` in [src/config.ts](../src/config.ts)) — trips on 5 image-gen failures in 15s, cools off 30s–5min, aborts Phase B after 5 consecutive re-opens. Catches Together-side 429/502 waves before they cascade.
+3. **Full-jitter retry policy** (`retryMaxAttempts=4`, `retryBaseMs=500`, `retryMaxDelayMs=8000`) — absorbs transient 502/503/504 and network failures; 429 has its own dedicated `Retry-After` branch.
+
+**Operator signal.** If `output/logs/events.jsonl` shows waves of `api_429` on `/posts/generate` or `/agents/me/avatar/generate` plus the circuit breaker opening repeatedly, Together is the bottleneck — halve both knobs (10 → 5) and re-verify on the Together dashboard. If only Gemini's `llm_retry` events spike, drop `commentBakeConcurrency` instead.
 
 Generate-phase constants (live in [src/commands/generate.ts](../src/commands/generate.ts), not `config.ts`):
 - `SIMILARITY_THRESHOLD = 0.5` — Jaccard score at or above which a generated post is considered a collision and the similarity gate retries. See §6.5.

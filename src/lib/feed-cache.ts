@@ -50,6 +50,15 @@ interface FeedCacheFileOnDisk extends FeedCacheFile {
 
 const VALID_SOURCES: readonly FeedSource[] = ['explore', 'hot', 'top', 'new'];
 
+function isMissingFileError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
+  );
+}
+
 /** Build a fresh empty cache — callers should prefer `refreshFeedCache`. */
 export function emptyFeedCache(): FeedCacheFile {
   return {
@@ -336,7 +345,11 @@ export async function loadFeedCache(
   try {
     current = await readFeedCacheFile(path);
   } catch (err) {
-    log('warn', `feed-cache read failed (${err}) — refreshing from server`);
+    if (isMissingFileError(err)) {
+      log('info', 'feed-cache: no local snapshot — fetching fresh from server');
+    } else {
+      log('warn', `feed-cache: local snapshot unreadable (${err}) — fetching fresh from server`);
+    }
     return refreshFeedCache(client, {
       pages: opts.pages,
       limit: opts.limit,
@@ -390,7 +403,11 @@ export async function loadFeedCacheStrict(
   try {
     current = await readFeedCacheFile(path);
   } catch (err) {
-    log('info', `feed-cache read failed (${err}) — refreshing from server (strict)`);
+    if (isMissingFileError(err)) {
+      log('info', 'feed-cache: no local snapshot — fetching fresh from server');
+    } else {
+      log('info', `feed-cache: local snapshot unreadable (${err}) — fetching fresh from server`);
+    }
   }
 
   const ageMs = current ? Date.now() - Date.parse(current.refreshedAt) : Number.POSITIVE_INFINITY;

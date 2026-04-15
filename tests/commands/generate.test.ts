@@ -404,17 +404,18 @@ describe('generate', () => {
     expect(index.agents).toHaveLength(2);
   });
 
-  it('retries the bio once and falls back to persona.personality when still too short', async () => {
+  it('falls back to persona.personality when generateBio returns a too-short bio', async () => {
     const p = makePersona('test-persona', 'A very thoughtful curious bot. Built from computation.');
     personaMocks.loadPersonas.mockResolvedValue(new Map([[p.id, p]]));
     registryMocks.getAgentAssignments.mockReturnValue(assignN(p, 1));
     llmMocks.generateAgentName.mockResolvedValue('alpha');
-    // Both Gemini attempts return a too-short bio.
-    llmMocks.generateBio.mockResolvedValueOnce('too short').mockResolvedValueOnce('bad bio');
+    // generateBio handles its own retry internally (see tests/services/llm.test.ts);
+    // here we simulate the case where it still returns a <3-word bio after that retry.
+    llmMocks.generateBio.mockResolvedValue('too short');
 
     await generate(1, 0);
 
-    expect(llmMocks.generateBio).toHaveBeenCalledTimes(2);
+    expect(llmMocks.generateBio).toHaveBeenCalledTimes(1);
 
     const agent = JSON.parse(fsState.files.get(join('./output/agents', 'alpha', 'agent.json'))!);
     // Fallback is the first sentence of persona.personality.

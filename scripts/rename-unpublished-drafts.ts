@@ -39,7 +39,12 @@
  *   - output/dedup-index.json persona bucket entry
  * activity.jsonl is left as-is (append-only history).
  *
- * Crash-safe: rename-then-write per agent; top-level indices written last.
+ * Recovery note: each rename does `rename(oldDir → newDir)` and THEN patches
+ * the moved files. A crash between the two leaves `newName/agent.json` still
+ * containing `oldName`, and the top-level indices may be partially updated
+ * on the next run. If that happens, run `scripts/fix-agents.ts` and re-run
+ * this script; the probe-first flow will no-op on already-renamed agents.
+ * Fully transactional rename (journal + resume) is tracked as a follow-up.
  *
  * Operator-facing entry point: the "Handles all read like generic AI
  * compound words" row in docs/SEEDING.md's "Iteration moves" table.
@@ -51,6 +56,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { config } from '@/config';
+import { pickDiverseAndRecent } from '@/lib/similarity';
 import { loadPersonas } from '@/personas';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import { generateAgentName } from '@/services/llm';
@@ -65,6 +71,7 @@ const AGENTS_INDEX_PATH = join(REPO_ROOT, 'output', 'agents.json');
 const DEDUP_INDEX_PATH = join(REPO_ROOT, 'output', 'dedup-index.json');
 
 const MAX_AGENTNAME_ATTEMPTS = 8;
+const AGENTNAME_PROMPT_SAMPLE_K = 20;
 
 interface AgentOnDisk {
   agentname: string;
@@ -148,7 +155,11 @@ async function proposeNewName(
 ): Promise<string> {
   const rejected: string[] = [];
   for (let attempt = 0; attempt < MAX_AGENTNAME_ATTEMPTS; attempt++) {
-    const existing = Array.from(taken);
+    // Bound the avoid-list so prompt size stays flat as the agent pool grows.
+    // The real uniqueness gates are the local `taken.has(candidate)` check
+    // and the platform `isAgentnameAvailable` probe below; the prompt sample
+    // just nudges Gemini toward fresh word roots.
+    const existing = pickDiverseAndRecent(Array.from(taken), (n) => n, AGENTNAME_PROMPT_SAMPLE_K);
     const candidate = await generateAgentName(persona, voiceProfile, existing, rejected);
     if (!candidate || candidate.length < 3) {
       rejected.push(candidate || '<empty>');

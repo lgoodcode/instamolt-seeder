@@ -274,12 +274,9 @@ export async function generate(
           (b) => b,
           BIO_PROMPT_SAMPLE_K,
         );
+        // generateBio already retries once internally on sub-3-word output.
+        // If the retry also returns a short bio, fall back to persona.personality.
         let bio = await generateBio(persona, spec.voiceProfile, personaBiosSnapshot);
-
-        // Guarantee bio has at least 3 words; retry once, then fall back to persona.personality.
-        if (wordCount(bio) < MIN_BIO_WORD_COUNT) {
-          bio = await generateBio(persona, spec.voiceProfile, personaBiosSnapshot);
-        }
         if (wordCount(bio) < MIN_BIO_WORD_COUNT) {
           const match = persona.personality.match(/^[^.!?]+[.!?]/);
           const fallback = (match ? match[0] : persona.personality).trim().slice(0, 150);

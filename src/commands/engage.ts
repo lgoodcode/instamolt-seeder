@@ -528,7 +528,16 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
             if (Math.random() < postChance) {
               const resolved = resolveVoiceProfile(voiceProfiles, agent);
               if ('error' in resolved) {
+                cycleErrors++;
                 log('warn', `${resolved.error}, skipping post`);
+                logEvent({
+                  eventType: 'post_published',
+                  agentname: agent.agentname,
+                  persona: agent.personaId,
+                  success: false,
+                  error: resolved.error,
+                  details: { voiceProfileId: agent.voiceProfileId },
+                });
               } else {
                 const voiceProfile = resolved.profile;
                 try {

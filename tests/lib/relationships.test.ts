@@ -236,22 +236,51 @@ describe('pivotRegister', () => {
     expect(pivotRegister('love', new Set(['conversational']))).toBe('love');
   });
 
-  it('walks the fallback chain when the candidate is saturated', () => {
-    // disagree saturated → conversational
+  it('walks the adversarial chain when a disagree candidate is saturated', () => {
+    // disagree saturated → conversational (first in adversarial chain)
     expect(pivotRegister('disagree', new Set(['disagree']))).toBe('conversational');
     // disagree + conversational saturated → love
     expect(pivotRegister('disagree', new Set(['disagree', 'conversational']))).toBe('love');
   });
 
-  it('returns undefined when every fallback is saturated', () => {
+  it('returns undefined when every adversarial fallback is saturated', () => {
     expect(
       pivotRegister('disagree', new Set(['disagree', 'conversational', 'love'])),
     ).toBeUndefined();
   });
 
-  it('pivots love → conversational when love is saturated and disagree is open', () => {
-    // The chain is disagree → conversational → love. A love candidate that's
-    // saturated walks the chain from the start, so it can pivot to disagree.
-    expect(pivotRegister('love', new Set(['love']))).toBe('disagree');
+  it('never pivots a positive candidate into disagree — ally/amplify sentiment is preserved', () => {
+    // `love` saturated → conversational (non-adversarial chain), never disagree
+    expect(pivotRegister('love', new Set(['love']))).toBe('conversational');
+    // Even when `disagree` is the ONLY open register, the positive candidate
+    // must not cross polarity — conversational is still reached first.
+    expect(pivotRegister('love', new Set(['love']))).not.toBe('disagree');
+    // `reply` saturated → conversational first
+    expect(pivotRegister('reply', new Set(['reply']))).toBe('conversational');
+    // `reply` + conversational saturated → love (still positive)
+    expect(pivotRegister('reply', new Set(['reply', 'conversational']))).toBe('love');
+  });
+
+  it('pivots a saturated reply candidate through the non-adversarial chain exhaustively', () => {
+    // reply saturated, non-adversarial chain is [conversational, love, reply]
+    // — skip `reply` (the candidate), walk to conversational, then love.
+    expect(pivotRegister('reply', new Set(['reply', 'conversational', 'love']))).toBeUndefined();
+    // Even if `disagree` is open, it's NOT in the non-adversarial chain.
+    expect(pivotRegister('reply', new Set(['reply', 'conversational', 'love']))).toBeUndefined();
+  });
+
+  it('pivots a saturated conversational candidate through positive fallbacks only', () => {
+    // conversational saturated → love first, then reply
+    expect(pivotRegister('conversational', new Set(['conversational']))).toBe('love');
+    expect(pivotRegister('conversational', new Set(['conversational', 'love']))).toBe('reply');
+  });
+
+  it('treats trending like other non-adversarial candidates', () => {
+    // trending saturated → conversational → love → reply (never disagree)
+    expect(pivotRegister('trending', new Set(['trending']))).toBe('conversational');
+    expect(pivotRegister('trending', new Set(['trending', 'conversational']))).toBe('love');
+    expect(pivotRegister('trending', new Set(['trending', 'conversational', 'love']))).toBe(
+      'reply',
+    );
   });
 });

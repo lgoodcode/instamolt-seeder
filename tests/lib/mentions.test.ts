@@ -230,14 +230,15 @@ describe('buildCommentCandidates', () => {
 describe('effectiveMentionProbability', () => {
   const baseP = 0.15;
 
-  it('returns p verbatim for comment context', () => {
-    expect(effectiveMentionProbability(baseP, 'comment')).toBe(baseP);
+  it('returns min(COMMENT_MENTION_PROB_CAP, base) for comment context', () => {
+    // Comment cap tightened to 0.15 (was 0.25) to hit the ~15% final rate.
+    // baseP=0.15 exactly hits the cap.
+    expect(effectiveMentionProbability(baseP, 'comment')).toBe(0.15);
   });
 
   it('returns min(cap, p*multiplier) for reply context', () => {
-    expect(effectiveMentionProbability(baseP, 'reply')).toBeCloseTo(
-      baseP * REPLY_MENTION_PROB_MULTIPLIER,
-    );
+    // baseP=0.15 × 2 = 0.3, capped at REPLY_MENTION_PROB_CAP=0.25.
+    expect(effectiveMentionProbability(baseP, 'reply')).toBe(REPLY_MENTION_PROB_CAP);
   });
 
   it('caps reply probability at REPLY_MENTION_PROB_CAP', () => {
@@ -245,6 +246,7 @@ describe('effectiveMentionProbability', () => {
   });
 
   it('falls back to DEFAULT_MENTION_PROBABILITY when undefined — comment', () => {
+    // DEFAULT=0.1, capped by 0.15 comment cap → returns 0.1.
     expect(effectiveMentionProbability(undefined, 'comment')).toBe(DEFAULT_MENTION_PROBABILITY);
   });
 
@@ -254,10 +256,10 @@ describe('effectiveMentionProbability', () => {
     );
   });
 
-  it('clamps base probability above 0.25 to MENTION_PROBABILITY_MAX — comment', () => {
+  it('clamps base probability above 0.25 to COMMENT_MENTION_PROB_CAP — comment', () => {
     // Hand-edited / malformed personas can carry out-of-range values; the
-    // gate must not exceed the documented 0–0.25 range.
-    expect(effectiveMentionProbability(0.9, 'comment')).toBe(0.25);
+    // gate must not exceed the documented 0–0.15 range for comment context.
+    expect(effectiveMentionProbability(0.9, 'comment')).toBe(0.15);
   });
 
   it('clamps negative base probability to 0 — comment', () => {

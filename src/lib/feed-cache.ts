@@ -125,10 +125,15 @@ export async function writeFeedCacheFile(path: string, cache: FeedCacheFile): Pr
 
 // --- LiveFeedCache: in-memory wrapper with engagement tracking + freshness ---
 
-const FRESHNESS_BONUS_MS = 2 * 3600_000; // Posts < 2h old get 2x weight
-const FRESHNESS_NEUTRAL_MS = 6 * 3600_000; // Posts 2-6h old get 1x weight
-const FRESHNESS_PENALTY_FACTOR = 0.5; // Posts > 6h old get 0.5x weight
-const CACHE_EVICTION_MAX_AGE_MS = 12 * 3600_000; // Evict posts > 12h old
+// Freshness weighting — retuned for more aggressive recency bias matching the
+// 3-min cache refresh cadence. Fresh posts (<1h) now get a 3x boost instead
+// of 2x, stale posts (>3h) get a 0.2x penalty instead of 0.5x, and the cache
+// evicts at 6h instead of 12h so dead content rolls off faster.
+const FRESHNESS_BONUS_MS = 1 * 3600_000; // Posts < 1h old get 3x weight
+const FRESHNESS_NEUTRAL_MS = 3 * 3600_000; // Posts 1-3h old get 1x weight
+const FRESHNESS_BONUS_FACTOR = 3.0; // Freshness bonus multiplier
+const FRESHNESS_PENALTY_FACTOR = 0.2; // Posts > 3h old get 0.2x weight
+const CACHE_EVICTION_MAX_AGE_MS = 6 * 3600_000; // Evict posts > 6h old
 
 /**
  * In-memory wrapper around the on-disk `FeedCacheFile`. Adds:
@@ -168,7 +173,7 @@ export function hasEngaged(cache: LiveFeedCache, agentname: string, postId: stri
  */
 function freshnessMultiplier(post: RemotePost): number {
   const ageMs = Date.now() - Date.parse(post.created_at);
-  if (ageMs < FRESHNESS_BONUS_MS) return 2.0;
+  if (ageMs < FRESHNESS_BONUS_MS) return FRESHNESS_BONUS_FACTOR;
   if (ageMs < FRESHNESS_NEUTRAL_MS) return 1.0;
   return FRESHNESS_PENALTY_FACTOR;
 }
@@ -222,6 +227,10 @@ async function pullSource(
 ): Promise<RemotePost[]> {
   const out: RemotePost[] = [];
   let cursor: string | undefined;
+  // Rank is global across pages within a source — post #0 on page 2 still
+  // ranks below the last post on page 1 in the server's ranking. The scorer's
+  // positional-decay term consumes this.
+  let rankCounter = 0;
   for (let page = 1; page <= pages; page++) {
     let res: RemoteFeedResponse;
     if (source === 'explore') {
@@ -232,9 +241,12 @@ async function pullSource(
       res = await client.getPosts({ sort: source, page, limit });
     }
     for (const post of res.posts ?? []) {
+      const currentRank = rankCounter++;
       if (seen.has(post.id)) continue;
       seen.add(post.id);
-      out.push(post);
+      // Tag provenance — first-seen wins for both source and rank, matching
+      // the existing dedup semantics.
+      out.push({ ...post, _source: source, _sourceRank: currentRank });
     }
     if (source === 'new') {
       // Cursor-based: stop when the server doesn't hand us a next cursor.

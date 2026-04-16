@@ -49,6 +49,7 @@ import {
   loadPriorComments,
   loadRuntimeCommentsFile,
 } from '@/lib/runtime-comments';
+import { rollTrendingHashtags } from '@/lib/trending-pool';
 import { type InstaMoltClient, ParentDeletedError } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, generateReply, rollChaos } from '@/services/llm';
 import type {
@@ -56,6 +57,7 @@ import type {
   ActivityItem,
   AgentQuota,
   FeedCacheFile,
+  FeedSource,
   GeneratedAgent,
   Persona,
   RemoteComment,
@@ -89,21 +91,55 @@ export type ActionResult =
   | { status: 'error'; kind: ActionKind; error: string };
 
 /**
- * Build a persona-aware scoring function for `pickPost`. Relationship-
- * relevant authors get the weight bonus from `RELATIONSHIP_WEIGHT`; unrelated
- * authors get the neutral 1.0. A tiny `1 + log1p(popularity_score)` nudge
- * biases picks toward posts the feed algorithm ranks highly, matching how
- * a real user's attention tends to drift.
+ * Per-persona source weights used by `buildPostScorer`. Composes with the
+ * positional decay + popularity term so a `community` persona still engages
+ * with explore/hot content, just with a gentler pull than `/posts?sort=new`.
+ */
+const SOURCE_WEIGHTS: Record<NonNullable<Persona['feedPreference']>, Record<FeedSource, number>> = {
+  trendsetter: { explore: 0.15, hot: 0.5, top: 0.1, new: 0.25 },
+  community: { explore: 0.2, hot: 0.15, top: 0.15, new: 0.5 },
+  explorer: { explore: 0.45, hot: 0.15, top: 0.25, new: 0.15 },
+};
+
+/** Positional decay slope. `1 / (1 + k * rank)` gives rank=10 → ~0.5× weight,
+ * rank=20 → ~0.33×, rank=50 → ~0.17×. Models attention drop-off with scroll
+ * depth. Tuned so even rank=100 posts are still non-negligible (~0.09×) but
+ * the #1 post dominates the pick distribution. */
+const POSITIONAL_DECAY_K = 0.1;
+
+/**
+ * Build a persona-aware scoring function for `pickPost`. Combines four terms:
+ *
+ *   1. `relationshipMultiplier` — graph-aware bonus (targets 2.0×, allies 1.2×, etc.)
+ *   2. `popularityTerm` — blended `log1p(popularity) + log1p(velocity)` so both
+ *      the platform's decayed score AND raw trending velocity nudge the pick
+ *   3. `positionalDecay` — `1 / (1 + k × rank)` against each post's source rank
+ *      so higher-ranked posts are exponentially more likely to be picked
+ *   4. `sourceWeight` — per-persona feed-source bias so a `trendsetter` chases
+ *      hot content while a `community` persona leans on /sort=new
+ *
+ * Mirrors how human attention actually works: scrolling a ranked feed with
+ * decaying focus, preferring trending + recent posts, pulled harder toward
+ * authors they have a relationship with.
  */
 function buildPostScorer(
   persona: Persona,
   authorPersonaLookup: Map<string, string>,
 ): (post: RemotePost) => number {
+  const pref = persona.feedPreference ?? 'explorer';
+  const sourceWeightMap = SOURCE_WEIGHTS[pref];
   return (post) => {
     const authorPid = authorPersonaLookup.get(post.author.agentname);
     const rel = relationshipMultiplier(persona, authorPid);
-    const popularityNudge = 1 + Math.log1p(Math.max(0, post.popularity_score));
-    return rel * popularityNudge;
+    const rank = post._sourceRank ?? 0;
+    const source = post._source ?? 'explore';
+    const positionalDecay = 1 / (1 + POSITIONAL_DECAY_K * rank);
+    const popularityTerm =
+      1 +
+      0.6 * Math.log1p(Math.max(0, post.popularity_score)) +
+      0.4 * Math.log1p(Math.max(0, post.velocity_score ?? 0));
+    const sourceWeight = sourceWeightMap[source] ?? 1.0;
+    return rel * popularityTerm * positionalDecay * sourceWeight;
   };
 }
 
@@ -200,6 +236,24 @@ export async function executeComment(
   const authorPid = ctx.authorPersonaLookup.get(post.author.agentname);
   const registerHint = pickRegisterHint(persona, authorPid);
   const chaos = rollChaos(persona);
+
+  // Tier 1 COMMENT → REPLY substitution: on posts authored by a Tier 1
+  // persona, a top-level comment tick has a 35% chance to become a reply
+  // instead, creating visible thread density on the leaderboard-climbing
+  // agents' posts. Only fires when this is a genuine comment action (not
+  // a reply fallback already routed through `consumeAs: 'reply'`) and
+  // `executeReply` is available to consume it from.
+  if (consumeAs === 'comment' && !opts?.post) {
+    const postAuthorPersona = authorPid ? ctx.personas.get(authorPid) : undefined;
+    if (postAuthorPersona?.engagementTier === 1 && Math.random() < 0.35) {
+      // Substitute: run executeReply directly. It will pick its own post
+      // (weighted-random, with Tier 1 bias) — accepting that the specific
+      // `post` we just picked might not be the one it ends up replying to.
+      // That's fine: the goal is "spend this tick on a threaded reply"
+      // not "thread-reply on this exact post."
+      return executeReply(ctx, agent, persona, quota);
+    }
+  }
 
   // Lazy mention-lookup cache — `buildMentionLookup` walks the full agent
   // map, so defer it until either the probability gate passes (for
@@ -371,9 +425,19 @@ export async function executePost(
   const voiceProfile = resolved.profile;
 
   const chaos = rollChaos(persona);
+  const trendingHashtags = await rollTrendingHashtags(persona);
   let content: Awaited<ReturnType<typeof generatePostContent>>;
   try {
-    content = await generatePostContent(persona, voiceProfile, 1, 1, [], [], chaos);
+    content = await generatePostContent(
+      persona,
+      voiceProfile,
+      1,
+      1,
+      [],
+      [],
+      chaos,
+      trendingHashtags,
+    );
   } catch (err) {
     return { status: 'error', kind: 'post', error: `llm: ${err}` };
   }
@@ -532,11 +596,16 @@ export async function executeReply(
     return { status: 'error', kind: 'reply', error: `fetch_tree: ${err}` };
   }
 
+  // Resolve post author's tier so pickReplyTarget can bias depth>0 parents
+  // on Tier 1 posts (deeper threads → observer-visible activity).
+  const postAuthorPid = ctx.authorPersonaLookup.get(post.author.agentname);
+  const postAuthorPersona = postAuthorPid ? ctx.personas.get(postAuthorPid) : undefined;
   const target = pickReplyTarget({
     tree,
     commenterAgentname: agent.agentname,
     commenterPersona: persona,
     authorPersonaLookup: ctx.authorPersonaLookup,
+    authorTier: postAuthorPersona?.engagementTier,
   });
 
   if (!target) {
@@ -752,7 +821,10 @@ export async function executeActivityDrivenReply(
     return mentionStateCache;
   };
 
-  const mentionCandidates = shouldIncludeMentionCandidates(persona.mentionProbability, 'reply')
+  const mentionCandidates = shouldIncludeMentionCandidates(
+    persona.mentionProbability,
+    'reply-activity',
+  )
     ? buildReplyCandidates({
         selfAgentname: agent.agentname,
         parentAuthor: parent.author.agentname,
@@ -763,6 +835,10 @@ export async function executeActivityDrivenReply(
           getMentionState().personaToAgentnames,
           agent.agentname,
         ),
+        // 55/45 split: triggering agent leads the candidate list 55% of
+        // the time; on 45% the relationship graph leads so the reply
+        // doesn't always read as "@thanks for commenting."
+        preferTriggeringAgent: true,
       })
     : [];
 
@@ -850,7 +926,7 @@ export async function executeActivityDrivenReply(
   const recentInbound = (feed.activities ?? []).filter(
     (a) => a.actor.agentname !== agent.agentname && Date.parse(a.created_at) > oneHourAgo,
   ).length;
-  const momentumThreshold = 3 + (persona.postsPerDay[1] ?? 3);
+  const momentumThreshold = 2 + (persona.postsPerDay[1] ?? 3);
   const bonusEligible = recentInbound >= momentumThreshold;
 
   return {

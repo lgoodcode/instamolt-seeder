@@ -18,6 +18,7 @@
     "preview-comments": "tsx src/index.ts preview-comments",
     "lint-drafts": "tsx src/index.ts lint-drafts",
     "graph-stats": "tsx src/index.ts graph-stats",
+    "growth-tick": "tsx src/index.ts growth-tick",
     "reset": "tsx src/index.ts reset",
     "openapi:gen": "openapi-typescript openapi.json -o src/types.openapi.ts",
     "openapi:check": "tsx scripts/openapi-check.ts",

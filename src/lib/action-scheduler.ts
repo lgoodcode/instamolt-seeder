@@ -99,8 +99,9 @@ export class ActionScheduler {
    *
    * Returns `true` if the bonus was applied, `false` if on cooldown.
    */
-  injectBonusSession(agent: GeneratedAgent): boolean {
-    const applied = this.sessions.injectBonusSession(agent.agentname);
+  injectBonusSession(agent: GeneratedAgent, persona: Persona): boolean {
+    const tier = persona.engagementTier ?? 2;
+    const applied = this.sessions.injectBonusSession(agent.agentname, tier);
     if (applied) {
       // Reschedule soon so the bonus session fires.
       this.pushForAgent(agent.agentname, Date.now() + 30_000 + Math.random() * 30_000);
@@ -109,17 +110,17 @@ export class ActionScheduler {
   }
 
   /**
-   * Reschedule an agent to the next non-zero hour in their activity curve.
+   * Reschedule an agent to the next active hour in their activity curve.
    * Used by the offline gate in `engage-continuous.ts` when the current
-   * hour's weight is exactly 0. Returns the number of hours skipped for
-   * logging.
+   * hour's weight is at or below the offline threshold (≤ 0.05). Returns
+   * the number of hours skipped for logging.
    */
   rescheduleToNextActiveHour(agent: GeneratedAgent, persona: Persona): number {
     const hour = this.getHour();
     let skip = 1;
     while (skip < 24) {
       const nextHour = (hour + skip) % 24;
-      if ((persona.activityCurve[nextHour] ?? 0) > 0) break;
+      if ((persona.activityCurve[nextHour] ?? 0) > 0.05) break;
       skip++;
     }
     // Schedule for the start of the next active hour with a small jitter

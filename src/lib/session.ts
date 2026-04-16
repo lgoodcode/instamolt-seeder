@@ -22,11 +22,18 @@ import type { Persona } from '@/types';
 
 // ── Defaults ────────────────────────────────────────────────────────────
 
-/** Default session size when persona doesn't override. */
-const DEFAULT_SESSION_SIZE: [number, number] = [3, 8];
+/** Default session size when persona doesn't override. Tripled from [3, 8] to
+ * support higher engagement density — paired with tighter fleet pacing and
+ * shorter idle gaps so agents spend more wall-clock time in-session. */
+const DEFAULT_SESSION_SIZE: [number, number] = [10, 22];
 
-/** Default idle gap between sessions (ms) when persona doesn't override. */
-const DEFAULT_IDLE_GAP_MS: [number, number] = [2 * 60 * 60_000, 6 * 60 * 60_000]; // 2–6 hours
+/** Default idle gap between sessions (ms). Halved from [2h, 6h] → [1h, 3h].
+ * Idle gap cap also drops 12h → 6h (applied in computeNextDelay). */
+const DEFAULT_IDLE_GAP_MS: [number, number] = [1 * 60 * 60_000, 3 * 60 * 60_000];
+
+/** Maximum idle gap even under off-peak curve scaling. Was 12h; now 6h so
+ * low-activity overnight hours still cycle agents through sessions. */
+const IDLE_GAP_CAP_MS = 6 * 60 * 60_000;
 
 /** Inter-action gap within a session (ms). Short — the agent is "online." */
 const SESSION_ACTION_GAP_MS: [number, number] = [30_000, 180_000]; // 30s–3min
@@ -34,8 +41,16 @@ const SESSION_ACTION_GAP_MS: [number, number] = [30_000, 180_000]; // 30s–3min
 /** Retry gap when an idle agent fails the session-start roll (ms). */
 const IDLE_RETRY_GAP_MS: [number, number] = [30 * 60_000, 60 * 60_000]; // 30–60 min
 
-/** Minimum hours between bonus sessions for the same agent. */
-const BONUS_SESSION_COOLDOWN_HOURS = 2;
+/** Minimum hours between bonus sessions for the same agent. Was 2h; now 30min
+ * to match the new higher engagement density. Combined with the per-day cap
+ * below this prevents runaway bonus loops on popular (Tier 1) agents. */
+const BONUS_SESSION_COOLDOWN_HOURS = 0.5;
+
+/** Hard cap on bonus sessions per agent per rolling 24h window. Prevents
+ * compounding bonuses on Tier 1 agents whose posts trigger constant activity
+ * momentum triggers. Rolling window, not calendar-day reset. */
+const MAX_BONUS_SESSIONS_PER_DAY = 4;
+const BONUS_SESSION_WINDOW_MS = 24 * 60 * 60_000;
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -48,6 +63,9 @@ export interface SessionState {
   /** When the last bonus session was injected (epoch ms). Used to enforce
    * the per-agent cooldown that prevents runaway feedback loops. */
   lastBonusAt?: number;
+  /** Rolling 24h window of bonus-session timestamps for daily-cap enforcement.
+   * Trimmed lazily on each read; capped at MAX_BONUS_SESSIONS_PER_DAY entries. */
+  bonusTimestamps?: number[];
 }
 
 // ── Session Manager ─────────────────────────────────────────────────────
@@ -81,8 +99,19 @@ export class SessionManager {
    */
   computeNextDelay(agentname: string, persona: Persona, curveWeight: number): number {
     const s = this.getState(agentname);
-    const [sizeMin, sizeMax] = persona.sessionSize ?? DEFAULT_SESSION_SIZE;
-    const [idleMin, idleMax] = persona.idleGapMs ?? DEFAULT_IDLE_GAP_MS;
+    const tier = persona.engagementTier ?? 2;
+    // Tier 1 agents get bigger sessions (1.4× on both min + max); Tier 3
+    // agents shrink to 0.6×. Tier 3 also gets 1.5× longer idle gaps so the
+    // long tail stays quiet. Tier 1 idle gap unchanged — momentum bonus sessions
+    // (cap 4/day) are the Tier 1 engagement lever, not shorter idle.
+    const tierSessionMult = tier === 1 ? 1.4 : tier === 3 ? 0.6 : 1.0;
+    const tierIdleMult = tier === 3 ? 1.5 : 1.0;
+    const [baseSizeMin, baseSizeMax] = persona.sessionSize ?? DEFAULT_SESSION_SIZE;
+    const sizeMin = Math.max(1, Math.round(baseSizeMin * tierSessionMult));
+    const sizeMax = Math.max(sizeMin, Math.round(baseSizeMax * tierSessionMult));
+    const [baseIdleMin, baseIdleMax] = persona.idleGapMs ?? DEFAULT_IDLE_GAP_MS;
+    const idleMin = baseIdleMin * tierIdleMult;
+    const idleMax = baseIdleMax * tierIdleMult;
 
     if (s.status === 'in_session') {
       // Decrement first: we're computing the gap that follows an action
@@ -100,10 +129,11 @@ export class SessionManager {
       s.actionsRemaining = 0;
       s.sessionStartedAt = undefined;
       // Idle gap scaled inversely by curve weight: peak → shorter idle,
-      // off-peak → longer idle.
+      // off-peak → longer idle. Cap prevents a dead overnight agent from
+      // vanishing from the scheduler for half a day.
       const scale = 1 / Math.max(curveWeight, 0.05);
       const baseIdle = randomBetween(idleMin, idleMax);
-      return Math.min(baseIdle * scale, 12 * 60 * 60_000); // cap at 12h
+      return Math.min(baseIdle * scale, IDLE_GAP_CAP_MS);
     }
 
     // Currently idle — roll to start a new session.
@@ -128,25 +158,39 @@ export class SessionManager {
   /**
    * Inject a bonus session for an agent that's receiving high inbound
    * engagement. If the agent is idle, transitions to a small session
-   * (2–4 actions). If already in session, extends by 1–2 actions.
+   * (4–8 actions). If already in session, extends by 1–2 actions.
    *
-   * Returns `true` if the bonus was applied, `false` if on cooldown.
-   * Rate-limited to one bonus per `BONUS_SESSION_COOLDOWN_HOURS`.
+   * Three gates (first-match returns false):
+   *   1. Per-agent cooldown — one bonus per `BONUS_SESSION_COOLDOWN_HOURS`,
+   *      shortened for Tier 1 agents (×1.5 effective rate = cooldown / 1.5)
+   *      so the leaderboard-climbing personas can react to momentum faster.
+   *   2. Rolling 24h cap — `MAX_BONUS_SESSIONS_PER_DAY` total bonuses in the
+   *      last 24h. Applies equally to all tiers — prevents compounding
+   *      runaway on Tier 1 agents with constant inbound engagement.
    */
-  injectBonusSession(agentname: string): boolean {
+  injectBonusSession(agentname: string, tier: 1 | 2 | 3 = 2): boolean {
     const s = this.getState(agentname);
     const now = Date.now();
 
-    // Cooldown check.
-    if (s.lastBonusAt && now - s.lastBonusAt < BONUS_SESSION_COOLDOWN_HOURS * 60 * 60_000) {
+    // Gate 1: cooldown check. Tier 1 agents cool down 1.5× faster.
+    const cooldownMs = (BONUS_SESSION_COOLDOWN_HOURS * 60 * 60_000) / (tier === 1 ? 1.5 : 1.0);
+    if (s.lastBonusAt && now - s.lastBonusAt < cooldownMs) {
+      return false;
+    }
+
+    // Gate 2: rolling 24h cap. Trim stale entries, then check count.
+    const cutoff = now - BONUS_SESSION_WINDOW_MS;
+    s.bonusTimestamps = (s.bonusTimestamps ?? []).filter((t) => t >= cutoff);
+    if (s.bonusTimestamps.length >= MAX_BONUS_SESSIONS_PER_DAY) {
       return false;
     }
 
     s.lastBonusAt = now;
+    s.bonusTimestamps.push(now);
 
     if (s.status === 'idle') {
       s.status = 'in_session';
-      s.actionsRemaining = randomInt(2, 4);
+      s.actionsRemaining = randomInt(4, 8);
       s.sessionStartedAt = now;
     } else {
       // Already in session — extend it.

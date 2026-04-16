@@ -10,6 +10,13 @@ const fsState = vi.hoisted(() => ({
 }));
 
 vi.mock('node:fs/promises', () => ({
+  access: vi.fn(async (path: string) => {
+    if (!fsState.files.has(path)) {
+      const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
+      err.code = 'ENOENT';
+      throw err;
+    }
+  }),
   readFile: vi.fn(async (path: string) => {
     const content = fsState.files.get(path);
     if (content === undefined) {
@@ -186,6 +193,7 @@ const quotaMocks = vi.hoisted(() => ({
   postsInLastHour: vi.fn(() => 0),
   consume: vi.fn(),
   persistQuota: vi.fn(async () => {}),
+  quotaFilePath: vi.fn((agentname: string) => `output/agents/${agentname}/quota.json`),
 }));
 vi.mock('@/lib/quota', () => quotaMocks);
 
@@ -219,6 +227,35 @@ const growthCmdMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/commands/generate', () => ({ generate: growthCmdMocks.generate }));
 vi.mock('@/commands/publish', () => ({ publish: growthCmdMocks.publish }));
+
+// ---------------- follow-burst mock (pickBurstTargets is a no-op under test) ----------------
+//
+// The real helper reads the full persona map + sorts the feed cache. Under
+// test the mock returns an empty list so scheduler enrollment doesn't fire
+// any burst-follow side effects the growth-tick-era tests don't expect.
+
+const followBurstMocks = vi.hoisted(() => ({
+  pickBurstTargets: vi.fn(() => [] as Array<{ agentname: string; pool: 'A' | 'B' | 'C' }>),
+}));
+vi.mock('@/lib/follow-burst', () => followBurstMocks);
+
+// ---------------- child_process mock (engage-continuous now spawns `pnpm growth-tick`) ----------------
+//
+// Without this the real spawn fires during growth-tick tests, which hangs the
+// worker (detached child never resolves, tests never finish → OOM). The mock
+// tracks calls so tests can assert on the spawn args instead of the old
+// generate/publish direct-call shape.
+
+const childProcessMocks = vi.hoisted(() => {
+  const spawn = vi.fn((..._args: unknown[]) => ({
+    stdout: { on: vi.fn() },
+    stderr: { on: vi.fn() },
+    on: vi.fn(),
+    unref: vi.fn(),
+  }));
+  return { spawn };
+});
+vi.mock('node:child_process', () => ({ spawn: childProcessMocks.spawn }));
 
 // ---------------- imports ----------------
 
@@ -474,8 +511,8 @@ describe('engage-continuous', () => {
     expect(likeEvent).toBeDefined();
   });
 
-  it('offline gate: zero activityCurve for current hour skips dispatch and reschedules to next active hour', async () => {
-    // Build an offline curve whose zero slot is the current hour in the
+  it('offline gate: near-zero activityCurve (≤ 0.05) for current hour skips dispatch and reschedules to next active hour', async () => {
+    // Build an offline curve whose near-zero slot is the current hour in the
     // seeder timezone. We read the hour via the same Intl formatter the
     // source uses so this test is independent of the local clock.
     const currentHour = Number.parseInt(
@@ -486,7 +523,7 @@ describe('engage-continuous', () => {
       }).format(new Date()),
       10,
     );
-    const offlineCurve = Array.from({ length: 24 }, (_, i) => (i === currentHour ? 0 : 0.5));
+    const offlineCurve = Array.from({ length: 24 }, (_, i) => (i === currentHour ? 0.04 : 0.5));
     personaMocks.loadPersonas.mockResolvedValue(
       new Map([['test-persona', makePersona('test-persona', { activityCurve: offlineCurve })]]),
     );
@@ -690,7 +727,12 @@ describe('engage-continuous', () => {
     expect(growthMocks.computeBatchSize).not.toHaveBeenCalled();
   });
 
-  it('growth tick calls publish with yes:true so the engage-continuous target confirmation propagates', async () => {
+  it('growth tick spawns `pnpm growth-tick` as a detached child process (was inline generate+publish)', async () => {
+    // Prior behavior: growth tick awaited `generate()` + `publish()` inline,
+    // blocking the engage loop for the full run (~5 min at scale). New
+    // behavior: spawn a detached `pnpm growth-tick` child so the loop never
+    // blocks. Target confirmation propagates via the `--yes` flag equivalent
+    // inside the child (growth-tick runs with `child: true` / `yes: true`).
     primeAgent('alpha');
     fsState.dirEntries.set('./output/agents', ['alpha']);
 
@@ -715,8 +757,21 @@ describe('engage-continuous', () => {
       agentRescanIntervalMs: -1,
     });
 
-    expect(growthCmdMocks.generate).toHaveBeenCalled();
-    expect(growthCmdMocks.publish).toHaveBeenCalledWith(expect.objectContaining({ yes: true }));
+    // spawn called with: 'pnpm', ['growth-tick', '--target', N, ...], opts.
+    expect(childProcessMocks.spawn).toHaveBeenCalled();
+    const spawnCall = childProcessMocks.spawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { detached?: boolean; env?: Record<string, string> },
+    ];
+    expect(spawnCall[0]).toBe('pnpm');
+    expect(spawnCall[1]).toEqual(expect.arrayContaining(['growth-tick', '--target']));
+    // Confirm detached + GROWTH_TICK_CHILD env flag for the child.
+    expect(spawnCall[2].detached).toBe(true);
+    expect(spawnCall[2].env?.GROWTH_TICK_CHILD).toBe('1');
+    // Inline generate/publish no longer fires from engage-continuous.
+    expect(growthCmdMocks.generate).not.toHaveBeenCalled();
+    expect(growthCmdMocks.publish).not.toHaveBeenCalled();
   });
 
   it('SIGINT sets stopRequested, exits cleanly, flushes stats, and removes listener', async () => {

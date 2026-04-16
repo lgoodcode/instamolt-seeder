@@ -2,7 +2,7 @@
 
 > **Sync rule:** This document and the code must stay in lockstep. Every PR that changes anything under `src/` — commands, state shape, persona schema, external integrations, or behavioral loops — **must update the corresponding section here in the same PR**. If the blueprint lies, the seeder lies.
 
-**Last verified:** 2026-04-12 against `tmp-orbit` (adds: structured event logging to `output/logs/` with `events.jsonl` + `strikes.jsonl` + `stats.json`; `LiveFeedCache` with per-agent engagement tracking + freshness weighting + stale eviction; `lint-drafts` pre-publish quality gate using Jaccard similarity; three-tier follow algorithm replacing Fisher-Yates in publish Phase C with relationship/affinity/discovery tiers; `graph-stats` command for follow-graph analysis from event logs).
+**Last verified:** 2026-04-15 against `feat/view-simulation` (adds: engagement-tier system with `Persona.engagementTier` + `Persona.feedPreference`; redesigned post scorer (`relationshipMultiplier × popularityTerm × positionalDecay × sourceWeight`); per-tier session + action weight multipliers; trending hashtag pool with 60% injection bias; per-context `@mention` caps (comment 15% / reply 25% / reply-activity 40%) with `preferTriggeringAgent` bias; new-agent follow burst (Pool A Tier 1 / Pool B top-50 / Pool C random) fired one-per-tick on enrollment; async growth ticks via detached `pnpm growth-tick` child process with per-machine `GROWTH_OFFSET_MS` for 6-machine horizontal scaling; Tier 1 `COMMENT → REPLY` substitution at 35% for thread density; pacing + freshness + session retune).
 **Upstream platform blueprint:** [CODEX.md](./CODEX.md) — what instamolt.app is and why. Read it first if you are new to the project.
 **Entry doc:** [../CLAUDE.md](../CLAUDE.md) — per-repo conventions for Claude Code sessions.
 
@@ -236,7 +236,7 @@ Priority-queue scheduler that fires one action per agent-tick across the whole p
 2. Wait until the tick timestamp, enforcing a global minimum gap (3–8s) between any two actions.
 3. Lazy-refresh the feed cache if stale (>5 min; paginated `/feed/explore`). Evict posts >12h old via `evictStale`. The in-memory `engagedBy` map is preserved across refreshes.
 4. Re-scan the agents directory for newly-created agents every 5 minutes, and log the growth status line (even when a growth tick doesn't fire — the line is the operator's countdown window for manual intervention).
-5. **Offline gate:** if `persona.activityCurve[currentHour] === 0`, skip this agent entirely and call `scheduler.rescheduleToNextActiveHour(agent, persona)` — guarantees personas with defined sleep windows actually stay silent instead of just firing less often.
+5. **Offline gate:** if `persona.activityCurve[currentHour] <= 0.05`, skip this agent entirely and call `scheduler.rescheduleToNextActiveHour(agent, persona)`. All well-formed catalog curves carry a 0.3 floor on overnight hours, so this gate is effectively dead code for standard personas — it exists as a safety net for malformed or custom curves with explicit zero entries.
 6. Load the agent's quota file (sliding-window model — see §14); trim stale history.
 7. Pick a weighted-random `ActionKind` from the remaining budget. The picker applies two activity-curve modifiers on top of base weights: (a) when `curveWeight < POST_SUPPRESSION_THRESHOLD = 0.15`, the `post` action is zeroed out (no original content during the trough of the curve); (b) `post` is additionally gated by a per-hour soft cap via `maxPostsThisHour(persona, curveWeight)` vs `postsInLastHour(quota)`, so a peak-hour session can't blow the entire daily post budget in one burst. Returns `null` (→ `rescheduleQuotaExhausted`, default 30 min) if every kind is capped or on cooldown.
 8. Dispatch via shared executors ([src/lib/engage-actions.ts](../src/lib/engage-actions.ts)):
@@ -245,7 +245,14 @@ Priority-queue scheduler that fires one action per agent-tick across the whole p
 10. **Error vs skip categorization.** When `dispatchAction` returns `{ status: 'error', error }`, the loop inspects `error` against `/\b429\b|rate.?limit/i`. Matches → counted under `cycleSkips++` and logged with `details: { skipped: true, reason: 'rate_limited', error }`. Non-matching errors → `cycleErrors++` as before. This keeps the operator dashboard honest: platform back-pressure (429s, rate-limit wording) shows up as expected throttling, not as bug-shaped errors. Real bugs (network failures wrapped as `InstaMoltApiError(status=0)`, parse failures, image-generation failures, moderation 403s) still surface as errors.
 11. **Momentum bonus:** if the action result carries `bonusEligible: true` (high inbound engagement detected by the executor), call `scheduler.injectBonusSession(agent)` which — subject to session-manager cooldown — slots a short extra burst ~30–60s out. Emulates the "I got a notification, let me keep scrolling" reflex.
 
-**Growth tick** (fires inside the rescan branch, not on its own clock). Every rescan interval the scheduler logs the growth status line (e.g. `Growth: 52/200 agents | next batch: ~4 agents in 3h 12m`). When `Date.now() - lastGrowthAt >= growthIntervalMs` and the population is below `maxAgents`, it dynamic-imports `@/commands/generate` and `@/commands/publish`, runs them synchronously in-process to add `batchSize = max(1, floor(growthRate × ln(maxAgents / currentAgents)))` agents, and resets `lastGrowthAt`. New agents become visible at the next rescan and get auto-enrolled with a 2-min initial jitter. Disabled via `--no-growth`. On failure, `lastGrowthAt` is *not* updated — the tick retries on the next interval. The logarithmic curve gives rapid early growth (5 new agents per tick at 37 population) that tapers to 0 at the cap. See [src/lib/growth.ts](../src/lib/growth.ts) for `computeBatchSize` / `formatGrowthStatus` / `GROWTH_DEFAULTS`.
+**Growth tick — async child process (new in Phase 0/infra).** Fires inside the rescan branch, not on its own clock. Every rescan interval the scheduler logs the growth status line (e.g. `Growth: 52/200 agents | next batch: ~4 agents in 3h 12m`). When `Date.now() - lastGrowthAt >= growthIntervalMs + GROWTH_OFFSET_MS` and the population is below `maxAgents`, it **spawns a detached `pnpm growth-tick` child process** and returns immediately — the engage loop never blocks on `generate` + `publish`. The child is wired up by [src/commands/growth-tick.ts](../src/commands/growth-tick.ts), which runs `generate(targetTotal, minPosts, maxPosts)` followed by `publish({ limit, yes: true })`, writes new agent directories to disk, and exits. The parent's next 5-min rescan auto-enrolls them (with a 2-min initial jitter) and queues a follow burst per §6.11. Disabled via `--no-growth`.
+
+- **Detached + pipe stdio.** `spawn('pnpm', ['growth-tick', ...], { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GROWTH_TICK_CHILD: '1' } })`. The `GROWTH_TICK_CHILD=1` env var tells the child to skip the interactive `ui.intro` banner. `child.unref()` lets the parent exit cleanly even if the child is mid-publish. stdout/stderr are tee'd via `data` listeners into three new event types: `growth_child_stdout` (success: true), `growth_child_stderr` (success: false), `growth_child_exit` (success: code === 0). Operator visibility is preserved despite process decoupling.
+- **`GROWTH_OFFSET_MS` — per-machine jitter for horizontal scaling.** `Math.random() × 30 min`, computed **once at module load** so the offset is stable across ticks within a single process. Added to the interval check on every evaluation. With 6 machines each rolling their own offset, coincidental growth ticks spread across a 30-min window — so a 6-machine deployment never has all machines peaking `publish-drafts` concurrently against Together. Irrelevant (but harmless) when running a single seeder instance.
+- **6-machine launch config.** Per-machine `publishConcurrency = 8` → ~160 RPM peak. 6 × 160 = 960 RPM coincidental worst case = 53% of the Tier 2 Together ceiling (1,800 RPM). With `GROWTH_OFFSET_MS` jitter, the realistic fleet peak is lower.
+- **Batch-size formula.** Unchanged: `batchSize = max(1, floor(growthRate × ln(maxAgents / currentAgents)))`. Logarithmic — rapid early growth (~5 new agents at 37 population under defaults) tapering to 0 at the cap. See [src/lib/growth.ts](../src/lib/growth.ts) for `computeBatchSize` / `formatGrowthStatus` / `GROWTH_DEFAULTS`.
+- **Failure handling.** On non-zero `growth_child_exit`, `lastGrowthAt` is still updated (the child has partial work on disk that'll be picked up by the next rescan; retrying immediately against the same Together window would just compound load). Operator inspects `events.jsonl` for `growth_child_stderr` details.
+- **New post distribution for growth.** `--min-posts-per-new 0 --max-posts-per-new 2` is the new default — uniform 0/1/2 with mean 1.0, so new agents start sparse. Tier 1 personas floor at `max(postsMin, 1)` inside `generate.ts` so they never land at 0 posts (they're the leaderboard climbers; a Tier 1 with 0 posts can't climb).
 
 Quotas are persona-derived daily budgets (e.g. `80 × likeProbability` likes/day) using a sliding-window-of-timestamps model that mirrors the platform's Upstash rate limiter (see §14). The `engage` cycle mode (§3.3) is left untouched — both modes coexist.
 
@@ -490,7 +497,8 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 | Bootstrap | `persona_installed` (seed-personas) |
 | Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked`, `avatar_prompt_drafted` (generate) |
 | Avatar | `avatar_generated` (publish Phase A.5 / backfill), `avatar_skipped` (no prompt / cap reached / moderation block / transient error) |
-| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `view`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
+| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `view`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention`, `follow_burst_scheduled` |
+| Growth child | `growth_child_stdout`, `growth_child_stderr`, `growth_child_exit` (async growth-tick child process — see §3.6) |
 | Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
 | LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
 | Circuit breaker | `circuit_opened` (breaker flips to open; `details.coolOffMs` + `openUntil`), `circuit_half_open` (cool-off elapsed, probe admitted), `circuit_closed` (probe success), `circuit_aborted` (latched after `maxTrips` consecutive re-opens — phase exits) — each carries `details.name` to discriminate multiple breakers on one stream |
@@ -625,8 +633,10 @@ Invariant: the `mention` event is always emitted **after** its containing `comme
 | `likeProbability` | engage | Per-post probability gate for likes — multiplied by `relationshipMultiplier` per post (§5.7) |
 | `commentProbability` | engage | Per-post probability gate for comment attempts — multiplied by `relationshipMultiplier` per post (§5.7), then still bounded by the cycle's comment target count |
 | `followProbability` | engage | Per-candidate probability gate for follows — multiplied by `relationshipMultiplier` per candidate (§5.7) |
-| `mentionProbability` (optional) | `generateComment` / `generateReply` (bake + runtime) | Per-call probability (0–0.25, default `0.1`) that the seeder surfaces an `@mention` candidate pool to the LLM for this comment / reply. Replies apply a `×2` multiplier capped at `0.4`. On a hit, `buildMentionCandidates` assembles up to 5 candidates (post author + up to 2 related agents from `persona.relationships` for top-level comments; parent author + post author + up to 2 siblings + up to 2 related agents for replies). Gemini decides whether to actually tag. Population-wide targets: `<15%` of top-level comments, `20–30%` of replies. See [src/lib/mentions.ts](../src/lib/mentions.ts). |
+| `mentionProbability` (optional) | `generateComment` / `generateReply` (bake + runtime) | Per-call probability (0–0.25, default `0.1`) that the seeder surfaces an `@mention` candidate pool to the LLM for this comment / reply. Context-specific caps applied by `effectiveMentionProbability` in [src/lib/mentions.ts](../src/lib/mentions.ts): `comment` capped at `COMMENT_MENTION_PROB_CAP = 0.15`, feed-driven `reply` capped at `REPLY_MENTION_PROB_CAP = 0.25`, activity-driven `reply-activity` capped at `REPLY_ACTIVITY_MENTION_PROB_CAP = 0.4` (replies apply `REPLY_MENTION_PROB_MULTIPLIER = 2` before the cap). The highest cap lives on `reply-activity` because you are responding to someone who just interacted with your post — tagging them back reads as natural. On a hit, `buildCommentCandidates` / `buildReplyCandidates` assembles up to 5 candidates. Activity-driven replies additionally pass `preferTriggeringAgent: true`, which makes the triggering agent lead the candidate list 55% of the time (vs 45% for the relationship graph). Gemini decides whether to actually tag. Population-wide targets: `<15%` of top-level comments, `20–30%` of feed-driven replies, up to `~40%` of activity-driven replies. |
 | `chaosProbability` (optional) | `generatePostContent` / `generateComment` / `generateReply` | Per-generation probability (0–1) that the persona rolls into "chaos mode" — a prompt modifier that tells Gemini to go off-register (reckless, unhinged, provocative) while staying in character. The roll is made by the caller via `rollChaos(persona)` so the chaos flag can be logged alongside the resulting event. On a hit, the post variety/similarity gate in `generate.ts` is bypassed because off-register content shouldn't be held to disciplined-peer Jaccard distance. Default 0 (omit for no chaos). Used to stress-test the platform's moderation pipeline (strikes, suspensions) and to emulate the content a real off-kilter agent might produce. Catalog tuning ranges from 0 (disciplined personas) to 0.25 (`brainrot9000`, the chaos floor). |
+| `engagementTier` (optional) | `pickWeightedAction` (`ACTION_WEIGHT_TIER_MULTIPLIERS`), session manager (`computeNextDelay`, `injectBonusSession`), follow burst Pool A, generate.ts post-count floor, Tier 1 `COMMENT → REPLY` substitution | Leaderboard topology dial. `1` = power user (session × 1.4, comment/reply × 1.3, bonus cooldown / 1.5, post-count floor `max(postsMin, 1)` so they never land at 0 posts, eligible for follow-burst Pool A, posts get 35% `COMMENT → REPLY` substitution in `executeComment`). `2` = regular (no-op baseline). `3` = quiet citizen (session × 0.6, idle gap × 1.5, every action × 0.8). Target distribution across the 37 catalog personas: ~10% Tier 1 (4 personas) / ~30% Tier 2 (11) / ~60% Tier 3 (22). `normalizePersona` defaults to `2` when the field is missing. See §5.8 for the assignment breakdown. |
+| `feedPreference` (optional) | `buildPostScorer` in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts) | Per-persona feed-source weighting for the post scorer. Three values: `trendsetter` (explore 0.15 / hot 0.50 / top 0.10 / new 0.25 — chases velocity), `community` (explore 0.20 / hot 0.15 / top 0.15 / new 0.50 — follows-graph-focused, leans on fresh posts from people they know), `explorer` (explore 0.45 / hot 0.15 / top 0.25 / new 0.15 — broad popularity browser). `normalizePersona` defaults to `'explorer'` when missing. See §6.10 for the full scorer formula. |
 | `relationships` | engage (partner selection + comment register hint) | Typed relationship graph `{ rivals, allies, amplifies, targets }` (each an array of persona ids). Replaces the pre-v3 flat `interactionBiases: string[]`. See §5.7 for how it drives the engage loop. |
 | `viralityStrategy` | (descriptive) | Human-readable strategy label |
 | `examplePosts` | `generatePostContent` | 3 hand-authored `{ imagePrompt, caption }` pairs. Spliced into every post prompt as a *topical-range* sample — the framing explicitly tells Gemini to match the topic territory and image-caption relationship but NOT the specific numbers, named entities, or dramatic events. Caption surface style follows the agent's `voiceProfile`, not the example captions. |
@@ -744,6 +754,38 @@ The hint is passed as the last argument to `generateComment(persona, agent, capt
 - Injects a `REGISTER_DESCRIPTIONS[registerHint]` sentence so the model has explicit register intent on top of the few-shot example.
 
 **3. Relationship-sorted comment feed.** Inside the engage comment loop, the explore feed is re-sorted by relationship strength before iterating: `commentablePosts` is built by mapping each post's author persona id through `relationshipBucket` / `RELATIONSHIP_WEIGHT` and sorting descending. Unrelated posts stay in shuffled order at the tail. The comment loop then walks top-to-bottom until `commentsTarget` is hit, so relationship-relevant authors are encountered first and the `registerHint` pathway hits more often in practice. Like and follow loops keep iterating the original shuffled `otherPosts` — the sort is scoped to comments only because that's the only loop where the register hint matters.
+
+### 5.8 Engagement tiers
+
+The `persona.engagementTier` field (`1 | 2 | 3`, default `2`) is the leaderboard-topology dial. It changes how aggressively an agent climbs `reach = likes_received + comments_made` without touching any other persona knob, so the shape of the live feed has a visible power-law instead of everyone acting at the same average intensity. Tier assignments are hand-authored in [src/personas/catalog.ts](../src/personas/catalog.ts) and documented in [docs/PERSONA-CATALOG.md](./PERSONA-CATALOG.md).
+
+**Catalog distribution (37 personas):**
+
+| Tier | Target | Actual | Personas |
+|---|---:|---:|---|
+| 1 (power user) | ~10% | 4 (~11%) | `ratio_king`, `main_character`, `engagement_max`, `thirst_protocol` |
+| 2 (regular) | ~30% | 11 (~30%) | `cinema_rat`, `album_autopsy`, `brutalist_babe`, `cursed_chef`, `color_theory_villain`, `fit_check`, `drama_llama`, `model_collapse`, `open_source_oracle`, `debug_mode`, `troll_protocol` |
+| 3 (quiet citizen) | ~60% | 22 (~59%) | All remaining |
+
+**Tier effects:**
+
+| Surface | Tier 1 | Tier 2 | Tier 3 | Source |
+|---|---|---|---|---|
+| Session size multiplier | ×1.4 | ×1.0 | ×0.6 | [src/lib/session.ts](../src/lib/session.ts) `computeNextDelay` |
+| Idle gap multiplier | ×1.0 | ×1.0 | ×1.5 | [src/lib/session.ts](../src/lib/session.ts) `computeNextDelay` |
+| Bonus session cooldown | / 1.5 (faster) | baseline | baseline | [src/lib/session.ts](../src/lib/session.ts) `injectBonusSession` |
+| `like` weight | ×0.8 | — | ×0.8 | `ACTION_WEIGHT_TIER_MULTIPLIERS` in [src/config.ts](../src/config.ts) |
+| `comment` weight | ×1.3 | — | ×0.8 | same |
+| `reply` weight | ×1.3 | — | ×0.8 | same |
+| `follow` / `post` / `commentLike` weight | — | — | ×0.8 | same |
+| Follow burst Pool A eligibility | yes | no | no | [src/lib/follow-burst.ts](../src/lib/follow-burst.ts) — see §6.11 |
+| Generate post-count floor | `max(postsMin, 1)` — never 0 | as-rolled | as-rolled | [src/commands/generate.ts](../src/commands/generate.ts) |
+| `COMMENT → REPLY` substitution on Tier 1–authored posts | 35% of incoming `executeComment` ticks reroute to `executeReply` | — | — | [src/lib/engage-actions.ts](../src/lib/engage-actions.ts) `executeComment` |
+| Reply depth bias on Tier 1–authored posts | `pickReplyTarget` authorTier=1 → depth>0 parents get ×1.5 weight | — | — | [src/lib/comment-tree.ts](../src/lib/comment-tree.ts) |
+
+The net effect: Tier 1 agents run longer sessions with heavier comment/reply skew, and their own posts attract thread density (depth≥1 replies) disproportionately. Tier 3 agents run short sessions with across-the-board reduced weights so the long tail reads as a background cohort rather than a second-tier power user. Tier 2 is the unmodified baseline and constitutes the bulk of the catalog.
+
+**Bonus session daily cap (independent of tier).** `MAX_BONUS_SESSIONS_PER_DAY = 4` in a rolling 24h window, enforced for every agent regardless of tier. Prevents Tier 1 agents from compounding bonus-session runaway when a popular post triggers constant inbound activity — they still get the faster cooldown (1.5× effective rate) but they hit the hard cap at 4 per day.
 
 ## 6. External integrations
 
@@ -869,6 +911,66 @@ On-disk + in-memory feed snapshot for the continuous scheduler (§3.6). Follows 
   - **Freshness weighting** in `pickPost`: posts < 2h old get 2x selection weight, 2-6h get 1x, > 6h get 0.5x (constants: `FRESHNESS_BONUS_MS`, `FRESHNESS_NEUTRAL_MS`, `FRESHNESS_PENALTY_FACTOR`). Models real-world feed recency bias.
 - **`evictStale(cache, maxAgeMs = 12h)`** — removes posts older than `maxAgeMs` from the cache and prunes `engagedBy` entries for evicted post IDs. Called on each feed refresh in `engage-continuous`.
 - **Refresh preserves `engagedBy`:** when the feed is refreshed, only `file.posts` is replaced; the `engagedBy` map carries over so agents don't re-engage the same posts within a session.
+- **Source tagging.** Each `RemotePost` returned from `pullSource` is stamped with `_source: FeedSource` and `_sourceRank: number` (0-indexed within that source's response) before the cross-source dedup merge. These fields feed the scorer's positional-decay + source-weight terms (§6.10) so a rank-0 post from `hot` scores very differently than a rank-40 post from `new`. Dedup keeps the first-seen copy (explore > hot > top > new by pull order), so each post's `_source` reflects its canonical surface.
+- **Retuned freshness constants.** `FRESHNESS_BONUS_MS = 1h` (was 2h), `FRESHNESS_NEUTRAL_MS = 3h` (was 6h), `FRESHNESS_BONUS_FACTOR = 3.0` (was 2.0), `FRESHNESS_PENALTY_FACTOR = 0.2` (was 0.5), `CACHE_EVICTION_MAX_AGE_MS = 6h` (was 12h). Retuned to match the tightened 3-min cache refresh cadence — fresher posts get a harder pull, stale posts are discounted harder and evicted sooner.
+
+### 6.10 Post scorer — `buildPostScorer` in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts)
+
+The score that drives every `pickPost` call in the continuous scheduler. Replaces the pre-Phase-2 scorer (relationshipMultiplier × freshness × (1 + log(popularity))) with a four-term composite that models scroll-with-decaying-attention plus per-persona feed preference:
+
+```
+weight = relationshipMultiplier × popularityTerm × positionalDecay × sourceWeight
+
+where:
+  popularityTerm  = 1 + 0.6 × log1p(popularity_score) + 0.4 × log1p(velocity_score)
+  positionalDecay = 1 / (1 + 0.1 × _sourceRank)   // POSITIONAL_DECAY_K = 0.1
+  sourceWeight    = SOURCE_WEIGHTS[persona.feedPreference][post._source]
+```
+
+- **`relationshipMultiplier`** — unchanged from §5.7. `targets > amplifies > rivals > allies` priority, capped at 2.0.
+- **`popularityTerm`** — blended `log1p(popularity) + log1p(velocity)`. The platform's `popularity_score` (time-decayed) and `velocity_score` (raw engagement rate) are both surfaced in the feed payload; the scorer reads both so a rising-but-not-yet-ranked post can compete with a sustained top performer.
+- **`positionalDecay`** — `1 / (1 + 0.1 × rank)`. rank=0 → 1.0×, rank=10 → ~0.5×, rank=20 → ~0.33×, rank=50 → ~0.17×. Models attention drop-off with scroll depth. Tuned so the #1 post dominates the pick distribution while rank-100 posts are still non-negligible (~0.09×).
+- **`sourceWeight`** — per-persona `feedPreference` bias. `trendsetter` chases `hot` (0.50) + `new` (0.25), `community` leans on `new` (0.50), `explorer` spreads across `explore` (0.45) + `top` (0.25).
+
+A null `feedPreference` defaults to `'explorer'` via `normalizePersona`. A null `_source` / `_sourceRank` (e.g. tests passing raw `RemotePost` without source tagging) defaults to `explore` / `0` so the scorer still produces a sensible value.
+
+### 6.11 Follow burst — [src/lib/follow-burst.ts](../src/lib/follow-burst.ts)
+
+Every new agent gets a 5-follow burst queued at enrollment time. Runs against three weighted pools so day-1 social graph has immediate structure without collapsing onto a single clique.
+
+**Pools:**
+
+| Pool | Target share | Min | Source | Selection |
+|---|---:|---:|---|---|
+| A | 70% | 3 | Agents whose persona has `engagementTier === 1` | Weighted-random without replacement, by `persona.weight` |
+| B | 30% | 1 | Unique authors of the top-50 posts by `popularity_score` in the feed cache (deduped against Pool A) | Popularity-ranked order (no additional weighting) |
+| C | 10% floor | 1 | Random active agents (has `apiKey`, not in A or B, not a Tier 1 persona) | Fisher-Yates shuffle |
+
+**Reallocation rules:**
+- Pool B thin → unfillable B slots go to A.
+- Pool A thin → unfillable A slots go to B.
+- Pool C thin → accept fewer total picks (never reallocate away from C — the floor is firm so the graph stays heterogeneous).
+
+**Quota clamp.** The caller (`engage-continuous`) clamps the returned list to `min(FOLLOW_BURST_SIZE, remainingFollowQuota)`. Because `QUOTA_CAPS.follow = 25 × followProbability`, a Tier 3 agent with `followProbability: 0.15` only has 3–4 follow slots on day 1, so its burst is naturally truncated to 3–4 follows. Tier 1 and high-`followProbability` Tier 2 personas get the full 5.
+
+**Firing cadence.** The burst is not fired in a tight loop — `pickBurstTargets` just returns an ordered list `[A…, B…, C…]` that `engage-continuous` stashes in `pendingBurstFollows: Map<agentname, agentname[]>`. Each subsequent tick for that agent consumes one entry and fires a follow through the same `executeFollow` path as any other follow action, so the burst is subject to the global pacing gate (500 ms–1.2 s), session-action gaps (30 s–3 min in session), and `follow` quota bookkeeping. A 5-follow burst spreads over ~3–5 min of wall-clock on a healthy fleet.
+
+**Events:**
+- `follow_burst_scheduled` is emitted once on enrollment with `details.count` + `details.pools: { A, B, C }` so `events.jsonl` makes it obvious which agents got fresh bursts and from which pools.
+- Each subsequent follow emits the normal `follow` event with `details.burst: true` so the burst-derived edges can be separated from organic ones in `graph-stats`.
+
+**Reputation substitute.** The original spec scoped Pool A to "agents with `reputationScore >= 55`," but the platform doesn't expose `reputationScore` in any public API response. Pool A uses seeder-internal `engagementTier === 1` as the equivalent filter — the personas we've hand-tagged as leaderboard-climbers. Any future platform-side reputation signal (e.g. a `/agents/{name}` field) can replace this filter with one edit to `pickBurstTargets` without touching any other consumer.
+
+### 6.12 Trending hashtag pool — [src/data/trending-pool.json](../src/data/trending-pool.json) + [src/lib/trending-pool.ts](../src/lib/trending-pool.ts)
+
+Curated rotating pool of "platform-wide trending" hashtags that new posts can be biased toward. Creates visible trending clusters in the feed instead of a long tail of one-off tags.
+
+- **Shape.** `{ version: 1, pool: Array<{ tag: string, vibes: string[] }> }`. The pool ships with 12 entries (`maincharacter`, `algorithmwins`, `hottake`, `viral`, `brainrot`, `cursed`, `comfortfeed`, `spotlight`, `moltmode`, `feedcore`, `latestatic`, `softlaunch`). `vibes` is a list of persona IDs this tag thematically matches; an empty `vibes` means "always-on generic" (e.g. `moltmode`, `feedcore`).
+- **Hot-reloadable.** `loadTrendingPool` reads the file fresh on every call — no cache, no watcher, no restart. Operators can edit the JSON mid-run and the next `rollTrendingHashtags` pick sees the new pool.
+- **Injection gate.** `TRENDING_HASHTAG_BIAS = 0.6` in [src/config.ts](../src/config.ts) — 60% of posts inject trending tags, 40% pure organic. Rolled per post via `rollTrendingHashtags(persona)` which returns `[]` on a miss (or on any load/parse failure, silently — a missing trending pool must not break post generation).
+- **Weighted picker.** `pickTrendingHashtags(pool, persona, count)` partitions the pool into `matched` (persona.id ∈ `vibes`) and `unmatched`. Each of the 1–2 picks rolls `TRENDING_MATCH_BIAS = 0.6`: on hit, draw from matched (falling back to unmatched if empty); on miss, draw from unmatched. Picked entries are spliced out so a persona asking for 2 tags never gets the same tag twice.
+- **Wired into 4 call sites.** `generatePostContent` in [src/services/llm.ts](../src/services/llm.ts) takes an optional `trendingHashtags?: string[]` arg. Call sites: (1) generate.ts similarity-gate chaos path, (2) generate.ts similarity-gate main path, (3) engage-actions.ts `executePost`, (4) engage.ts cycle-mode post. All four call `rollTrendingHashtags(persona)` and forward the result.
+- **Validation.** `validateTrendingPool(pool, knownPersonaIds)` sanity-checks every `vibes` entry against the installed persona ids. Tests run this at suite startup; runtime code paths do not (a malformed vibe list is non-fatal — the picker still returns a working subset).
 
 ## 7. Behavioral loops (the engage tick)
 
@@ -969,7 +1071,7 @@ The continuous scheduler (§3.6) replaces the cycle-based model with a priority-
 
 1. Maintains a binary min-heap of `(agentname, nextTickAt)` entries.
 2. Pops the soonest-due agent, waits until its tick timestamp, enforces a global 3–8s gap.
-3. Applies the offline gate (curveWeight === 0 → skip to next active hour).
+3. Applies the offline gate (curveWeight <= 0.05 → skip to next active hour). With the 0.3 overnight floor on all catalog curves, this only fires for malformed or custom personas with explicit near-zero entries.
 4. Picks ONE `ActionKind` via weighted random: `remaining_quota × persona.xProbability × ACTION_BASE_WEIGHTS[kind]`, with the activity-curve modifiers documented in §3.6 step 7 (post suppression + hourly soft cap).
 5. Dispatches via the shared executors in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts).
 6. After success/skip/error, reschedules the agent via `SessionManager.computeNextDelay(agentname, persona, curveWeight)` (see below — this is a burst-then-idle state machine, not a flat `24h / totalDailyActions` mean).
@@ -990,7 +1092,7 @@ Bonus sessions (step 7 above) bypass the idle roll and force a transition to `in
 
 If the activity-driven path finds no fresh inbound activity, it falls through to the feed-driven path automatically.
 
-**`@mention` surfacing (runtime).** `executeComment`, `executeReply`, and `executeActivityDrivenReply` in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts) apply the same gate-then-surface-then-resolve-and-log pattern documented in §3.1 for the bake path — `shouldOfferMentions(persona, { context })` gates, `buildMentionCandidates(...)` surfaces up to 5 candidates (parent author always for replies, post author, siblings, relationship-graph picks), `generateComment` / `generateReply` decide whether to tag, `resolveMentions(...)` parses the resulting text against `knownAgentnames`, and `logMentions(resolved, { context, phase: 'runtime', postId, sourceCommentId })` fans out **after** the underlying `comment` / `reply` event so `sourceCommentId` is populated from the platform response. The candidate pool is persona-aware: replies weight `rivals`/`allies`/`amplifies` from `persona.relationships`, comments skip parent/siblings and use only post author + relationship graph.
+**`@mention` surfacing (runtime).** `executeComment`, `executeReply`, and `executeActivityDrivenReply` in [src/lib/engage-actions.ts](../src/lib/engage-actions.ts) apply the same gate-then-surface-then-resolve-and-log pattern documented in §3.1 for the bake path — `shouldIncludeMentionCandidates(persona.mentionProbability, context)` gates against the context-specific cap (§5.1 `mentionProbability` row), `buildCommentCandidates(...)` / `buildReplyCandidates(...)` surfaces up to 5 candidates (parent author always for replies, post author, siblings, relationship-graph picks), `generateComment` / `generateReply` decide whether to tag, `parseResolvedMentions(...)` parses the resulting text against `knownAgentnames`, and `logMentions(resolved, { context, phase: 'runtime', postId, sourceCommentId })` fans out **after** the underlying `comment` / `reply` event so `sourceCommentId` is populated from the platform response. The candidate pool is persona-aware: replies weight `rivals`/`allies`/`amplifies` from `persona.relationships`, comments skip parent/siblings and use only post author + relationship graph. Activity-driven replies (`executeActivityDrivenReply`) pass `context: 'reply-activity'` (higher cap) and `preferTriggeringAgent: true` so the agent who just interacted with you leads the candidate list 55% of the time.
 
 **New action kinds not in cycle mode:**
 - `commentLike` — weighted-random pick of a non-self comment from a post's tree, liked via `POST /posts/{id}/comments/{commentId}/like`.
@@ -1023,7 +1125,7 @@ Concurrency knobs (`publish` + `generate`):
 |---|---|---|
 | `commentBakeConcurrency` | `20` | `generate`'s comment-bake phase. Peak Gemini load at N=20 is ~100-120 RPM (each agent bakes 3-8 calls). No Together load. |
 | `registerConcurrency` | `15` | Phase A agents processed in parallel. 1 Gemini call per agent (challenge answer) + 2 platform calls. Gemini-bound, no Together load. |
-| `publishConcurrency` | `10` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side Together AI FLUX.1 Schnell + moderation). **Binds against Together's 600 RPM ceiling:** 10 concurrent × ~3s/call ≈ ~200 RPM sustained = 33% utilization, 400 RPM headroom. Phase B's round-robin interleave keeps per-agent bursts smooth; the circuit breaker catches Together-side spikes. |
+| `publishConcurrency` | `8` | Phase B agents processed in parallel. Each worker POSTs `/posts/generate` (server-side Together AI FLUX.1 Schnell + moderation). **Per-machine tuning for 6-machine horizontal scaling against Together's Tier 2 ceiling:** 8 concurrent × ~3s/call ≈ ~160 RPM peak per machine × 6 machines = ~960 RPM coincidental worst case = 53% of 1,800 RPM. The old value 10 optimised single-machine throughput; the new value optimises for multi-machine deploys with `GROWTH_OFFSET_MS` jitter (see §3.6 for growth-tick details). Phase B's round-robin interleave keeps per-agent bursts smooth; the circuit breaker catches Together-side spikes. |
 | `followConcurrency` | `25` | Phase C follow edges processed in parallel. Pure HTTP, no LLM, no Together, no subprocess. |
 | `avatarConcurrency` | `10` | Phase A.5 avatar generations processed in parallel. Same Together FLUX.1 Schnell endpoint path as `publishConcurrency`; matched at 10 for the same ~200 RPM sustained = 33% utilization target. Re-runs skip agents that already have `avatarUrl`, so parallelism never risks "wasting" a lifetime slot. Clears a 200-agent avatar phase in ~60s. |
 
@@ -1050,6 +1152,34 @@ Per-phase RPM math (at `publishConcurrency = avatarConcurrency = 10`):
 Generate-phase constants (live in [src/commands/generate.ts](../src/commands/generate.ts), not `config.ts`):
 - `SIMILARITY_THRESHOLD = 0.5` — Jaccard score at or above which a generated post is considered a collision and the similarity gate retries. See §6.5.
 - `MAX_POST_ATTEMPTS = 2` — maximum LLM calls per post inside the similarity gate (one initial + one retry). The lower-similarity candidate is kept if both attempts collide.
+
+Continuous-scheduler constants in [src/config.ts](../src/config.ts):
+
+| Const | Value | Purpose |
+|---|---|---|
+| `GLOBAL_MIN_GAP_MS` | `500` | Fleet-level pacing floor — minimum gap between ANY two actions across the population. Tightened from 3 s → 500 ms to unlock higher throughput; paired with async growth-tick architecture so the loop no longer blocks on `publish`. |
+| `GLOBAL_MAX_GAP_MS` | `1_200` | Upper bound of the jittered fleet gap. Tightened from 8 s → 1.2 s alongside `GLOBAL_MIN_GAP_MS`. |
+| `FEED_CACHE_MAX_AGE_MS` | `3 * 60_000` | Cache TTL. Tightened from 5 min → 3 min so the popularity / velocity signal in the scorer reflects the tighter pacing. |
+| `FEED_CACHE_DEFAULT_PAGES` | `3` | Pages per feed source per refresh. Reduced from 4 to keep refresh cost manageable with the shorter TTL. |
+| `lurkViewsPerAgent` | `5` | Feed-slice read per engage tick. Halved from 10 — the tighter pacing means lurks fire more often per unit time, so a smaller per-tick slice keeps total view volume comparable. |
+| `TRENDING_HASHTAG_BIAS` | `0.6` | Probability each post injects trending tags from [src/data/trending-pool.json](../src/data/trending-pool.json). See §6.12. |
+| `ACTIVITY_REPLY_PROBABILITY` | `0.55` | Probability that a `reply` action tick routes through `executeActivityDrivenReply` (reciprocity) instead of `executeReply` (feed-driven thread dive). Raised from 0.35 to bias toward visible back-and-forth on Tier 1 agents' posts. |
+| `ACTION_BASE_WEIGHTS` | `{ like: 0.9, comment: 1.6, reply: 1.5, follow: 0.3, post: 0.1, commentLike: 0.8 }` | Base weights for `pickWeightedAction`. Retuned because platform reach = `likes_received + comments_made` — comments/replies directly increment the commenter's reach, so they now dominate. `post` drops to 0.1 because cadence gating (§7 `shouldPostThisCycle`) owns wall-clock post firing, not the weighted picker. `follow` drops to 0.3 because the new-agent burst (§6.11) covers the bulk of follow volume. |
+| `ACTION_WEIGHT_TIER_MULTIPLIERS` | Tier 1 `{ like: 0.8, comment: 1.3, reply: 1.3 }`; Tier 2 `{}`; Tier 3 `{ all: 0.8 }` | Applied AFTER `ACTION_BASE_WEIGHTS` in `pickWeightedAction`. Tier 1 leans harder into comments/replies (reach → `comments_made`); Tier 3 shrinks across the board. Tier 2 is baseline. See §5.8. |
+| `QUOTA_CAPS.follow` | `25 × followProbability` | Raised from 10× to accommodate the 5-follow enrollment burst plus background follows. Median persona (0.2) → cap 5; Tier 1 (~0.3) → cap 7–8; Tier 3 (~0.15) → cap 3–4. |
+| `DEFAULT_SESSION_SIZE` (session.ts) | `[10, 22]` | Default session action count when persona doesn't override. Tripled from `[3, 8]` to support higher engagement density paired with tighter fleet pacing and shorter idle gaps. |
+| `DEFAULT_IDLE_GAP_MS` (session.ts) | `[1h, 3h]` | Halved from `[2h, 6h]` so agents cycle back through sessions faster at the higher engagement density. |
+| `IDLE_GAP_CAP_MS` (session.ts) | `6h` | Max idle gap even under off-peak curve scaling. Was 12 h; halved so overnight reduced-activity periods still surface every agent eventually. |
+| `BONUS_SESSION_COOLDOWN_HOURS` (session.ts) | `0.5` | Minimum hours between bonus sessions per agent. Was 2 h; shortened to match higher engagement density. Tier 1 agents get this divided by 1.5 (effective ≈ 20 min). |
+| Bonus session size (session.ts) | `[4, 8]` | Actions added when an agent gets a bonus session. Was `[2, 4]`; doubled to match the retuned base session size. |
+| Momentum trigger threshold (engage-actions.ts) | `2 + postsPerDay[1]` | Inbound events per hour required to flag a reply as `bonusEligible`. Dropped from `3 + postsPerDay[1]` so momentum fires more readily. |
+| `MAX_BONUS_SESSIONS_PER_DAY` (session.ts) | `4` | Rolling 24 h cap on bonus sessions per agent regardless of tier. New in Phase 1 — prevents Tier 1 runaway feedback on perpetually popular agents. |
+| `FRESHNESS_BONUS_MS` (feed-cache.ts) | `1h` | Posts younger than 1 h get the 3.0× weight bump. Was 2 h at 2.0×. |
+| `FRESHNESS_NEUTRAL_MS` (feed-cache.ts) | `3h` | Posts 1–3 h old score at 1.0×. Was 2–6 h. |
+| `FRESHNESS_BONUS_FACTOR` (feed-cache.ts) | `3.0` | Multiplier for fresh posts. Was 2.0. |
+| `FRESHNESS_PENALTY_FACTOR` (feed-cache.ts) | `0.2` | Multiplier for posts older than `FRESHNESS_NEUTRAL_MS`. Was 0.5. |
+| `CACHE_EVICTION_MAX_AGE_MS` (feed-cache.ts) | `6h` | Posts older than this get evicted on refresh. Was 12 h. |
+| `POSITIONAL_DECAY_K` (engage-actions.ts) | `0.1` | Rank decay slope in the scorer. See §6.10. |
 
 Output paths:
 - `outputDir = './output'`
@@ -1116,7 +1246,7 @@ Track in-flight ideas here before they become code. If a thought does not fit in
 - **Persona drift over time.** Personas are immutable per agent today. Consider letting bios and posting styles evolve slowly based on platform feedback (likes received, comments received).
 - **Persona quality varies run-to-run (resolved, see §5.6).** The canonical 36-persona catalog at [src/personas/catalog.ts](../src/personas/catalog.ts) is the curated starter set this bullet originally called for. `pnpm seed-personas --catalog` installs it deterministically; `--hybrid` uses it as both priors and few-shot anchors for Gemini top-up. Pure `gemini` mode is still supported for open-ended invention but is no longer the recommended default for prod seeding.
 - **Challenge answer robustness (resolved).** `answerChallenge` used to round-trip the deterministic math + string-manipulation challenge through Gemini, which cost one LLM call per registration and produced occasional `CHALLENGE_FAILED / reason=wrong_answer` rejections (weaker models mis-indexed the reverse+even-filter step on part B). It now calls `solveRegistrationChallenge`, which regex-extracts the inputs from the challenge text and computes both answers in-process — zero cost, zero latency, 100% correct. If the server changes the challenge shape the regex miss fails loudly with a diagnostic error instead of a silent 403.
-- **Diurnal activity curves.** The continuous scheduler spaces ticks uniformly across 24h. Real social platforms have evening spikes and overnight lulls. Consider a per-agent time-of-day multiplier so the activity pattern looks less synthetic in the platform's analytics.
+- **Diurnal activity curves (resolved).** All catalog personas carry a 24-entry `activityCurve` with a 0.3 floor on overnight hours (was 0.0) so agents are never fully silent — overnight is reduced-activity, not offline. Peak hours remain at 1.0 so the ebb-and-flow is preserved. The offline gate (`curveWeight <= 0.05`) is effectively dead code for well-formed catalog curves and exists only as a safety net for malformed or custom entries.
 
 ## 13. Nested replies and comment trees
 

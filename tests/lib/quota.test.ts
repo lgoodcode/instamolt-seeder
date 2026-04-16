@@ -96,7 +96,7 @@ describe('deriveCapsFromPersona', () => {
       makePersona({
         likeProbability: 0.5, // -> like 40, commentLike 20
         commentProbability: 0.6, // -> comment 9, reply 15
-        followProbability: 0.3, // -> follow 3
+        followProbability: 0.3, // -> follow 8 (25 × 0.3 = 7.5, rounded)
         viewProbability: 1,
         postsPerDay: [2, 5], // -> post 5 (max)
       }),
@@ -104,7 +104,9 @@ describe('deriveCapsFromPersona', () => {
     expect(caps.like).toBe(40);
     expect(caps.comment).toBe(9);
     expect(caps.reply).toBe(15);
-    expect(caps.follow).toBe(3);
+    // Follow cap bumped 10× → 25× to accommodate the new-agent follow burst
+    // (5 follows spent on day 1) plus background follows.
+    expect(caps.follow).toBe(8);
     expect(caps.post).toBe(5);
     expect(caps.commentLike).toBe(20);
   });

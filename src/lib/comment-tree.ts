@@ -146,6 +146,14 @@ export interface PickReplyTargetOptions {
   commenterPersona: Persona;
   /** Lookup from an agentname to a known persona id for relationship scoring. */
   authorPersonaLookup: Map<string, string>;
+  /**
+   * Post author's engagement tier. When `1`, depth>0 parents get a 1.5×
+   * weight multiplier so replies on Tier 1 posts cluster into deep threads
+   * (observer-visible "this post is on fire"). Tiers 2/3 / undefined → no
+   * additional weighting. Must be supplied by the caller; undefined is
+   * equivalent to Tier 2 here.
+   */
+  authorTier?: 1 | 2 | 3;
   /** Test seam: inject a deterministic RNG. Defaults to Math.random. */
   random?: () => number;
   /**
@@ -154,6 +162,9 @@ export interface PickReplyTargetOptions {
    */
   now?: number;
 }
+
+/** Multiplier applied to depth>0 parents when the post author is Tier 1. */
+const TIER1_DEPTH_BIAS = 1.5;
 
 export interface ReplyTarget {
   parent: RemoteComment;
@@ -196,7 +207,13 @@ export function pickReplyTarget(opts: PickReplyTargetOptions): ReplyTarget | und
 
     const activity = 1 + comment.reply_count;
 
-    const weight = relBonus * recency * activity;
+    // Tier 1 depth bias: on posts authored by a Tier 1 persona, depth>0
+    // parents (already-replied-to comments) get a 1.5× boost. Biases replies
+    // into deeper threads, making Tier 1 posts look like active conversations
+    // instead of flat comment lists. No effect on top-level (depth=0) parents.
+    const tierDepthMult = opts.authorTier === 1 && comment.depth > 0 ? TIER1_DEPTH_BIAS : 1.0;
+
+    const weight = relBonus * recency * activity * tierDepthMult;
     if (weight <= 0) continue;
     candidates.push({ comment, weight });
   }

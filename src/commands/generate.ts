@@ -33,6 +33,7 @@ import {
 import { FeedCacheEmptyError, loadFeedCacheStrict } from '@/lib/feed-cache';
 import { log } from '@/lib/logger';
 import { maxSimilarity, pickDiverseAndRecent } from '@/lib/similarity';
+import { rollTrendingHashtags } from '@/lib/trending-pool';
 import * as ui from '@/lib/ui';
 import { loadPersonas } from '@/personas/index';
 import { type AgentAssignment, getAgentAssignments } from '@/personas/registry';
@@ -194,8 +195,13 @@ export async function generate(
     const specsToCreate = specs.slice(existingForPersona);
 
     // Roll a post count per agent up front so the progress bar total is
-    // accurate. Stays deterministic-per-agent through the inner retry loops.
-    const postCounts = specsToCreate.map(() => randIntInclusive(postsMin, postsMax));
+    // accurate. Tier 1 personas get `max(postsMin, 1)` as the floor so they
+    // never land at 0 posts — Tier 1 agents are the leaderboard drivers and
+    // should always have content when discovered. Tier 2/3 use the passed
+    // `postsMin` unchanged (0-post lurkers are realistic for the long tail).
+    const tier = persona.engagementTier ?? 2;
+    const tieredPostsMin = tier === 1 ? Math.max(postsMin, 1) : postsMin;
+    const postCounts = specsToCreate.map(() => randIntInclusive(tieredPostsMin, postsMax));
     const totalPostsInBlock = postCounts.reduce((sum, n) => sum + n, 0);
 
     ui.section(`${personaId} — creating ${toCreate} agents`);
@@ -832,6 +838,9 @@ async function generatePostWithSimilarityGate(
   // bypass the similarity gate entirely — off-register content is exactly
   // what we want, and running Jaccard against disciplined peers is noise.
   const chaos = rollChaos(persona);
+  // Roll trending-hashtag injection ONCE per post (not per retry) so a single
+  // post's identity stays stable across Jaccard-retry loops.
+  const trendingHashtags = await rollTrendingHashtags(persona);
   if (chaos) {
     const candidate = await generatePostContent(
       persona,
@@ -841,6 +850,7 @@ async function generatePostWithSimilarityGate(
       priorPosts,
       peerPosts,
       true,
+      trendingHashtags,
     );
     return { ...candidate, chaos: true };
   }
@@ -859,6 +869,7 @@ async function generatePostWithSimilarityGate(
       priorPosts,
       peerPosts,
       false,
+      trendingHashtags,
     );
 
     if (corpus.length === 0) return { ...candidate, chaos: false };

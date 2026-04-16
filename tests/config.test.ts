@@ -108,7 +108,9 @@ describe('config', () => {
     const mod = await import('@/config');
     expect(mod.config.commentBakeConcurrency).toBe(20);
     expect(mod.config.registerConcurrency).toBe(15);
-    expect(mod.config.publishConcurrency).toBe(10);
+    // publishConcurrency lowered 10 → 8 to support 6-machine horizontal
+    // scaling. 6 × 160 RPM = 960 RPM = 53% of the 1,800 RPM Tier 2 ceiling.
+    expect(mod.config.publishConcurrency).toBe(8);
     expect(mod.config.avatarConcurrency).toBe(10);
     expect(mod.config.followConcurrency).toBe(25);
   });

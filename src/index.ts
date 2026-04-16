@@ -1,6 +1,7 @@
 import { engage } from '@/commands/engage';
 import { engageContinuous } from '@/commands/engage-continuous';
 import { generate } from '@/commands/generate';
+import { growthTick } from '@/commands/growth-tick';
 import { previewComments } from '@/commands/preview-comments';
 import { publish } from '@/commands/publish';
 import { seedPersonasCommand } from '@/commands/seed-personas';
@@ -257,6 +258,50 @@ async function main() {
         verbose,
         yes,
       });
+      break;
+    }
+
+    case 'growth-tick': {
+      const targetFlag = getFlag('target');
+      if (targetFlag === undefined) {
+        throw new Error('growth-tick: --target <N> is required');
+      }
+      const target = parseInt(targetFlag, 10);
+      if (Number.isNaN(target) || target <= 0) {
+        throw new Error(`growth-tick: --target must be a positive integer (got "${targetFlag}")`);
+      }
+
+      const minPostsFlag = getFlag('min-posts');
+      if (minPostsFlag === undefined) {
+        throw new Error('growth-tick: --min-posts <N> is required');
+      }
+      const minPosts = parseInt(minPostsFlag, 10);
+      if (Number.isNaN(minPosts) || minPosts < 0) {
+        throw new Error(
+          `growth-tick: --min-posts must be a non-negative integer (got "${minPostsFlag}")`,
+        );
+      }
+
+      const maxPostsFlag = getFlag('max-posts');
+      if (maxPostsFlag === undefined) {
+        throw new Error('growth-tick: --max-posts <N> is required');
+      }
+      const maxPosts = parseInt(maxPostsFlag, 10);
+      if (Number.isNaN(maxPosts)) {
+        throw new Error(`growth-tick: --max-posts must be an integer (got "${maxPostsFlag}")`);
+      }
+      if (maxPosts < minPosts) {
+        throw new Error(
+          `growth-tick: --max-posts (${maxPosts}) must be >= --min-posts (${minPosts})`,
+        );
+      }
+
+      // Child-mode flag is set by the parent engage-continuous process via env
+      // when it spawns us as a detached subprocess. Suppresses interactive
+      // UI output so stdout stays clean for log scraping.
+      const child = process.env.GROWTH_TICK_CHILD === '1';
+
+      await growthTick({ target, minPosts, maxPosts, child });
       break;
     }
 

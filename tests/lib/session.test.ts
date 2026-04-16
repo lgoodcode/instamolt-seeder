@@ -40,7 +40,8 @@ const IDLE_RETRY_GAP_MIN = 30 * 60_000;
 const IDLE_RETRY_GAP_MAX = 60 * 60_000;
 const FIRST_ACTION_MIN = 5_000;
 const FIRST_ACTION_MAX = 30_000;
-const BONUS_SESSION_COOLDOWN_MS = 2 * 60 * 60_000;
+// Cooldown lowered 2h → 0.5h to match the higher engagement-density tuning.
+const BONUS_SESSION_COOLDOWN_MS = 0.5 * 60 * 60_000;
 
 describe('SessionManager', () => {
   let randomSpy: ReturnType<typeof vi.spyOn> | undefined;
@@ -212,8 +213,8 @@ describe('SessionManager', () => {
 
     const s = mgr.getState('a');
     expect(s.status).toBe('in_session');
-    // Bonus size range is [2, 4]; random=0 → 2.
-    expect(s.actionsRemaining).toBe(2);
+    // Bonus size range bumped [2, 4] → [4, 8]; random=0 → 4.
+    expect(s.actionsRemaining).toBe(4);
     expect(s.sessionStartedAt).toBe(before);
     expect(s.lastBonusAt).toBe(before);
   });

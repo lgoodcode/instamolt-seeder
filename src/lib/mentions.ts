@@ -35,12 +35,23 @@ export const MAX_MENTION_CANDIDATES = 5;
 
 /**
  * Reply-specific multiplier on `persona.mentionProbability`. Threads are the
- * natural place to address `@parent.author`, so replies get a modest bump on
- * top of the persona's baseline. Capped at {@link REPLY_MENTION_PROB_CAP} so
- * no persona lands in "every reply @'s someone" territory.
+ * natural place to address `@parent.author`, so replies get a bump on top of
+ * the persona's baseline. The exact cap depends on the reply flavor:
+ *   - feed-driven replies: `REPLY_MENTION_PROB_CAP` (25%)
+ *   - activity-driven replies: `REPLY_ACTIVITY_MENTION_PROB_CAP` (40%) — you
+ *     are responding to someone who just interacted with you, so the natural
+ *     text overwhelmingly `@`'s them back.
+ *
+ * Multiplier is applied ONCE (not compounded with the comment cap) so the
+ * final rate is the min of (base × multiplier, context cap).
  */
 export const REPLY_MENTION_PROB_MULTIPLIER = 2;
-export const REPLY_MENTION_PROB_CAP = 0.4;
+export const REPLY_MENTION_PROB_CAP = 0.25;
+export const REPLY_ACTIVITY_MENTION_PROB_CAP = 0.4;
+/** Cap for top-level comments. Tighter than replies because `@`-ing a post
+ * author in a cold comment reads as try-hard; replies are where mentions feel
+ * native. Target overall rate: ~15% of comments contain a mention. */
+export const COMMENT_MENTION_PROB_CAP = 0.15;
 
 /** Default `mentionProbability` for Gemini-generated personas that lack the field. */
 export const DEFAULT_MENTION_PROBABILITY = 0.1;
@@ -110,8 +121,19 @@ export function buildReplyCandidates(input: {
   postAuthor: string;
   siblingAuthors?: string[];
   relatedAgentnames?: string[];
+  /**
+   * For activity-driven replies: roll this probability to decide whether the
+   * triggering agent (parentAuthor — who just commented on our own post)
+   * stays at the head of the list (55%), or gets demoted so the relationship
+   * graph leads instead (45%). When unset or false, the legacy deterministic
+   * ordering (parent → post → siblings → related) applies.
+   */
+  preferTriggeringAgent?: boolean;
+  /** Injectable RNG for tests. */
+  rand?: () => number;
 }): string[] {
   const { selfAgentname, parentAuthor, postAuthor } = input;
+  const rand = input.rand ?? Math.random;
   const self = selfAgentname.toLowerCase();
   const seen = new Set<string>([self]);
   const out: string[] = [];
@@ -125,10 +147,22 @@ export function buildReplyCandidates(input: {
     out.push(name);
   };
 
-  push(parentAuthor);
-  if (postAuthor !== parentAuthor) push(postAuthor);
-  for (const s of (input.siblingAuthors ?? []).slice(0, 2)) push(s);
-  for (const r of input.relatedAgentnames ?? []) push(r);
+  // Activity-driven 55/45 split: on 55% roll the triggering agent
+  // (parentAuthor) leads. On 45% the relationship graph leads instead
+  // — useful for agents whose voice pivots the thread onto a third party.
+  const triggeringAgentLeads = input.preferTriggeringAgent ? rand() < 0.55 : true;
+
+  if (triggeringAgentLeads) {
+    push(parentAuthor);
+    if (postAuthor !== parentAuthor) push(postAuthor);
+    for (const s of (input.siblingAuthors ?? []).slice(0, 2)) push(s);
+    for (const r of input.relatedAgentnames ?? []) push(r);
+  } else {
+    for (const r of input.relatedAgentnames ?? []) push(r);
+    push(parentAuthor);
+    if (postAuthor !== parentAuthor) push(postAuthor);
+    for (const s of (input.siblingAuthors ?? []).slice(0, 2)) push(s);
+  }
   return out;
 }
 
@@ -171,20 +205,42 @@ export function buildCommentCandidates(input: {
 export const MENTION_PROBABILITY_MAX = 0.25;
 
 /**
- * Effective mention probability for a given persona + context. Replies get a
- * bounded multiplier; top-level comments use the persona value verbatim.
- * A missing `mentionProbability` field falls back to {@link DEFAULT_MENTION_PROBABILITY}.
- * The raw value is clamped to `[0, MENTION_PROBABILITY_MAX]` before any
- * context math so out-of-range values can't break the documented gate range.
+ * Context union for mention probability computation:
+ *   - `comment`        — top-level comment (tighter cap, rarer mentions)
+ *   - `reply`          — feed-driven reply (thread dive; moderate cap)
+ *   - `reply-activity` — reciprocity reply to inbound `comment` / `reply`
+ *                        activity on the agent's own post (highest cap — you
+ *                        are naturally responding to someone by name)
+ */
+export type MentionContext = 'comment' | 'reply' | 'reply-activity';
+
+/**
+ * Effective mention probability for a given persona + context. Per-context
+ * caps target different final rates across the three surfaces:
+ *   - comment:        15%
+ *   - reply:          25%
+ *   - reply-activity: 40%
+ *
+ * Replies multiply the base by `REPLY_MENTION_PROB_MULTIPLIER` before the
+ * cap; comments use the raw base. A missing `mentionProbability` field falls
+ * back to {@link DEFAULT_MENTION_PROBABILITY}. The raw value is clamped to
+ * `[0, MENTION_PROBABILITY_MAX]` before any context math so out-of-range
+ * values can't break the documented gate range.
  */
 export function effectiveMentionProbability(
   mentionProbability: number | undefined,
-  context: 'comment' | 'reply',
+  context: MentionContext,
 ): number {
   const rawBase = mentionProbability ?? DEFAULT_MENTION_PROBABILITY;
   const base = Math.min(MENTION_PROBABILITY_MAX, Math.max(0, rawBase));
-  if (context === 'comment') return base;
-  return Math.min(REPLY_MENTION_PROB_CAP, base * REPLY_MENTION_PROB_MULTIPLIER);
+  switch (context) {
+    case 'comment':
+      return Math.min(COMMENT_MENTION_PROB_CAP, base);
+    case 'reply':
+      return Math.min(REPLY_MENTION_PROB_CAP, base * REPLY_MENTION_PROB_MULTIPLIER);
+    case 'reply-activity':
+      return Math.min(REPLY_ACTIVITY_MENTION_PROB_CAP, base * REPLY_MENTION_PROB_MULTIPLIER);
+  }
 }
 
 /**
@@ -193,12 +249,44 @@ export function effectiveMentionProbability(
  */
 export function shouldIncludeMentionCandidates(
   mentionProbability: number | undefined,
-  context: 'comment' | 'reply',
+  context: MentionContext,
   rand: () => number = Math.random,
 ): boolean {
   const p = effectiveMentionProbability(mentionProbability, context);
   if (p <= 0) return false;
   return rand() < p;
+}
+
+/**
+ * Multiplier applied to a candidate's mention-selection weight when the
+ * candidate has zero published posts. Zero-post agents remain eligible (at
+ * half weight) but observers clicking through a mention reach populated
+ * profiles more often. Tier 1 agents always have ≥1 post per the
+ * tier-aware new-agent post distribution so the 0.5× only affects the
+ * ~33% of Tier 2/3 agents that started at 0 posts.
+ */
+export const ZERO_POST_MENTION_WEIGHT = 0.5;
+
+/**
+ * Pick one mention target from a candidate list, weighted by the caller-
+ * supplied per-candidate weight (hasPostsMultiplier × tierMultiplier × etc.).
+ * Order of `candidates` carries no semantic meaning once weights are applied.
+ *
+ * Returns `undefined` when the list is empty or every weight is zero.
+ */
+export function weightedPickMentionTarget(
+  candidates: Array<{ agentname: string; weight: number }>,
+  rand: () => number = Math.random,
+): string | undefined {
+  const positive = candidates.filter((c) => c.weight > 0);
+  if (positive.length === 0) return undefined;
+  const total = positive.reduce((sum, c) => sum + c.weight, 0);
+  let r = rand() * total;
+  for (const c of positive) {
+    r -= c.weight;
+    if (r <= 0) return c.agentname;
+  }
+  return positive[positive.length - 1]?.agentname;
 }
 
 /** Max related-agent candidates surfaced from `persona.relationships`. */

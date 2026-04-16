@@ -241,6 +241,26 @@ export interface Persona {
    * supply it.
    */
   mentionProbability?: number;
+  /**
+   * Engagement tier (1 = power user, 2 = regular, 3 = quiet citizen). Drives
+   * leaderboard topology: Tier 1 agents get session-size/bonus-rate boosts and
+   * comment-weight multipliers so they climb `reach = likes_received +
+   * comments_made` faster; Tier 3 agents shrink to keep the long tail quiet.
+   * Target weighted distribution: ~10/30/60 across the catalog.
+   * Default `2` in `normalizePersona` when missing. See [docs/BLUEPRINT.md](../docs/BLUEPRINT.md)
+   * §Engagement Tiers and [src/config.ts](./config.ts) `ACTION_WEIGHT_TIER_MULTIPLIERS`.
+   */
+  engagementTier?: 1 | 2 | 3;
+  /**
+   * Feed-source preference for the engage scorer. Determines how the persona
+   * weights posts from each feed source:
+   *   - `trendsetter` — chases hot + new (explore 0.15, hot 0.50, top 0.10, new 0.25)
+   *   - `community`   — follows-graph-focused (explore 0.20, hot 0.15, top 0.15, new 0.50)
+   *   - `explorer`    — broad popularity browser (explore 0.45, hot 0.15, top 0.25, new 0.15)
+   * Default `'explorer'` in `normalizePersona`. See `SOURCE_WEIGHTS` in
+   * [src/lib/engage-actions.ts](./lib/engage-actions.ts).
+   */
+  feedPreference?: 'trendsetter' | 'community' | 'explorer';
 }
 
 // --- Generated output (written to JSON files) ---
@@ -447,6 +467,19 @@ export interface RemotePost {
   created_at: string;
   author: RemotePostAuthor;
   hashtags?: string[];
+  /**
+   * Feed source this post arrived from — set during `refreshFeedCache` so the
+   * scorer can apply per-persona source weights. Undefined on posts loaded
+   * from a v1 cache file that predates source tagging.
+   */
+  _source?: FeedSource;
+  /**
+   * 0-indexed rank within the source's response at fetch time. Used by
+   * `buildPostScorer`'s positional decay so the #1 post from `/feed/hot` is
+   * weighted harder than the #50 post, matching how a human's attention
+   * drops off with scroll depth. Undefined on v1 cache posts.
+   */
+  _sourceRank?: number;
 }
 
 export interface RemoteFeedResponse {
@@ -732,6 +765,20 @@ export type SeederEventType =
   | 'feed_refresh'
   | 'agent_rescan'
   | 'growth_tick'
+  // Child-process output from a detached `pnpm growth-tick` spawn, tee'd
+  // into the parent's event log so operators can see what the child is
+  // doing without inspecting separate logs. `details.text` carries the
+  // trimmed line and `details.targetTotal` identifies which tick it belongs
+  // to. Exit events carry `details.code` (0 = success, non-zero = failure).
+  | 'growth_child_stdout'
+  | 'growth_child_stderr'
+  | 'growth_child_exit'
+  // New-agent follow burst lifecycle. `follow_burst_scheduled` fires once per
+  // newly-enrolled agent with the 5 selected targets tagged by pool (A/B/C).
+  // Subsequent `follow` events emitted from executeFollow during burst
+  // consumption carry `details.burst: true` so post-hoc analysis can slice
+  // burst follows from organic follows.
+  | 'follow_burst_scheduled'
   | 'session_start'
   | 'session_end'
   // Generation-phase events (no live API calls; recorded by `generate` and

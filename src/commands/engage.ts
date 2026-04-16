@@ -19,6 +19,7 @@ import {
   resolveRelatedAgentnames,
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
+import { rollTrendingHashtags } from '@/lib/trending-pool';
 import * as ui from '@/lib/ui';
 import { lurkFeedSlice } from '@/lib/views';
 import { loadPersonas } from '@/personas/index';
@@ -734,6 +735,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
               const postStartedAt = Date.now();
               try {
                 sp.message(`@${agent.agentname} — generating a fresh post`);
+                const trendingHashtags = await rollTrendingHashtags(persona);
                 const content = await generatePostContent(
                   persona,
                   voiceProfile,
@@ -742,6 +744,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   [],
                   [],
                   rollChaos(persona),
+                  trendingHashtags,
                 );
                 const postClient = new InstaMoltClient(agent.apiKey);
                 const result = await postClient.generatePost({

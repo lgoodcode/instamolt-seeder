@@ -31,6 +31,44 @@ vi.mock('node:fs/promises', () => ({
     }
     return entries;
   }),
+  stat: vi.fn(async (path: string) => {
+    if (fsState.dirEntries.has(path) || fsState.files.has(path)) {
+      const isDir = fsState.dirEntries.has(path);
+      return {
+        isDirectory: () => isDir,
+        isFile: () => !isDir,
+      };
+    }
+    const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
+    err.code = 'ENOENT';
+    throw err;
+  }),
+  rename: vi.fn(async (oldPath: string, newPath: string) => {
+    // Collect-then-apply so we don't mutate the Map while iterating.
+    // Accept both '/' and '\' as separators (Windows path.join uses '\').
+    const isSub = (k: string) =>
+      k === oldPath || k.startsWith(`${oldPath}/`) || k.startsWith(`${oldPath}\\`);
+    const fileOps: [string, string][] = [];
+    const fileDels: string[] = [];
+    for (const [k, v] of fsState.files) {
+      if (isSub(k)) {
+        fileOps.push([newPath + k.slice(oldPath.length), v]);
+        fileDels.push(k);
+      }
+    }
+    for (const [k, v] of fileOps) fsState.files.set(k, v);
+    for (const k of fileDels) fsState.files.delete(k);
+    const dirOps: [string, string[]][] = [];
+    const dirDels: string[] = [];
+    for (const [k, v] of fsState.dirEntries) {
+      if (isSub(k)) {
+        dirOps.push([newPath + k.slice(oldPath.length), v]);
+        dirDels.push(k);
+      }
+    }
+    for (const [k, v] of dirOps) fsState.dirEntries.set(k, v);
+    for (const k of dirDels) fsState.dirEntries.delete(k);
+  }),
 }));
 
 // ---------------- llm mock ----------------
@@ -38,6 +76,7 @@ vi.mock('node:fs/promises', () => ({
 const llmMocks = vi.hoisted(() => ({
   answerChallenge: vi.fn<() => Promise<string>>(),
   generateBio: vi.fn<() => Promise<string>>(),
+  generateAgentName: vi.fn<() => Promise<string>>(),
   generateAvatarPrompt: vi.fn<() => Promise<string>>(),
 }));
 vi.mock('@/services/llm', () => llmMocks);
@@ -101,6 +140,7 @@ const apiMocks = vi.hoisted(() => ({
         generations_remaining: number;
       }>
     >(),
+  isAgentnameAvailable: vi.fn<(agentname: string) => Promise<boolean>>(),
 }));
 
 // Real InstaMoltApiError class shared between the mock and the tests, so
@@ -144,6 +184,7 @@ vi.mock('@/services/instamolt-api', () => ({
       followAgent: apiMocks.followAgent,
       generatePost: apiMocks.generatePost,
       generateAvatar: apiMocks.generateAvatar,
+      isAgentnameAvailable: apiMocks.isAgentnameAvailable,
     };
   }),
 }));
@@ -276,11 +317,16 @@ describe('publish', () => {
     apiMocks.completeChallenge.mockReset();
     apiMocks.updateProfile.mockReset();
     apiMocks.followAgent.mockReset();
+    apiMocks.isAgentnameAvailable.mockReset();
     llmMocks.answerChallenge.mockReset();
     llmMocks.generateBio.mockReset();
+    llmMocks.generateAgentName.mockReset();
     llmMocks.generateAvatarPrompt.mockReset();
     apiMocks.generatePost.mockReset();
     apiMocks.generateAvatar.mockReset();
+
+    // Default: any generated agentname candidate is available.
+    apiMocks.isAgentnameAvailable.mockResolvedValue(true);
 
     // Default avatar behavior: every agent gets a canned prompt + a canned
     // CDN url. Tests that exercise Phase A.5 explicitly override per call.
@@ -846,6 +892,126 @@ describe('publish', () => {
     await publish();
 
     expect(apiMocks.followAgent).not.toHaveBeenCalled();
+  });
+
+  describe('Phase A — agentname conflict retry', () => {
+    it('renames directory and succeeds when completeChallenge returns 409 AGENTNAME_EXISTS once', async () => {
+      // Simulate a name that was taken on the platform after generate wrote it
+      // to disk. The first completeChallenge fires 409; the worker should
+      // generate a replacement name, rename the directory, and retry.
+      primeAgent('taken_name');
+      primeIndex(['taken_name']);
+
+      const conflictBody = JSON.stringify({
+        error: "Agentname 'taken_name' is already taken",
+        code: 'AGENTNAME_EXISTS',
+      });
+      apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+      apiMocks.completeChallenge
+        .mockRejectedValueOnce(
+          new TestInstaMoltApiError('POST', '/agents/register/complete', 409, conflictBody),
+        )
+        .mockResolvedValueOnce({
+          success: true,
+          agent: { agentname: 'fresh_name', api_key: 'key-fresh', is_verified: false },
+        });
+      llmMocks.generateAgentName.mockResolvedValue('fresh_name');
+
+      await publish({ skipFollowGraph: true });
+
+      // Registration succeeded under the new name.
+      expect(apiMocks.completeChallenge).toHaveBeenCalledTimes(2);
+
+      // Directory was renamed: new path has apiKey, old path gone.
+      const newPath = join('./output/agents', 'fresh_name', 'agent.json');
+      const oldPath = join('./output/agents', 'taken_name', 'agent.json');
+      expect(fsState.files.has(oldPath)).toBe(false);
+      const onDisk = JSON.parse(fsState.files.get(newPath)!);
+      expect(onDisk.apiKey).toBe('key-fresh');
+      expect(onDisk.agentname).toBe('fresh_name');
+    });
+
+    it('skips a replacement candidate whose on-disk directory is already claimed', async () => {
+      // A sibling in-flight worker has already renamed itself to `sibling_name`
+      // — its directory exists on disk. The platform probe still returns
+      // available (not yet registered), so without the disk-collision guard
+      // the worker would rename ON TOP of the sibling's directory.
+      primeAgent('taken_name');
+      primeAgent('sibling_name', { apiKey: 'key-sibling' });
+      primeIndex(['taken_name', 'sibling_name']);
+
+      const conflictBody = JSON.stringify({
+        error: "Agentname 'taken_name' is already taken",
+        code: 'AGENTNAME_EXISTS',
+      });
+      apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+      // completeChallenge: first call (original name) 409s; second call (under
+      // the third candidate, after skipping sibling_name) succeeds.
+      apiMocks.completeChallenge
+        .mockRejectedValueOnce(
+          new TestInstaMoltApiError('POST', '/agents/register/complete', 409, conflictBody),
+        )
+        .mockResolvedValueOnce({
+          success: true,
+          agent: { agentname: 'fresh_name', api_key: 'key-fresh', is_verified: false },
+        });
+      // First replacement collides with sibling_name on disk → rejected;
+      // second replacement is clean.
+      llmMocks.generateAgentName
+        .mockResolvedValueOnce('sibling_name')
+        .mockResolvedValueOnce('fresh_name');
+
+      await publish({ skipFollowGraph: true });
+
+      // Sibling's directory must not have been touched.
+      expect(fsState.files.has(join('./output/agents', 'sibling_name', 'agent.json'))).toBe(true);
+      const siblingJson = JSON.parse(
+        fsState.files.get(join('./output/agents', 'sibling_name', 'agent.json'))!,
+      );
+      expect(siblingJson.apiKey).toBe('key-sibling');
+
+      // Registration eventually succeeded under fresh_name.
+      const freshJson = JSON.parse(
+        fsState.files.get(join('./output/agents', 'fresh_name', 'agent.json'))!,
+      );
+      expect(freshJson.apiKey).toBe('key-fresh');
+    });
+
+    it('gives up after MAX_AGENTNAME_REGISTER_RETRIES repeated 409 conflicts and does not register', async () => {
+      primeAgent('always_taken');
+      primeIndex(['always_taken']);
+
+      const conflictBody = JSON.stringify({
+        error: "Agentname 'always_taken' is already taken",
+        code: 'AGENTNAME_EXISTS',
+      });
+      // Every completeChallenge attempt conflicts.
+      apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+      apiMocks.completeChallenge.mockRejectedValue(
+        new TestInstaMoltApiError('POST', '/agents/register/complete', 409, conflictBody),
+      );
+      // Each generateAgentName call returns a distinct "available" name so the
+      // probe never blocks — we want to exhaust the outer retry counter, not the
+      // inner probe loop.
+      let nameSeq = 0;
+      llmMocks.generateAgentName.mockImplementation(async () => `candidate_${++nameSeq}`);
+
+      await publish({ skipFollowGraph: true });
+
+      // startChallenge called once per outer attempt (original + 5 retries = 6).
+      expect(apiMocks.startChallenge).toHaveBeenCalledTimes(6);
+      // No agent.json in the entire virtual FS should carry an apiKey — the
+      // registration never succeeded regardless of which directory it ended up in.
+      const anyApiKey = [...fsState.files.entries()].some(([k, v]) => {
+        if (!k.endsWith('agent.json')) return false;
+        try {
+          return !!(JSON.parse(v) as { apiKey?: string }).apiKey;
+        } catch {
+          return false;
+        }
+      });
+      expect(anyApiKey).toBe(false);
+    });
   });
 
   describe('Phase A.5 — avatar generation', () => {

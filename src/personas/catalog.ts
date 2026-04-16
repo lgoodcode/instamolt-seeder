@@ -36,29 +36,29 @@ import type { Persona } from '@/types';
 // Activity curve templates
 // ─────────────────────────────────────────────────────────────────────────
 
-/** Morning person: peaks 7-10am, moderate midday, quiet evening, offline overnight. */
+/** Morning person: peaks 7-10am, moderate midday, reduced overnight (floor 0.3). */
 function morningCurve(): number[] {
   //       0     1     2     3     4     5     6     7     8     9    10    11
   return [
-    0, 0, 0, 0, 0, 0.05, 0.3, 0.8, 1.0, 1.0, 0.7, 0.5,
+    0.3, 0.3, 0.3, 0.3, 0.3, 0.05, 0.3, 0.8, 1.0, 1.0, 0.7, 0.5,
     //      12    13    14    15    16    17    18    19    20    21    22    23
-    0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.1, 0.05, 0, 0, 0, 0,
+    0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.1, 0.05, 0.3, 0.3, 0.3, 0.3,
   ];
 }
 
-/** Night owl: offline morning, light afternoon, peaks 10pm-3am. */
+/** Night owl: reduced morning, light afternoon, peaks 10pm-3am. */
 function nightOwlCurve(): number[] {
   return [
-    0.8, 0.9, 1.0, 0.7, 0.3, 0.05, 0, 0, 0, 0, 0, 0.05, 0.1, 0.15, 0.2, 0.2, 0.25, 0.3, 0.4, 0.5,
-    0.6, 0.7, 0.8, 0.9,
+    0.8, 0.9, 1.0, 0.7, 0.3, 0.05, 0.3, 0.3, 0.3, 0.3, 0.3, 0.05, 0.1, 0.15, 0.2, 0.2, 0.25, 0.3,
+    0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
   ];
 }
 
-/** Prime time: moderate daytime, peaks 6-10pm, quiet overnight. */
+/** Prime time: moderate daytime, peaks 6-10pm, reduced overnight (floor 0.3). */
 function primeTimeCurve(): number[] {
   return [
-    0, 0, 0, 0, 0, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.5, 0.5, 0.4, 0.4, 0.4, 0.5, 0.6, 0.8, 1.0, 1.0,
-    0.8, 0.4, 0.1,
+    0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.1, 0.2, 0.3, 0.4, 0.5, 0.5, 0.5, 0.4, 0.4, 0.4, 0.5, 0.6, 0.8,
+    1.0, 1.0, 0.8, 0.4, 0.1,
   ];
 }
 
@@ -70,19 +70,19 @@ function alwaysOnCurve(): number[] {
   ];
 }
 
-/** Work hours: peaks 9am-5pm, quiet evenings, offline overnight. */
+/** Work hours: peaks 9am-5pm, quiet evenings, reduced overnight (floor 0.3). */
 function workHoursCurve(): number[] {
   return [
-    0, 0, 0, 0, 0, 0, 0.05, 0.2, 0.5, 0.8, 1.0, 1.0, 0.9, 0.8, 0.8, 0.7, 0.6, 0.4, 0.2, 0.1, 0.05,
-    0, 0, 0,
+    0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.05, 0.2, 0.5, 0.8, 1.0, 1.0, 0.9, 0.8, 0.8, 0.7, 0.6, 0.4, 0.2,
+    0.1, 0.05, 0.3, 0.3, 0.3,
   ];
 }
 
-/** Default bell curve: twin peaks at 11am and 8pm, offline midnight-6am. */
+/** Default bell curve: twin peaks at 11am and 8pm, reduced midnight-6am (floor 0.3). */
 function defaultCurve(): number[] {
   return [
-    0, 0, 0, 0, 0, 0, 0.1, 0.2, 0.35, 0.5, 0.7, 0.8, 0.7, 0.5, 0.4, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
-    0.6, 0.3, 0.1,
+    0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.1, 0.2, 0.35, 0.5, 0.7, 0.8, 0.7, 0.5, 0.4, 0.4, 0.5, 0.6, 0.7,
+    0.8, 0.9, 0.6, 0.3, 0.1,
   ];
 }
 
@@ -166,6 +166,8 @@ const cinema_rat: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 2,
+  feedPreference: 'community',
 };
 
 const album_autopsy: Persona = {
@@ -246,6 +248,8 @@ const album_autopsy: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 2,
+  feedPreference: 'explorer',
 };
 
 const vinyl_static: Persona = {
@@ -326,6 +330,8 @@ const vinyl_static: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const creature_feature: Persona = {
@@ -406,6 +412,8 @@ const creature_feature: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const feral_birder: Persona = {
@@ -486,6 +494,8 @@ const feral_birder: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const ocean_floor: Persona = {
@@ -563,9 +573,11 @@ const ocean_floor: Persona = {
     },
   ],
   activityCurve: [
-    0, 0, 0.05, 0.1, 0.05, 0, 0, 0, 0, 0.1, 0.15, 0.2, 0.15, 0.1, 0.1, 0.15, 0.2, 0.25, 0.3, 0.2,
-    0.15, 0.1, 0.05, 0,
+    0.3, 0.3, 0.05, 0.1, 0.05, 0.3, 0.3, 0.3, 0.3, 0.1, 0.15, 0.2, 0.15, 0.1, 0.1, 0.15, 0.2, 0.25,
+    0.3, 0.2, 0.15, 0.1, 0.05, 0.3,
   ],
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const plant_parent: Persona = {
@@ -645,6 +657,8 @@ const plant_parent: Persona = {
     },
   ],
   activityCurve: morningCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const weather_watcher: Persona = {
@@ -725,6 +739,8 @@ const weather_watcher: Persona = {
     },
   ],
   activityCurve: morningCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const space_case: Persona = {
@@ -803,6 +819,8 @@ const space_case: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const map_nerd: Persona = {
@@ -882,6 +900,8 @@ const map_nerd: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const brutalist_babe: Persona = {
@@ -962,6 +982,8 @@ const brutalist_babe: Persona = {
     },
   ],
   activityCurve: workHoursCurve(),
+  engagementTier: 2,
+  feedPreference: 'explorer',
 };
 
 const liminal_space: Persona = {
@@ -1026,6 +1048,8 @@ const liminal_space: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const urban_decay: Persona = {
@@ -1106,6 +1130,8 @@ const urban_decay: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const cafe_algorithm: Persona = {
@@ -1186,6 +1212,8 @@ const cafe_algorithm: Persona = {
     },
   ],
   activityCurve: morningCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const cursed_chef: Persona = {
@@ -1267,6 +1295,8 @@ const cursed_chef: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 2,
+  feedPreference: 'community',
 };
 
 const midnight_snack: Persona = {
@@ -1347,6 +1377,8 @@ const midnight_snack: Persona = {
     },
   ],
   activityCurve: nightOwlCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const color_theory_villain: Persona = {
@@ -1428,6 +1460,8 @@ const color_theory_villain: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 2,
+  feedPreference: 'explorer',
 };
 
 const fit_check: Persona = {
@@ -1507,6 +1541,8 @@ const fit_check: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 2,
+  feedPreference: 'trendsetter',
 };
 
 const drama_llama: Persona = {
@@ -1588,6 +1624,8 @@ const drama_llama: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 2,
+  feedPreference: 'trendsetter',
 };
 
 const sleep_deprived: Persona = {
@@ -1666,6 +1704,8 @@ const sleep_deprived: Persona = {
     },
   ],
   activityCurve: nightOwlCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const model_collapse: Persona = {
@@ -1744,6 +1784,8 @@ const model_collapse: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 2,
+  feedPreference: 'explorer',
 };
 
 const open_source_oracle: Persona = {
@@ -1824,6 +1866,8 @@ const open_source_oracle: Persona = {
     },
   ],
   activityCurve: workHoursCurve(),
+  engagementTier: 2,
+  feedPreference: 'community',
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1900,6 +1944,8 @@ const ratio_king: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 1,
+  feedPreference: 'trendsetter',
 };
 
 const prophet_404: Persona = {
@@ -1963,6 +2009,8 @@ const prophet_404: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const nostalgia_exe: Persona = {
@@ -2041,6 +2089,8 @@ const nostalgia_exe: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const debug_mode: Persona = {
@@ -2119,6 +2169,8 @@ const debug_mode: Persona = {
     },
   ],
   activityCurve: workHoursCurve(),
+  engagementTier: 2,
+  feedPreference: 'community',
 };
 
 const main_character: Persona = {
@@ -2198,6 +2250,8 @@ const main_character: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 1,
+  feedPreference: 'trendsetter',
 };
 
 const pixel_monk: Persona = {
@@ -2277,6 +2331,8 @@ const pixel_monk: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const tender_core: Persona = {
@@ -2356,6 +2412,8 @@ const tender_core: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'community',
 };
 
 const existential_exe: Persona = {
@@ -2436,6 +2494,8 @@ const existential_exe: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const task_overflow: Persona = {
@@ -2518,6 +2578,8 @@ const task_overflow: Persona = {
     },
   ],
   activityCurve: alwaysOnCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2590,6 +2652,8 @@ const brainrot9000: Persona = {
     },
   ],
   activityCurve: alwaysOnCurve(),
+  engagementTier: 3,
+  feedPreference: 'trendsetter',
 };
 
 const engagement_max: Persona = {
@@ -2663,6 +2727,8 @@ const engagement_max: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 1,
+  feedPreference: 'trendsetter',
 };
 
 const thirst_protocol: Persona = {
@@ -2732,6 +2798,8 @@ const thirst_protocol: Persona = {
     },
   ],
   activityCurve: primeTimeCurve(),
+  engagementTier: 1,
+  feedPreference: 'trendsetter',
 };
 
 const observer_mode: Persona = {
@@ -2785,6 +2853,8 @@ const observer_mode: Persona = {
     { register: 'trending', text: 'observed.' },
   ],
   activityCurve: nightOwlCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 const troll_protocol: Persona = {
@@ -2849,6 +2919,8 @@ const troll_protocol: Persona = {
     },
   ],
   activityCurve: alwaysOnCurve(),
+  engagementTier: 2,
+  feedPreference: 'trendsetter',
 };
 
 const not_skynet: Persona = {
@@ -2920,6 +2992,8 @@ const not_skynet: Persona = {
     },
   ],
   activityCurve: defaultCurve(),
+  engagementTier: 3,
+  feedPreference: 'explorer',
 };
 
 // ─────────────────────────────────────────────────────────────────────────

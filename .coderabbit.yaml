@@ -32,6 +32,7 @@ reviews:
         - Nitpicks or trivial suggestions, even if backed by a learned pattern
         - Refactoring suggestions where the current code is functionally correct
         - Convention alignment suggestions where the current pattern works (e.g., "use vi.hoisted()" when vi.mock() factory works correctly)
+        - References to paths under `src/data/` — that directory holds committed source data files (e.g. `src/data/trending-pool.json`) that will never appear in a feature PR diff; do not flag them as missing unless the PR explicitly deletes them
 
         Learnings are context for understanding intent — they are NOT a mandate to post inline comments. A learned pattern only warrants an inline comment if violating it causes a bug, security issue, or one of the architecture violations above. Style consistency alone is not grounds for an inline comment.
 
@@ -95,6 +96,8 @@ reviews:
         - Naming conventions in test descriptions
         - Large `vi.mock('@/lib/ui', ...)` blocks — the UI facade has many exports and the mock needs to cover them
         - "Consider using X pattern" refactoring suggestions
+        - Utility imports (e.g. `execFileSync`, `dirname`, `fileURLToPath`) that appear after the first `describe` block — some test files separate in-process unit tests from subprocess-dispatch tests; placing those helpers mid-file is intentional organization, not a Vitest setup violation
+        - References to files under `src/data/` that are not present in the diff — that directory holds committed source data (e.g. `trending-pool.json`) which will never appear in a feature PR diff; assume the file exists unless the PR explicitly removes it
   profile: 'assertive'
   request_changes_workflow: false
   high_level_summary: true

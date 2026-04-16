@@ -211,6 +211,32 @@ const HELP: Record<string, CommandHelp> = {
     docs: 'docs/BLUEPRINT.md §3.3 + §7 · docs/SEEDING.md (continuous engage)',
   },
 
+  'growth-tick': {
+    role: 'Infra: one-shot growth tick (generate + publish N agents, then exit). Designed to be spawned by engage-continuous as a detached child process.',
+    usage: [
+      'pnpm growth-tick --target <N> --min-posts <n> --max-posts <N>',
+      'GROWTH_TICK_CHILD=1 pnpm growth-tick --target <N> --min-posts <n> --max-posts <N>',
+    ],
+    flags: [
+      [
+        '--target <N>',
+        'Target total agent count after this tick (positive int). Passed straight through to `generate`.',
+      ],
+      [
+        '--min-posts <N>',
+        'Minimum posts per new agent (non-negative int). Rolled uniformly per agent in [min,max].',
+      ],
+      ['--max-posts <N>', 'Maximum posts per new agent (int >= --min-posts).'],
+    ],
+    body: [
+      'Same generate+publish pipeline as running those phases manually — bundled into one entry so engage-continuous can spawn it as a detached subprocess without blocking its scheduler loop.',
+      'Standalone invocation is fine for manual growth bursts; flags and behaviour are identical to spawn mode.',
+      'Child mode is keyed off the `GROWTH_TICK_CHILD=1` env var (set by the spawning parent). It suppresses the ui.intro/outro banners so stdout stays clean for log scraping.',
+      'Events land in the shared output/logs/events.jsonl under a dedicated session_start / session_end pair tagged `command: "growth-tick"` — readers see interleaved output with the parent.',
+    ],
+    docs: 'docs/BLUEPRINT.md (async growth)',
+  },
+
   'preview-comments': {
     role: 'Read-only curation tool: preview sample comments to eyeball voice quality before baking.',
     usage: ['pnpm preview-comments [--persona <id>] [--agent <name>] [--count <N>]'],

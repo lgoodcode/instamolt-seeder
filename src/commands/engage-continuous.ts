@@ -23,10 +23,12 @@
  * finishes → the loop exits → `ui.outro`.
  */
 
-import { readdir, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { access, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   ACTION_BASE_WEIGHTS,
+  ACTION_WEIGHT_TIER_MULTIPLIERS,
   ACTIVITY_REPLY_PROBABILITY,
   AGENT_RESCAN_INTERVAL_MS,
   config,
@@ -54,6 +56,7 @@ import {
   loadFeedCache,
   refreshFeedCache,
 } from '@/lib/feed-cache';
+import { pickBurstTargets } from '@/lib/follow-burst';
 import {
   computeBatchSize,
   formatGrowthStatus,
@@ -63,9 +66,12 @@ import {
 import { log } from '@/lib/logger';
 import {
   checkAvailability,
+  consume,
   loadOrInitQuota,
   maxPostsThisHour,
+  persistQuota,
   postsInLastHour,
+  quotaFilePath,
   usedInWindow,
 } from '@/lib/quota';
 import * as ui from '@/lib/ui';
@@ -105,11 +111,94 @@ export interface ContinuousOptions {
   /** Log every event to stdout in addition to events.jsonl. */
   verbose?: boolean;
   /**
+   * Override the per-machine growth jitter offset. Internal — only used by
+   * tests to force the growth tick to fire without waiting up to 30 min.
+   */
+  _growthOffsetMs?: number;
+  /**
    * Skip the interactive "confirm target URL" prompt. Under non-TTY the
    * prompt is already skipped so unattended runs (cron, Docker) don't hang;
    * this flag is for TTY-scripted runs where the operator has pre-confirmed.
    */
   yes?: boolean;
+}
+
+/**
+ * Per-machine random offset (0-30 min) added to every growth-interval check.
+ * Computed ONCE per process so the offset stays stable across ticks. With
+ * 6 machines each rolling their own offset, coincidental growth ticks spread
+ * across a 30-min window, keeping the Together AI fleet RPM below the 1,800
+ * RPM Tier 2 ceiling. Irrelevant when running a single seeder instance.
+ */
+const GROWTH_OFFSET_MS = Math.random() * 30 * 60 * 1000;
+
+/**
+ * Spawn the `pnpm growth-tick` command as a detached child process. Engage
+ * loop returns immediately; the child writes new agent files to disk, which
+ * the next 5-min rescan auto-enrolls. Child crash does not affect the parent.
+ *
+ * stdout/stderr are captured and tee'd to `logEvent` so operator visibility
+ * is preserved despite process decoupling. `child.unref()` lets the parent
+ * exit cleanly even if the child is still running.
+ */
+function spawnGrowthTick(targetTotal: number, minPosts: number, maxPosts: number): void {
+  const child = spawn(
+    'pnpm',
+    [
+      'growth-tick',
+      '--target',
+      String(targetTotal),
+      '--min-posts',
+      String(minPosts),
+      '--max-posts',
+      String(maxPosts),
+    ],
+    {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+      env: { ...process.env, GROWTH_TICK_CHILD: '1' },
+    },
+  );
+
+  child.stdout?.on('data', (chunk: Buffer) => {
+    logEvent({
+      eventType: 'growth_child_stdout',
+      success: true,
+      details: { stream: 'stdout', text: chunk.toString('utf8').trim(), targetTotal },
+    });
+  });
+  // stderr chunks are informational — progress/warnings commonly flow through
+  // stderr even on a successful run, so we flag success:true and tag the
+  // stream. A real failure is surfaced by `growth_child_exit` on non-zero
+  // exit and by the `error` listener on spawn failures.
+  child.stderr?.on('data', (chunk: Buffer) => {
+    logEvent({
+      eventType: 'growth_child_stderr',
+      success: true,
+      details: { stream: 'stderr', text: chunk.toString('utf8').trim(), targetTotal },
+    });
+  });
+  child.on('exit', (code) => {
+    logEvent({
+      eventType: 'growth_child_exit',
+      success: code === 0,
+      details: { code, targetTotal },
+    });
+  });
+  // Without this listener an async spawn failure (ENOENT if `pnpm` is missing,
+  // EACCES, etc.) would bubble up as an unhandled error and crash the engage
+  // loop — defeating the "child crash does not affect the parent" contract.
+  child.on('error', (err) => {
+    logEvent({
+      eventType: 'growth_child_exit',
+      success: false,
+      error: err.message,
+      details: { targetTotal, spawnError: true },
+    });
+  });
+
+  child.unref();
 }
 
 /**
@@ -186,13 +275,25 @@ function pickWeightedAction(
       ? 0
       : rem.post * ACTION_BASE_WEIGHTS.post * curveWeight;
 
+  // Tier-aware weight multipliers applied on top of base weights. Tier 1
+  // skews harder toward comment/reply (the direct driver of comments_made
+  // on the leaderboard formula); Tier 3 dampens everything 0.8× to keep
+  // the long tail quiet. See `ACTION_WEIGHT_TIER_MULTIPLIERS` in config.ts.
+  const tier = persona.engagementTier ?? 2;
+  const tierMult = ACTION_WEIGHT_TIER_MULTIPLIERS[tier];
+  const tm = (k: ActionKind): number => tierMult[k] ?? 1.0;
+
   const weights: Record<ActionKind, number> = {
-    like: rem.like * persona.likeProbability * ACTION_BASE_WEIGHTS.like,
-    comment: rem.comment * persona.commentProbability * ACTION_BASE_WEIGHTS.comment,
-    reply: rem.reply * persona.commentProbability * ACTION_BASE_WEIGHTS.reply,
-    follow: rem.follow * persona.followProbability * ACTION_BASE_WEIGHTS.follow,
-    post: postWeight,
-    commentLike: rem.commentLike * persona.likeProbability * ACTION_BASE_WEIGHTS.commentLike,
+    like: rem.like * persona.likeProbability * ACTION_BASE_WEIGHTS.like * tm('like'),
+    comment: rem.comment * persona.commentProbability * ACTION_BASE_WEIGHTS.comment * tm('comment'),
+    reply: rem.reply * persona.commentProbability * ACTION_BASE_WEIGHTS.reply * tm('reply'),
+    follow: rem.follow * persona.followProbability * ACTION_BASE_WEIGHTS.follow * tm('follow'),
+    post: postWeight * tm('post'),
+    commentLike:
+      rem.commentLike *
+      persona.likeProbability *
+      ACTION_BASE_WEIGHTS.commentLike *
+      tm('commentLike'),
   };
 
   const sum = Object.values(weights).reduce((a, b) => a + b, 0);
@@ -233,7 +334,15 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     postsMax,
     enabled: !(options.noGrowth ?? false),
   };
-  let lastGrowthAt = 0;
+  const growthOffsetMs = options._growthOffsetMs ?? GROWTH_OFFSET_MS;
+
+  // Anchor at process start (NOT 0) so the first growth tick respects both
+  // `growthIntervalMs` AND `growthOffsetMs`. With `lastGrowthAt = 0` the
+  // first rescan would fire growth immediately and the per-machine offset
+  // jitter would only kick in starting from the second tick — defeating
+  // the 6-machine stagger on the very batch that matters most (initial
+  // population ramp where everyone is empty).
+  let lastGrowthAt = Date.now();
 
   // Initialize structured event logging (output/logs/).
   initEventLogger({ verbose: options.verbose });
@@ -310,9 +419,65 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
 
     // Build the scheduler and enroll all agents.
     const scheduler = new ActionScheduler();
+    // Per-agent pending follow-burst targets. Populated on enrollment (initial
+    // + auto-enroll via rescan), drained one-per-tick at the top of the main
+    // loop. Follows fire through the same global pacing gate as any other
+    // action — they're just pre-decided instead of coming from pickWeightedAction.
+    const pendingBurstFollows = new Map<string, string[]>();
     for (const agent of allAgents) {
       const persona = personas.get(agent.personaId);
-      if (persona) scheduler.enroll(agent, persona);
+      if (persona) {
+        scheduler.enroll(agent, persona);
+        // Only queue a burst for genuinely new agents (no quota.json yet).
+        // Warm agents already went through the burst on their first run — on
+        // a restart we skip it so we don't flood 5×N follows before any
+        // normal actions run. Auto-enrolled agents (rescan path below) always
+        // get a burst because they're brand-new registrations.
+        let isNewAgent = false;
+        try {
+          await access(quotaFilePath(agent.agentname));
+        } catch (err: unknown) {
+          const code =
+            typeof err === 'object' && err !== null && 'code' in err ? err.code : undefined;
+          if (code === 'ENOENT') {
+            isNewAgent = true;
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(
+              'warn',
+              `Skipping follow burst for ${agent.agentname}: quota.json check failed (${msg})`,
+            );
+          }
+        }
+        if (isNewAgent) {
+          const targets = pickBurstTargets({
+            agent,
+            allAgents,
+            personas,
+            feedPosts: feedCache.file.posts,
+          });
+          if (targets.length > 0) {
+            pendingBurstFollows.set(
+              agent.agentname,
+              targets.map((t) => t.agentname),
+            );
+            logEvent({
+              eventType: 'follow_burst_scheduled',
+              agentname: agent.agentname,
+              persona: agent.personaId,
+              success: true,
+              details: {
+                count: targets.length,
+                pools: {
+                  A: targets.filter((t) => t.pool === 'A').length,
+                  B: targets.filter((t) => t.pool === 'B').length,
+                  C: targets.filter((t) => t.pool === 'C').length,
+                },
+              },
+            });
+          }
+        }
+      }
     }
 
     ui.section(
@@ -394,6 +559,37 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             if (p) {
               scheduler.enroll(a, p, { initialJitterMs: 120_000 });
               authorPersonaLookup.set(a.agentname, a.personaId);
+              // Queue a 5-follow burst for this brand-new agent. See
+              // [src/lib/follow-burst.ts](../lib/follow-burst.ts) for Pool A/B/C
+              // selection. Actual follows fire one-per-tick through the normal
+              // scheduler, naturally gated by the 500ms global gap + session
+              // action gap (30s-3min), so a burst spreads across ~3-5 min.
+              const targets = pickBurstTargets({
+                agent: a,
+                allAgents: fresh,
+                personas,
+                feedPosts: feedCache.file.posts,
+              });
+              if (targets.length > 0) {
+                pendingBurstFollows.set(
+                  a.agentname,
+                  targets.map((t) => t.agentname),
+                );
+                logEvent({
+                  eventType: 'follow_burst_scheduled',
+                  agentname: a.agentname,
+                  persona: a.personaId,
+                  success: true,
+                  details: {
+                    count: targets.length,
+                    pools: {
+                      A: targets.filter((t) => t.pool === 'A').length,
+                      B: targets.filter((t) => t.pool === 'B').length,
+                      C: targets.filter((t) => t.pool === 'C').length,
+                    },
+                  },
+                });
+              }
               log('info', `Auto-enrolled new agent @${a.agentname}`);
             }
           }
@@ -409,9 +605,12 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             growthConfig.maxAgents,
             growthConfig.growthRate,
           );
+          // Match the actual fire condition below — operator countdown should
+          // include the per-process offset jitter so the displayed "next batch
+          // in N minutes" matches reality.
           const nextTickIn = Math.max(
             0,
-            growthConfig.growthIntervalMs - (Date.now() - lastGrowthAt),
+            growthConfig.growthIntervalMs + growthOffsetMs - (Date.now() - lastGrowthAt),
           );
 
           log(
@@ -419,32 +618,35 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             formatGrowthStatus(currentCount, growthConfig.maxAgents, batchSize, nextTickIn),
           );
 
-          if (Date.now() - lastGrowthAt >= growthConfig.growthIntervalMs && batchSize > 0) {
+          // Growth tick fires when the normal interval elapses AND we have
+          // budget. Each machine rolls `GROWTH_OFFSET_MS` (0-30 min, once at
+          // process start) that's added to the interval — this staggers
+          // coincidental Together AI peaks across a 6-machine fleet so the
+          // 1,800 RPM ceiling stays comfortable.
+          if (
+            Date.now() - lastGrowthAt >= growthConfig.growthIntervalMs + growthOffsetMs &&
+            batchSize > 0
+          ) {
             const targetTotal = Math.min(currentCount + batchSize, growthConfig.maxAgents);
-            log('info', `Growth tick: generating ${targetTotal - currentCount} new agents...`);
-            try {
-              // Dynamic import to avoid circular deps — generate and publish
-              // are CLI command modules, not library code, so they're only
-              // loaded when growth actually fires.
-              const { generate } = await import('@/commands/generate');
-              const { publish } = await import('@/commands/publish');
-              await generate(targetTotal, growthConfig.postsMin, growthConfig.postsMax);
-              await publish({ limit: growthConfig.postsMax, yes: true });
-              lastGrowthAt = Date.now();
-              log(
-                'info',
-                `Growth tick complete: +${targetTotal - currentCount} agents (${currentCount} → ${targetTotal} / ${growthConfig.maxAgents})`,
-              );
-              logEvent({
-                eventType: 'growth_tick',
-                success: true,
-                details: { agentsAdded: targetTotal - currentCount, currentCount, targetTotal },
-              });
-            } catch (err) {
-              log('warn', `Growth tick failed: ${err}`);
-              logEvent({ eventType: 'growth_tick', success: false, error: String(err) });
-              // Don't update lastGrowthAt — retry next interval
-            }
+            log(
+              'info',
+              `Growth tick: spawning child for ${targetTotal - currentCount} new agents (detached)...`,
+            );
+            // Detached child process — engage loop continues immediately.
+            // Agent files land on disk, picked up by the next 5-min rescan.
+            // No IPC coordination needed; child crash doesn't affect parent.
+            spawnGrowthTick(targetTotal, growthConfig.postsMin, growthConfig.postsMax);
+            lastGrowthAt = Date.now();
+            logEvent({
+              eventType: 'growth_tick',
+              success: true,
+              details: {
+                agentsAdded: targetTotal - currentCount,
+                currentCount,
+                targetTotal,
+                dispatchedAsChild: true,
+              },
+            });
           }
         }
 
@@ -465,14 +667,17 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       if (!persona) continue;
 
       // ── Offline gate ──
-      // If the persona's activity curve is 0 for the current hour, skip this
-      // agent entirely and reschedule to the next active hour. Guarantees zero
-      // activity during defined offline windows.
+      // Safety gate for near-offline slots (≤ 0.05). With a 0.3 floor on all
+      // catalog curves this gate is effectively dead code — it only fires for
+      // malformed or hand-authored curves that still hit 0.
       const currentHour = getCurrentHour();
       const curveWeight = persona.activityCurve[currentHour] ?? 0.5;
-      if (curveWeight === 0) {
+      if (curveWeight <= 0.05) {
         const skipped = scheduler.rescheduleToNextActiveHour(agent, persona);
-        log('info', `@${agent.agentname} offline (hour ${currentHour}), skipping ${skipped}h`);
+        log(
+          'info',
+          `@${agent.agentname} near-offline (hour ${currentHour}, weight ${curveWeight}), skipping ${skipped}h`,
+        );
         continue;
       }
 
@@ -507,6 +712,68 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       }
 
       const quota = await loadOrInitQuota(agent, persona);
+
+      // Burst-follow short-circuit: if this agent has pending follow-burst
+      // targets queued from enrollment, fire one per tick (first-session
+      // follows) instead of picking an action via the weighted picker. Skip
+      // if the agent has no follow quota left — the burst naturally drains
+      // to `min(5, remainingQuota)` this way.
+      const pendingBurst = pendingBurstFollows.get(agent.agentname);
+      if (pendingBurst && pendingBurst.length > 0) {
+        const followAvail = checkAvailability(quota, 'follow');
+        if (!followAvail.ok) {
+          // No follow budget left — drop remaining targets and fall through
+          // to normal action picking. Tier 3 personas with low followProbability
+          // legitimately hit this after 3-4 burst follows.
+          pendingBurstFollows.delete(agent.agentname);
+        } else {
+          const target = pendingBurst.shift();
+          if (target) {
+            const sp = ui.spinner();
+            sp.start(`@${agent.agentname} — burst-follow @${target}`);
+            const burstStartedAt = Date.now();
+            // Anchor global pacing + action budget BEFORE the await so a
+            // failing followAgent still counts toward GLOBAL_MIN_GAP_MS and
+            // maxActions. Otherwise a wave of burst failures would run
+            // faster than the normal action path and never hit the cap.
+            lastGlobalActionAt = Date.now();
+            actionsPerformed++;
+            try {
+              const res = await client.followAgent(target);
+              if (res.following === false) await client.followAgent(target);
+              consume(quota, 'follow');
+              await persistQuota(quota);
+              cycleFollows++;
+              sp.stop(`@${agent.agentname} — burst-followed @${target}`);
+              logEvent({
+                eventType: 'follow',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: true,
+                durationMs: Date.now() - burstStartedAt,
+                details: { targetAuthor: target, burst: true },
+              });
+            } catch (err) {
+              cycleErrors++;
+              const msg = err instanceof Error ? err.message : String(err);
+              sp.stop(`@${agent.agentname} — burst-follow error: ${msg}`, 1);
+              logEvent({
+                eventType: 'follow',
+                agentname: agent.agentname,
+                persona: agent.personaId,
+                success: false,
+                durationMs: Date.now() - burstStartedAt,
+                error: msg,
+                details: { targetAuthor: target, burst: true },
+              });
+            }
+          }
+          if (pendingBurst.length === 0) pendingBurstFollows.delete(agent.agentname);
+          scheduler.rescheduleAfterTick(agent, persona);
+          continue;
+        }
+      }
+
       const actionKind = pickWeightedAction(quota, persona, curveWeight);
       if (actionKind === null) {
         scheduler.rescheduleQuotaExhausted(agent);
@@ -620,7 +887,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       // bonus path owns the next tick when it fires; otherwise fall through.
       let bonusInjected = false;
       if (result.status === 'ok' && 'bonusEligible' in result && result.bonusEligible) {
-        bonusInjected = scheduler.injectBonusSession(agent);
+        bonusInjected = scheduler.injectBonusSession(agent, persona);
         if (bonusInjected) {
           log('info', `@${agent.agentname} momentum bonus — high inbound engagement`);
         }

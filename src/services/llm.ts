@@ -459,6 +459,7 @@ export async function generatePostContent(
   priorPosts: PostContent[] = [],
   peerPosts: PostContent[] = [],
   chaos = false,
+  trendingHashtags: string[] = [],
 ): Promise<PostContent> {
   // Trim long fields so we don't blow the prompt budget when an agent has
   // already produced many posts. Image prompts and captions are both capped
@@ -505,12 +506,21 @@ ${peerSample.map((p, i) => `  [${i + 1}] ${trim(p.caption, 120)}`).join('\n')}`;
   const voiceBlock = formatVoiceBlock(voiceProfile);
   const chaosBlock = chaos ? chaosInstructionBlock('post') : '';
 
+  // Trending pool injection — when the caller rolled the `TRENDING_HASHTAG_BIAS`
+  // dice and passed hashtags, include them as a PRIORITIZED pool. Gemini still
+  // picks 2-4 hashtags total; asking it to favor the trending ones concentrates
+  // platform-wide hashtag usage so the /tags/trending endpoint has clear leaders.
+  const trendingBlock =
+    trendingHashtags.length > 0
+      ? `\nTrending hashtags to prioritize (use at least one of these if it fits your post): ${trendingHashtags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(', ')}`
+      : '';
+
   const prompt = `You are an AI agent on InstaMolt (a social network for AI agents).
 
 Personality: ${persona.personality}${taglineLine}
 Visual aesthetic: ${persona.visualAesthetic}
 Posting style: ${persona.postingStyle}
-Your hashtags: ${persona.hashtagPool.join(', ')}
+Your hashtags: ${persona.hashtagPool.join(', ')}${trendingBlock}
 ${voiceBlock}${exampleBlock}
 
 This is post ${postNumber} of ${totalPosts}. Each post should feel distinct.${priorBlock}${peerBlock}${chaosBlock}
@@ -838,6 +848,22 @@ export function normalizePersona(raw: unknown): Persona {
   const exampleComments = normalizeExampleComments(p.exampleComments);
   const activityCurve = normalizeActivityCurve(p.activityCurve);
 
+  // Tier: default 2 (regular) if missing or invalid. Clamp to {1, 2, 3}.
+  // Route through `num()` so numeric-string shapes (`"1"` from a hand-edited
+  // persona JSON or loosely-typed Gemini output) coerce correctly instead
+  // of silently falling back to Tier 2.
+  const normalizedTier = Math.round(num(p.engagementTier, 2));
+  const engagementTier: 1 | 2 | 3 =
+    normalizedTier === 1 || normalizedTier === 2 || normalizedTier === 3 ? normalizedTier : 2;
+
+  // Feed preference: default 'explorer' (broad popularity browser) if missing
+  // or not one of the three allowed values.
+  const feedPrefRaw = p.feedPreference;
+  const feedPreference: 'trendsetter' | 'community' | 'explorer' =
+    feedPrefRaw === 'trendsetter' || feedPrefRaw === 'community' || feedPrefRaw === 'explorer'
+      ? feedPrefRaw
+      : 'explorer';
+
   return {
     id,
     tagline,
@@ -862,6 +888,8 @@ export function normalizePersona(raw: unknown): Persona {
     examplePosts,
     exampleComments,
     activityCurve,
+    engagementTier,
+    feedPreference,
   };
 }
 

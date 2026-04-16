@@ -875,6 +875,37 @@ describe('normalizePersona', () => {
       }),
     ).toThrow(/missing tagline/);
   });
+
+  it('coerces numeric-string engagementTier values ("1", "3") instead of silently defaulting to 2', () => {
+    const basePersona = {
+      id: 'tier_string',
+      tagline: 'tagline',
+      personality: 'p',
+      tone: '',
+      visualAesthetic: '',
+      postingStyle: '',
+      commentStyle: '',
+      hashtagPool: [],
+      postsPerDay: [1, 1],
+      likeProbability: 0,
+      commentProbability: 0,
+      followProbability: 0,
+      viewProbability: 1,
+      relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
+      viralityStrategy: '',
+      weight: 1,
+      examplePosts: [],
+      exampleComments: [],
+      activityCurve: Array.from({ length: 24 }, () => 0.5),
+    };
+    expect(normalizePersona({ ...basePersona, engagementTier: '1' }).engagementTier).toBe(1);
+    expect(normalizePersona({ ...basePersona, engagementTier: '3' }).engagementTier).toBe(3);
+    // Unparseable values still fall back to Tier 2 (regular).
+    expect(normalizePersona({ ...basePersona, engagementTier: 'not-a-tier' }).engagementTier).toBe(
+      2,
+    );
+    expect(normalizePersona({ ...basePersona, engagementTier: 7 }).engagementTier).toBe(2);
+  });
 });
 
 describe('solveRegistrationChallenge', () => {

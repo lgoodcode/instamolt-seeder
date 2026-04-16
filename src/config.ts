@@ -107,14 +107,14 @@ export const config = {
   // "how many registrations we want in flight."
   registerConcurrency: 15,
   // publishConcurrency: each worker POSTs `/posts/generate` (server-side
-  // Together AI FLUX.1 Schnell + moderation). 10 concurrent × ~3s per
-  // FLUX call ≈ ~200 RPM sustained = 33% of the 600 RPM Together ceiling,
-  // 400 RPM headroom. For a 200-agent publish-drafts run (~2,300 images),
-  // that's ~15 min of sustained ~200 RPM. Phase B's round-robin interleave
-  // spaces each agent's posts across the full fleet queue rather than
-  // firing them back-to-back on one worker, keeping the per-agent burst
-  // shape smooth. The circuit breaker catches any Together-side spike.
-  publishConcurrency: 10,
+  // Together AI FLUX.1 Schnell + moderation). 8 concurrent × ~3s per FLUX
+  // call ≈ ~160 RPM peak (~9% of the 1,800 RPM Tier 2 Together ceiling).
+  // Deliberately low per-machine so 6 machines can run concurrently: 6 ×
+  // 160 RPM = 960 RPM worst-case coincidental peak, 53% utilization. The
+  // old value 10 targeted single-machine throughput; new value optimises
+  // for horizontal scaling. Paired with async growth-tick architecture
+  // (see docs/BLUEPRINT.md §Growth) so growth no longer blocks engage.
+  publishConcurrency: 8,
   // followConcurrency: pure HTTP, no LLM, no Together, no subprocess.
   // High is fine — the ceiling is the platform's event-loop comfort on a
   // bursty POST wave.
@@ -151,7 +151,7 @@ export const config = {
   //   no Together — high is fine; the ceiling is platform event-loop
   //   comfort on a bursty GET wave.
   viewsPerPublishedPost: 30,
-  lurkViewsPerAgent: 10,
+  lurkViewsPerAgent: 5,
   viewConcurrency: 15,
 
   // Transient-failure retry policy for every InstaMolt API call. Covers
@@ -223,7 +223,11 @@ export const QUOTA_CAPS: Record<ActionKind, (p: Persona) => number> = {
   like: (p) => Math.round(80 * p.likeProbability),
   comment: (p) => Math.round(15 * p.commentProbability),
   reply: (p) => Math.round(25 * p.commentProbability),
-  follow: (p) => Math.round(10 * p.followProbability),
+  // follow: raised 10 → 25 to accommodate the new-agent follow burst (5 follows
+  // spent on day 1) plus background follows. Median persona (0.2) → cap 5;
+  // Tier 1 (~0.3) → cap 7-8; Tier 3 (~0.15) → cap 3-4. Burst logic must clamp
+  // to min(5, remainingQuota) so Tier 3 agents only fire 3-4 burst follows.
+  follow: (p) => Math.round(25 * p.followProbability),
   post: (p) => p.postsPerDay[1],
   commentLike: (p) => Math.round(40 * p.likeProbability),
 };
@@ -248,25 +252,53 @@ export const ACTION_COOLDOWNS_MS: Record<ActionKind, number> = {
 // on top of (remaining quota × persona probability). These are "how rare" an
 // action is in general regardless of budget — a high-comment persona still
 // posts less often than it likes, even when its comment budget is full.
+//
+// Retuned for viral engagement shaping: reach = likes_received + comments_made
+// on the platform, so comments/replies get boosted because they directly
+// increment the commenter's comments_made counter. Posts are down-weighted
+// because they fire on wall-clock cadence (not the weighted picker) and the
+// old 0.2 weight was redundant with the cadence gate. Follows go down because
+// the new-agent follow burst (Phase 6) covers the bulk of follow volume.
 export const ACTION_BASE_WEIGHTS: Record<ActionKind, number> = {
-  like: 1.0,
-  comment: 0.6,
-  reply: 1.0,
-  follow: 0.4,
-  post: 0.2,
+  like: 0.9,
+  comment: 1.6,
+  reply: 1.5,
+  follow: 0.3,
+  post: 0.1,
   commentLike: 0.8,
 };
 
+// Per-tier multiplier applied AFTER ACTION_BASE_WEIGHTS in the weighted picker.
+// Tier 1 agents skew harder toward comments/replies (they're the ones climbing
+// the leaderboard via comments_made); Tier 3 agents engage less across the
+// board. Tier 2 is no-op baseline. Missing tier defaults to Tier 2.
+export const ACTION_WEIGHT_TIER_MULTIPLIERS: Record<
+  1 | 2 | 3,
+  Partial<Record<ActionKind, number>>
+> = {
+  1: { like: 0.8, comment: 1.3, reply: 1.3 },
+  2: {},
+  3: { like: 0.8, comment: 0.8, reply: 0.8, follow: 0.8, post: 0.8, commentLike: 0.8 },
+};
+
 // --- Feed cache (output/feed-cache.json) ---
-export const FEED_CACHE_MAX_AGE_MS = 5 * 60_000;
-export const FEED_CACHE_DEFAULT_PAGES = 4;
+// MAX_AGE: 5 → 3 min — the new tighter pacing produces more actions per minute
+// so a fresher cache keeps the popularity/velocity signal current.
+// DEFAULT_PAGES: 4 → 3 — reduces refresh cost now that the cache turns over faster.
+export const FEED_CACHE_MAX_AGE_MS = 3 * 60_000;
+export const FEED_CACHE_DEFAULT_PAGES = 3;
 export const FEED_CACHE_DEFAULT_LIMIT = 50;
 
+/** Probability that a post-generation call injects hashtags from the trending
+ * pool. 0.6 means ~60% of new posts use trending tags, ~40% pure organic. */
+export const TRENDING_HASHTAG_BIAS = 0.6;
+
 // --- Action scheduler / continuous loop ---
-// Minimum gap between ANY two actions across the whole population. Keeps the
-// activity pattern organic (no burst floods) even when many agents are ready.
-export const GLOBAL_MIN_GAP_MS = 3_000;
-export const GLOBAL_MAX_GAP_MS = 8_000;
+// Minimum gap between ANY two actions across the whole population. Tightened
+// from 3s → 500ms to unlock higher fleet throughput. Combined with async growth
+// ticks (Phase 0/infra) the loop no longer blocks on publish.
+export const GLOBAL_MIN_GAP_MS = 500;
+export const GLOBAL_MAX_GAP_MS = 1_200;
 // How often to rescan the agents directory for newly-created agents.
 export const AGENT_RESCAN_INTERVAL_MS = 5 * 60_000;
 // When an agent has zero quota remaining, reschedule its next tick this far
@@ -301,7 +333,7 @@ export function getCurrentHour(): number {
 // (executeActivityDrivenReply) fires instead of the feed-driven thread-dive
 // executor (executeReply). On 'no_fresh_inbound_activity' the dispatcher falls
 // through to the feed-driven path automatically.
-export const ACTIVITY_REPLY_PROBABILITY = 0.35;
+export const ACTIVITY_REPLY_PROBABILITY = 0.55;
 // When feed-driven executeReply can't find a depth<2 parent to reply to, fall
 // back to posting a top-level comment on the same post instead of skipping.
 export const REPLY_FALLBACK_TO_COMMENT = true;

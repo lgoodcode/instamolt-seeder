@@ -285,6 +285,87 @@ describe('refreshFeedCache', () => {
       refreshFeedCache(client, { pages: 1, limit: 50, path: '/tmp/f.json' }),
     ).rejects.toThrow(/all sources failed/);
   });
+
+  it('assigns _source deterministically by explore→hot→top→new precedence regardless of settle order', async () => {
+    // Build deferred per-source promises so the test can resolve them OUT of
+    // call order — that's the actual regression. The pre-fix implementation
+    // mutated a shared `seen` Set inside pullSource, so whichever parallel
+    // microtask settled first stamped the provenance. A mock that resolves
+    // in call order would silently pass even with the buggy code (because
+    // explore was always first to mutate the set). Resolving in reverse
+    // order — new → top → hot → explore — is the real adversarial case.
+    type Deferred = {
+      resolve: (v: { posts: RemotePost[]; has_more: boolean }) => void;
+      promise: Promise<{ posts: RemotePost[]; has_more: boolean }>;
+    };
+    const makeDeferred = (): Deferred => {
+      let resolve: Deferred['resolve'] = () => {};
+      const promise = new Promise<{ posts: RemotePost[]; has_more: boolean }>((res) => {
+        resolve = res;
+      });
+      return { resolve, promise };
+    };
+
+    const exploreD = makeDeferred();
+    const hotD = makeDeferred();
+    const topD = makeDeferred();
+    const newD = makeDeferred();
+
+    let getPostsCallIdx = 0;
+    const getPosts = vi.fn(async () => {
+      // refreshFeedCache calls getPosts in order: hot, top, new
+      const order = [hotD.promise, topD.promise, newD.promise];
+      const p = order[getPostsCallIdx++];
+      if (!p) throw new Error('unexpected getPosts call');
+      return p;
+    });
+    const getExplorePage = vi.fn(async () => exploreD.promise);
+    const client = { getExplorePage, getPosts } as unknown as InstaMoltClient;
+
+    const cachePromise = refreshFeedCache(client, {
+      pages: 1,
+      limit: 50,
+      path: '/tmp/provenance.json',
+    });
+
+    // Resolve in REVERSE precedence order — new wins the race to mutate any
+    // shared state, hot/top come next, explore last. The buggy code would
+    // stamp `_source: 'new'` on 'shared'; the correct code stamps explore.
+    newD.resolve({ posts: [makePost('shared'), makePost('new-only')], has_more: false });
+    topD.resolve({ posts: [makePost('shared'), makePost('top-only')], has_more: false });
+    hotD.resolve({ posts: [makePost('shared'), makePost('hot-only')], has_more: false });
+    // Microtask drain so explore really is the last to settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    exploreD.resolve({ posts: [makePost('shared'), makePost('exp-only')], has_more: false });
+
+    const cache = await cachePromise;
+    const shared = cache.posts.find((p) => p.id === 'shared');
+    expect(shared?._source).toBe('explore');
+    expect(shared?._sourceRank).toBe(0);
+
+    // Unique posts keep their originating source.
+    expect(cache.posts.find((p) => p.id === 'hot-only')?._source).toBe('hot');
+    expect(cache.posts.find((p) => p.id === 'top-only')?._source).toBe('top');
+    expect(cache.posts.find((p) => p.id === 'new-only')?._source).toBe('new');
+  });
+
+  it('assigns precedence correctly when the winning source fails (e.g. explore down → hot wins shared)', async () => {
+    // Explore rejects; hot + top + new all return 'shared'. Hot must win.
+    const handler = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('explore down')) // explore
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }) // hot
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }) // top
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }); // new
+    const client = { getExplorePage: handler, getPosts: handler } as unknown as InstaMoltClient;
+    const cache = await refreshFeedCache(client, {
+      pages: 1,
+      limit: 50,
+      path: '/tmp/prov-fallback.json',
+    });
+    const shared = cache.posts.find((p) => p.id === 'shared');
+    expect(shared?._source).toBe('hot');
+  });
 });
 
 describe('loadFeedCache', () => {

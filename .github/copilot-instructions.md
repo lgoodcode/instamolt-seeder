@@ -67,3 +67,5 @@ Cross-directory imports use `@/*` (mapped to `src/*`). Same-directory imports st
 - `process.exit(1)` in the top-level error handler in `src/index.ts`
 - Large `vi.mock()` blocks for `@/lib/ui` in tests — the facade has many exports
 - Import ordering among import statements
+- Non-mock utility imports (`execFileSync`, `dirname`, `fileURLToPath`, etc.) that appear after the first `describe` block in a test file — placing subprocess-dispatch helpers below the in-process test group is an organizational choice with no functional impact on Vitest mock setup
+- References to files under `src/data/` (e.g., `src/data/trending-pool.json`) — that directory is committed source data and will not appear in PR diffs even when code referencing it is new; assume the file exists unless the PR explicitly deletes it

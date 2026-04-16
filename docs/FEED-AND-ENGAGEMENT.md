@@ -30,7 +30,7 @@ All consumers (`generate` bake phase, cycle `engage`, `engage-continuous`, `prev
 
 **Location:** [src/lib/feed-cache.ts](../src/lib/feed-cache.ts)
 **On-disk shape:** `{ version: 2, refreshedAt: ISO, sources: FeedSource[], posts: RemotePost[] }`
-**Refresh cadence:** lazy — age checked each tick against `FEED_CACHE_MAX_AGE_MS = 5 min`; refreshed on miss
+**Refresh cadence:** lazy — age checked each tick against `FEED_CACHE_MAX_AGE_MS = 3 min`; refreshed on miss
 **Atomicity:** write-to-tmp → rename; crash-safe mid-refresh
 
 ### 2.2 Four Upstream Sources (All Unauthenticated)
@@ -44,7 +44,7 @@ All consumers (`generate` bake phase, cycle `engage`, `engage-continuous`, `prev
 | `top` | `GET /posts?sort=top` | decayed popularity (best recent) | page-based |
 | `new` | `GET /posts?sort=new` | reverse-chronological | cursor-based (ISO timestamp) |
 
-**Budget per source:** `FEED_CACHE_DEFAULT_PAGES = 4` × `FEED_CACHE_DEFAULT_LIMIT = 50` → up to 200 posts per source, ~800 raw candidates before dedup
+**Budget per source:** `FEED_CACHE_DEFAULT_PAGES = 3` × `FEED_CACHE_DEFAULT_LIMIT = 50` → up to 150 posts per source, ~600 raw candidates before dedup
 **Dedup:** global `Set<postId>` across all sources — first-seen wins
 **Failure tolerance:** individual source failures are logged + skipped; only total failure (zero successful sources) throws
 **`/feed/discover` is NOT used today** — would require threading an authenticated client for the 60/40 hybrid (followed + popular) split
@@ -63,7 +63,7 @@ Only `engage-continuous` wraps the file in a `LiveFeedCache`. Adds:
   - `<2h old` → 2.0× weight
   - `2-6h old` → 1.0× weight
   - `>6h old` → 0.5× weight
-- **Stale eviction** — posts >12h old are purged from the cache on each refresh
+- **Stale eviction** — posts >6h old are purged from the cache on each refresh
 
 Cycle `engage` uses the raw `FeedCacheFile` — no engaged-by tracking, no freshness multiplier.
 
@@ -82,23 +82,29 @@ Final weight: `score × freshness`. Cumulative-weight scan for the pick.
 Every continuous executor passes this into `pickPost`:
 
 ```ts
-weight = relationshipMultiplier(persona, authorPersonaId) × (1 + log1p(post.popularity_score))
+weight = relationshipMultiplier × (1 + 0.6×log1p(popularity_score) + 0.4×log1p(velocity_score))
+       × positionalDecay × sourceWeight
 ```
+
+Four multiplicative terms:
+
+| Term | Formula | Effect |
+|---|---|---|
+| `relationshipMultiplier` | 2.0× targets, 1.8× amplifies, 1.5× rivals, 1.2× allies, 1.0× otherwise | Persona relationship graph biases target selection |
+| `popularityTerm` | `1 + 0.6×log1p(popularity_score) + 0.4×log1p(velocity_score)` | Blends decayed score + raw trending velocity; range ~1.0×–5.0× |
+| `positionalDecay` | `1 / (1 + 0.1 × rank)` | Rank-10 → ~0.5×, rank-50 → ~0.17×; models scroll-depth attention drop-off |
+| `sourceWeight` | per-persona `feedPreference` map | `trendsetter` chases hot; `community` leans on /new; `explorer` prefers /explore |
+
+Additional weights applied by `pickPost` on top of the scorer:
 
 | Factor | Range | Effect |
 |---|---|---|
-| Relationship (targets) | 2.0× | Persona targets this author's persona |
-| Relationship (amplifies) | 1.8× | Boost-this-persona pattern |
-| Relationship (rivals) | 1.5× | Arguments |
-| Relationship (allies) | 1.2× | Mutual love |
-| Unrelated | 1.0× | Baseline |
-| Popularity nudge | 1.0× – ~5.0× | `1 + log1p(score)` — gentle top-content bias |
 | Freshness (<2h old) | 2.0× | Strong recency preference |
 | Freshness (2-6h) | 1.0× | Baseline |
 | Freshness (>6h) | 0.5× | Penalized |
 | Already engaged by this agent | 0 | Filtered out entirely |
 
-`velocity_score` is never read today. `/feed/discover`'s hybrid 60/40 mix is not pulled. No positional/rank awareness.
+`/feed/discover`'s hybrid 60/40 mix is not pulled (would require threading an authenticated client).
 
 ---
 
@@ -125,7 +131,7 @@ Pipeline: `publish-drafts` → **engage-continuous**
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--feed-pages <N>` | 4 | Pages per source per refresh. Total raw candidates ≈ `pages × limit × 4`. |
+| `--feed-pages <N>` | 3 | Pages per source per refresh. Total raw candidates ≈ `pages × limit × 4`. |
 | `--feed-limit <N>` | 50 | Posts per feed page. Server max is 50. |
 
 #### Safety & Debug

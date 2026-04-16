@@ -244,6 +244,10 @@ async function pullSource(
   // ranks below the last post on page 1 in the server's ranking. The scorer's
   // positional-decay term consumes this.
   let rankCounter = 0;
+  // Intra-source dedup: if the API returns the same post on multiple pages,
+  // skip it so `rankCounter` reflects unique positions and rank-based scoring
+  // isn't inflated by gaps caused by duplicate skips.
+  const sourceSeen = new Set<string>();
   for (let page = 1; page <= pages; page++) {
     let res: RemoteFeedResponse;
     if (source === 'explore') {
@@ -254,6 +258,8 @@ async function pullSource(
       res = await client.getPosts({ sort: source, page, limit });
     }
     for (const post of res.posts ?? []) {
+      if (sourceSeen.has(post.id)) continue;
+      sourceSeen.add(post.id);
       const currentRank = rankCounter++;
       out.push({ ...post, _source: source, _sourceRank: currentRank });
     }

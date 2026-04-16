@@ -24,6 +24,7 @@ function makePersona(id: string, overrides?: Partial<Persona>): Persona {
     likeProbability: 0.5,
     commentProbability: 0.5,
     followProbability: 0.15,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: 'test',
     weight: 2,
@@ -108,6 +109,7 @@ describe('planFollows', () => {
   const personaA = makePersona('pA', {
     hashtagPool: ['#art', '#design', '#creative'],
     followProbability: 0.5,
+    viewProbability: 1,
     relationships: {
       rivals: ['pB'],
       allies: ['pC'],
@@ -175,6 +177,7 @@ describe('planFollows', () => {
     const lowProb = makePersona('pA', {
       ...personaA,
       followProbability: 0.05,
+      viewProbability: 1,
     });
     const result = plan({ followerPersona: lowProb });
     expect(result.budget).toBe(5);
@@ -184,6 +187,7 @@ describe('planFollows', () => {
     const midProb = makePersona('pA', {
       ...personaA,
       followProbability: 0.3,
+      viewProbability: 1,
     });
     const result = plan({ followerPersona: midProb });
     expect(result.budget).toBe(6);
@@ -227,6 +231,7 @@ describe('planFollows', () => {
     const sparseRelations = makePersona('pA', {
       ...personaA,
       followProbability: 0.5,
+      viewProbability: 1,
       relationships: { rivals: ['pB'], allies: [], amplifies: [], targets: [] },
     });
     const result = plan({ followerPersona: sparseRelations });
@@ -243,6 +248,7 @@ describe('planFollows', () => {
     const noRels = makePersona('pA', {
       ...personaA,
       followProbability: 0.5,
+      viewProbability: 1,
       relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     });
     const result = plan({ followerPersona: noRels });
@@ -307,6 +313,7 @@ describe('planFollows', () => {
     const noRels = makePersona('pA', {
       ...personaA,
       followProbability: 0.5,
+      viewProbability: 1,
       relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     });
     const result = plan({ followerPersona: noRels });

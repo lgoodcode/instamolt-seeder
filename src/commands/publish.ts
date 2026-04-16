@@ -8,6 +8,7 @@ import { drainWrites, flushStats, initEventLogger, logEvent } from '@/lib/event-
 import { computeAffinityMatrix, planFollows } from '@/lib/follow-algorithm';
 import { log } from '@/lib/logger';
 import * as ui from '@/lib/ui';
+import { fanOutPostViews } from '@/lib/views';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient, parseErrorCode } from '@/services/instamolt-api';
 import {
@@ -159,8 +160,24 @@ function formatError(err: unknown): string {
  */
 export async function publish(options: PublishOptions = {}): Promise<void> {
   initEventLogger();
+  logEvent({ eventType: 'session_start', success: true, details: { command: 'publish-drafts' } });
   ui.intro('Publish');
 
+  // Wrap the whole flow so every exit path — declined target, missing
+  // agents.json, empty agent list, thrown mid-publish, happy path — emits
+  // `session_end`, drains pending events, and flushes stats. Without this
+  // the three early returns below would leave the session open in
+  // `pnpm events` output and lose the final batch of events from the tail.
+  try {
+    await publishInner(options);
+  } finally {
+    logEvent({ eventType: 'session_end', success: true });
+    await drainWrites();
+    flushStats();
+  }
+}
+
+async function publishInner(options: PublishOptions): Promise<void> {
   if (!(await confirmTarget('publish-drafts', { yes: options.yes }))) {
     ui.outro(ui.color.yellow(`${ui.symbol.warn} publish-drafts aborted — target not confirmed`));
     return;
@@ -731,6 +748,32 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
           });
           postBar.tick(`@${indexAgent.agentname} — ${postFile} posted`);
 
+          // Post-publish view fanout. N random *other* registered agents
+          // authenticated-read the new post so it lands with a believable
+          // opening view count instead of 0. Best-effort — failures emit
+          // `view` events with `success: false` but never abort the publish.
+          // The viewer pool is `readyToPost` (agents with apiKey already in
+          // hand at this phase); the post author is excluded server-side
+          // by `pickViewers` in the helper.
+          if (config.viewsPerPublishedPost > 0) {
+            try {
+              const viewerPool = readyToPost.map((p) => p.data);
+              await fanOutPostViews({
+                postId: result.post.id,
+                postAuthor: indexAgent.agentname,
+                pool: viewerPool,
+                count: config.viewsPerPublishedPost,
+                concurrency: config.viewConcurrency,
+                source: 'publish_fanout',
+              });
+            } catch (err) {
+              // fanOutPostViews catches per-viewer failures internally; an
+              // outer throw here would be a programming error in the helper
+              // itself. Log and move on — do NOT count against the publish.
+              log('warn', `View fanout failed for ${result.post.id}: ${err}`);
+            }
+          }
+
           if (config.postDelay > 0) await sleep(config.postDelay);
         } catch (err) {
           // Only saturation-shaped failures (fleet/per-agent rate limit +
@@ -921,9 +964,6 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       { label: 'errors', value: errorCount, tone: errorCount > 0 ? 'err' : 'info' },
     ]),
   );
-
-  await drainWrites();
-  flushStats();
 
   ui.outro(
     errorCount > 0

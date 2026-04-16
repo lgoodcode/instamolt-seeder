@@ -59,6 +59,7 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
     likeProbability: 0.5,
     commentProbability: 0.6,
     followProbability: 0.3,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
@@ -96,6 +97,7 @@ describe('deriveCapsFromPersona', () => {
         likeProbability: 0.5, // -> like 40, commentLike 20
         commentProbability: 0.6, // -> comment 9, reply 15
         followProbability: 0.3, // -> follow 3
+        viewProbability: 1,
         postsPerDay: [2, 5], // -> post 5 (max)
       }),
     );
@@ -113,6 +115,7 @@ describe('deriveCapsFromPersona', () => {
         likeProbability: 0,
         commentProbability: 0,
         followProbability: 0,
+        viewProbability: 1,
         postsPerDay: [0, 0],
       }),
     );

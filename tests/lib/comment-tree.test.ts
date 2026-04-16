@@ -38,6 +38,7 @@ function makePersona(id: string, relationships: Partial<Persona['relationships']
     likeProbability: 0.5,
     commentProbability: 0.5,
     followProbability: 0.5,
+    viewProbability: 1,
     relationships: {
       rivals: [],
       allies: [],

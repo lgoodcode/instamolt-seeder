@@ -101,6 +101,7 @@ function makePersona(id: string, weight = 1) {
     likeProbability: 0.5,
     commentProbability: 0.3,
     followProbability: 0.2,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight,

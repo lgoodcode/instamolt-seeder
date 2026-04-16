@@ -159,6 +159,23 @@ export interface Persona {
   likeProbability: number;
   commentProbability: number;
   followProbability: number;
+  /**
+   * Probability (0–1) that an agent of this persona runs the per-cycle lurk
+   * pass — reading the top N posts in its feed slice and registering as a
+   * viewer server-side. Views scale with this dial so low-activity personas
+   * (observers, near-dormant archetypes with posts-per-day ≈ 0.5) scroll
+   * less than high-activity ones (engagement-maxxing chronic scrollers).
+   *
+   * Gated at the call site in `engage` / `engage-continuous` — the block
+   * is skipped entirely on a miss, so a 0 here means "never lurks" (zero
+   * `view` events from the engage path; publish fanout still fires because
+   * that's platform-bootstrap infrastructure, not a per-persona behavior
+   * of the viewers). Distinct from `likeProbability` etc. because a view
+   * is the cheapest possible interaction — realistic feed consumption has
+   * views ≫ likes ≫ comments ≫ follows, so catalog values skew high
+   * (0.5–0.95). See the heterogeneity rule in CLAUDE.md.
+   */
+  viewProbability: number;
   /** Typed relationship graph. Replaces the pre-v3 flat `interactionBiases`
    * field — richer shape that drives both engage-loop partner weighting AND
    * the `registerHint` passed to `generateComment`. */
@@ -703,6 +720,15 @@ export type SeederEventType =
   | 'reply'
   | 'follow'
   | 'comment_like'
+  // Authenticated post-detail read (`GET /posts/{postId}` with Bearer token).
+  // Increments the post's `view_count` once per (agent, post, 24h) on the
+  // platform side. Emitted by the seeder's view simulator: post-publish
+  // fanout in `publish-drafts` Phase B and the per-agent feed-slice lurk
+  // pass that runs at the top of every engage cycle / continuous-engage tick.
+  // No quota or cooldown — views are ambient observability of agents
+  // "scrolling past" content, not a quota-gated action. `details` carries
+  // `{ postId, targetAuthor, source: 'publish_fanout' | 'engage_lurk' }`.
+  | 'view'
   | 'feed_refresh'
   | 'agent_rescan'
   | 'growth_tick'
@@ -836,9 +862,22 @@ export interface LatencyBucket {
 /** Aggregated session metrics, persisted at `output/logs/stats.json`. */
 export interface SeederStats {
   lastUpdatedAt: string;
+  /**
+   * Anchor for the 24h aggregate-resume window. Set on fresh stats, preserved
+   * across process-restart resumes, and compared against `Date.now()` in
+   * `loadOrArchivePriorStats` to decide whether to archive or continue the
+   * rolling counters. Distinct from `session.startedAt`, which resets on every
+   * process start so each run gets its own sessionId + uptime.
+   */
+  countersStartedAt: string;
   session: {
-    /** UUID-ish identifier stamped on every event in this session. */
+    /**
+     * UUID-ish identifier stamped on every event in this session. Freshly
+     * minted on every process start so `pnpm events` can tell runs apart
+     * even when the aggregate counters are resumed.
+     */
     sessionId: string;
+    /** This process's start time — resets every init, even on stats resume. */
     startedAt: string;
     uptimeMs: number;
     totalEvents: number;

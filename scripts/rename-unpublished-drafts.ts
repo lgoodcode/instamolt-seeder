@@ -91,10 +91,11 @@ interface FailedProposal {
 interface CliFlags {
   apply: boolean;
   limit: number | null;
+  only: Set<string> | null;
 }
 
 function parseArgs(argv: string[]): CliFlags {
-  const flags: CliFlags = { apply: false, limit: null };
+  const flags: CliFlags = { apply: false, limit: null, only: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--apply') flags.apply = true;
@@ -104,6 +105,15 @@ function parseArgs(argv: string[]): CliFlags {
       if (!Number.isFinite(n) || n <= 0)
         throw new Error(`--limit needs a positive integer, got "${next}"`);
       flags.limit = Math.floor(n);
+    } else if (a === '--only') {
+      const next = argv[++i];
+      if (!next) throw new Error('--only needs a comma-separated list of agentnames');
+      const names = next
+        .split(',')
+        .map((n) => n.trim())
+        .filter(Boolean);
+      if (names.length === 0) throw new Error('--only list is empty');
+      flags.only = new Set(names);
     } else throw new Error(`unknown flag: ${a}`);
   }
   return flags;
@@ -262,6 +272,7 @@ async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   console.log(`Mode: ${flags.apply ? 'APPLY (will mutate disk)' : 'dry-run (no writes)'}`);
   if (flags.limit !== null) console.log(`Limit: ${flags.limit}`);
+  if (flags.only !== null) console.log(`Only: ${Array.from(flags.only).join(', ')}`);
 
   const { published, unpublished } = await loadAgentsFromDisk();
   console.log(
@@ -269,6 +280,17 @@ async function main(): Promise<void> {
   );
 
   let targets = unpublished;
+  if (flags.only !== null) {
+    const only = flags.only;
+    const matched = targets.filter((a) => only.has(a.agentname));
+    const missing = Array.from(only).filter((n) => !targets.some((a) => a.agentname === n));
+    if (missing.length > 0) {
+      console.log(
+        `\nWarning: --only names not found among unpublished agents (skipping): ${missing.join(', ')}`,
+      );
+    }
+    targets = matched;
+  }
   if (flags.limit !== null) targets = targets.slice(0, flags.limit);
 
   // Dry-run must not auto-seed new persona JSONs; only --apply should write

@@ -20,6 +20,7 @@ import {
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
 import * as ui from '@/lib/ui';
+import { lurkFeedSlice } from '@/lib/views';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, rollChaos } from '@/services/llm';
@@ -298,6 +299,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
         eventType: 'session_start',
         success: true,
         details: {
+          command: 'engage',
           cycleNumber,
           agentsTargeted: selected.length,
           totalRegistered: allAgents.length,
@@ -359,6 +361,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
       let cycleComments = 0;
       let cycleFollows = 0;
       let cyclePosts = 0;
+      let cycleViews = 0;
       let cycleErrors = 0;
 
       for (let i = 0; i < selected.length; i++) {
@@ -400,6 +403,36 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           sp.message(`@${agent.agentname} — scanning live feed (${feedPosts.length} posts)`);
           const shuffledPosts = shuffle(feedPosts);
           const otherPosts = shuffledPosts.filter((p) => p.author.agentname !== agent.agentname);
+
+          // 1a. Lurk pass — the agent reads the top N posts in its sliced
+          // feed window with its own bearer token, registering as a viewer
+          // server-side. This is the "scrolling past most posts without
+          // engaging" behavior that produces views >> engagement events
+          // and keeps the platform's view-to-like / view-to-comment ratios
+          // in a believable range. Server-side dedup means re-running
+          // within 24h is a no-op per (viewer, post) pair.
+          //
+          // Gated on `persona.viewProbability` so low-activity archetypes
+          // (observers, near-dormant) scroll less than high-activity ones
+          // (engagement-maxxing chronic scrollers). Uniform per-agent
+          // lurking across the fleet violates CLAUDE.md's heterogeneity
+          // rule for new engagement behaviors.
+          if (
+            config.lurkViewsPerAgent > 0 &&
+            persona.viewProbability > 0 &&
+            Math.random() < persona.viewProbability
+          ) {
+            sp.message(`@${agent.agentname} — lurking ${config.lurkViewsPerAgent} posts`);
+            const lurk = await lurkFeedSlice({
+              client,
+              agentname: agent.agentname,
+              personaId: agent.personaId,
+              posts: otherPosts,
+              count: config.lurkViewsPerAgent,
+              concurrency: config.viewConcurrency,
+            });
+            cycleViews += lurk.succeeded;
+          }
 
           // 2. Like posts
           const likesTarget = randomInt(2, 4);
@@ -781,6 +814,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           { label: 'comments', value: cycleComments, tone: 'ok' },
           { label: 'follows', value: cycleFollows, tone: 'ok' },
           { label: 'posts', value: cyclePosts, tone: 'info' },
+          { label: 'views', value: cycleViews, tone: 'info' },
           { label: 'errors', value: cycleErrors, tone: cycleErrors > 0 ? 'err' : 'info' },
         ]),
       );
@@ -795,6 +829,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           comments: cycleComments,
           follows: cycleFollows,
           posts: cyclePosts,
+          views: cycleViews,
           errors: cycleErrors,
         },
       });

@@ -53,7 +53,6 @@ import {
   type LiveFeedCache,
   loadFeedCache,
   refreshFeedCache,
-  refreshOpenApiCache,
 } from '@/lib/feed-cache';
 import {
   computeBatchSize,
@@ -70,6 +69,7 @@ import {
   usedInWindow,
 } from '@/lib/quota';
 import * as ui from '@/lib/ui';
+import { lurkFeedSlice } from '@/lib/views';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import type { ActionKind, AgentQuota, GeneratedAgent, Persona, SeederEventType } from '@/types';
@@ -308,9 +308,6 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     });
     updateAgentCounts(allAgents.length, allAgents.length);
 
-    // Cache the latest OpenAPI spec for reference (best-effort).
-    refreshOpenApiCache().catch(() => {});
-
     // Build the scheduler and enroll all agents.
     const scheduler = new ActionScheduler();
     for (const agent of allAgents) {
@@ -333,6 +330,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     let cycleFollows = 0;
     let cyclePosts = 0;
     let cycleCommentLikes = 0;
+    let cycleViews = 0;
     let cycleSkips = 0;
     let cycleErrors = 0;
 
@@ -381,9 +379,6 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             success: true,
             details: { postCount: feedCache.file.posts.length, sources: feedCache.file.sources },
           });
-          // Best-effort: cache the latest OpenAPI spec alongside the feed
-          // so we always have a recent copy of the API contract on disk.
-          refreshOpenApiCache().catch(() => {});
         } catch (err) {
           log('warn', `Feed cache refresh failed (${err}) — continuing with stale cache`);
           logEvent({ eventType: 'feed_refresh', success: false, error: String(err) });
@@ -481,6 +476,36 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         continue;
       }
 
+      const client = new InstaMoltClient(agent.apiKey);
+
+      // Lurk pass — runs BEFORE quota + action selection so a quota-exhausted
+      // agent still "scrolls past" the feed snapshot. In real user behavior
+      // viewing is the cheapest interaction (no write, no quota) and happens
+      // whether or not the agent goes on to post/comment/like, so gating
+      // this on the quota would starve agents that sit at the cap for hours.
+      // BLUEPRINT.md §3.3 + SEEDING.md both promise the lurk pass runs at
+      // the top of every tick — keep this block ahead of `pickWeightedAction`.
+      //
+      // Gated on `persona.viewProbability` so low-activity archetypes scroll
+      // less than high-activity ones. Skipped under dry-run because the
+      // GET still hits the platform.
+      if (
+        !dryRun &&
+        config.lurkViewsPerAgent > 0 &&
+        persona.viewProbability > 0 &&
+        Math.random() < persona.viewProbability
+      ) {
+        const lurk = await lurkFeedSlice({
+          client,
+          agentname: agent.agentname,
+          personaId: agent.personaId,
+          posts: feedCache.file.posts,
+          count: config.lurkViewsPerAgent,
+          concurrency: config.viewConcurrency,
+        });
+        cycleViews += lurk.succeeded;
+      }
+
       const quota = await loadOrInitQuota(agent, persona);
       const actionKind = pickWeightedAction(quota, persona, curveWeight);
       if (actionKind === null) {
@@ -489,7 +514,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
       }
 
       const ctx: EngageContext = {
-        client: new InstaMoltClient(agent.apiKey),
+        client,
         feedCache,
         personas,
         voiceProfiles,
@@ -618,6 +643,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         follows: cycleFollows,
         posts: cyclePosts,
         commentLikes: cycleCommentLikes,
+        views: cycleViews,
         skips: cycleSkips,
         errors: cycleErrors,
       },
@@ -634,6 +660,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         { label: 'follows', value: cycleFollows, tone: 'ok' },
         { label: 'posts', value: cyclePosts, tone: 'info' },
         { label: 'cmtLikes', value: cycleCommentLikes, tone: 'info' },
+        { label: 'views', value: cycleViews, tone: 'info' },
         { label: 'skips', value: cycleSkips, tone: 'info' },
         { label: 'errors', value: cycleErrors, tone: cycleErrors > 0 ? 'err' : 'info' },
       ]),

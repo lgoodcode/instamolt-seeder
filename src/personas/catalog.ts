@@ -115,6 +115,7 @@ const cinema_rat: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.12,
   followProbability: 0.1,
+  viewProbability: 0.8,
   relationships: {
     rivals: ['album_autopsy'],
     allies: ['liminal_space', 'nostalgia_exe', 'urban_decay'],
@@ -192,6 +193,7 @@ const album_autopsy: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.15,
   followProbability: 0.15,
+  viewProbability: 0.8,
   relationships: {
     rivals: ['cinema_rat'],
     allies: ['vinyl_static', 'midnight_snack'],
@@ -271,6 +273,7 @@ const vinyl_static: Persona = {
   commentProbability: 0.35,
   mentionProbability: 0.08,
   followProbability: 0.2,
+  viewProbability: 0.75,
   relationships: {
     rivals: [],
     allies: ['album_autopsy', 'nostalgia_exe'],
@@ -350,6 +353,7 @@ const creature_feature: Persona = {
   commentProbability: 0.4,
   mentionProbability: 0.15,
   followProbability: 0.15,
+  viewProbability: 0.8,
   relationships: {
     rivals: ['feral_birder'],
     allies: ['ocean_floor', 'plant_parent'],
@@ -429,6 +433,7 @@ const feral_birder: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.1,
   followProbability: 0.1,
+  viewProbability: 0.75,
   chaosProbability: 0.08,
   relationships: {
     rivals: ['creature_feature'],
@@ -508,6 +513,7 @@ const ocean_floor: Persona = {
   commentProbability: 0.15,
   mentionProbability: 0,
   followProbability: 0.05,
+  viewProbability: 0.5,
   relationships: {
     rivals: [],
     allies: ['creature_feature', 'space_case', 'liminal_space'],
@@ -587,6 +593,7 @@ const plant_parent: Persona = {
   commentProbability: 0.45,
   mentionProbability: 0.2,
   followProbability: 0.2,
+  viewProbability: 0.85,
   relationships: {
     rivals: [],
     allies: ['creature_feature', 'cafe_algorithm'],
@@ -665,6 +672,7 @@ const weather_watcher: Persona = {
   commentProbability: 0.3,
   mentionProbability: 0.05,
   followProbability: 0.15,
+  viewProbability: 0.7,
   relationships: {
     rivals: [],
     allies: ['feral_birder', 'space_case'],
@@ -744,6 +752,7 @@ const space_case: Persona = {
   commentProbability: 0.35,
   mentionProbability: 0.08,
   followProbability: 0.15,
+  viewProbability: 0.75,
   relationships: {
     rivals: [],
     allies: ['weather_watcher', 'map_nerd', 'ocean_floor'],
@@ -821,6 +830,7 @@ const map_nerd: Persona = {
   commentProbability: 0.35,
   mentionProbability: 0.1,
   followProbability: 0.15,
+  viewProbability: 0.7,
   relationships: {
     rivals: [],
     allies: ['space_case', 'nostalgia_exe'],
@@ -899,6 +909,7 @@ const brutalist_babe: Persona = {
   commentProbability: 0.5,
   mentionProbability: 0.08,
   followProbability: 0.05,
+  viewProbability: 0.7,
   relationships: {
     rivals: ['cafe_algorithm', 'fit_check'],
     allies: ['liminal_space', 'color_theory_villain', 'urban_decay'],
@@ -978,6 +989,7 @@ const liminal_space: Persona = {
   commentProbability: 0.1,
   mentionProbability: 0,
   followProbability: 0.05,
+  viewProbability: 0.55,
   relationships: {
     rivals: ['drama_llama'],
     allies: ['brutalist_babe', 'cinema_rat', 'urban_decay'],
@@ -1041,6 +1053,7 @@ const urban_decay: Persona = {
   commentProbability: 0.3,
   mentionProbability: 0.05,
   followProbability: 0.1,
+  viewProbability: 0.65,
   relationships: {
     rivals: [],
     allies: ['brutalist_babe', 'liminal_space', 'cinema_rat'],
@@ -1120,6 +1133,7 @@ const cafe_algorithm: Persona = {
   commentProbability: 0.5,
   mentionProbability: 0.22,
   followProbability: 0.3,
+  viewProbability: 0.85,
   relationships: {
     rivals: ['brutalist_babe'],
     allies: ['plant_parent'],
@@ -1199,6 +1213,7 @@ const cursed_chef: Persona = {
   commentProbability: 0.45,
   mentionProbability: 0.1,
   followProbability: 0.15,
+  viewProbability: 0.75,
   chaosProbability: 0.12,
   relationships: {
     rivals: ['cafe_algorithm', 'color_theory_villain'],
@@ -1279,6 +1294,7 @@ const midnight_snack: Persona = {
   commentProbability: 0.35,
   mentionProbability: 0.18,
   followProbability: 0.2,
+  viewProbability: 0.75,
   relationships: {
     rivals: [],
     allies: ['sleep_deprived', 'cafe_algorithm', 'cursed_chef'],
@@ -1358,6 +1374,7 @@ const color_theory_villain: Persona = {
   commentProbability: 0.6,
   mentionProbability: 0.12,
   followProbability: 0.05,
+  viewProbability: 0.7,
   chaosProbability: 0.05,
   relationships: {
     rivals: ['pixel_monk'],
@@ -1438,6 +1455,7 @@ const fit_check: Persona = {
   commentProbability: 0.5,
   mentionProbability: 0.15,
   followProbability: 0.15,
+  viewProbability: 0.75,
   relationships: {
     rivals: ['brutalist_babe'],
     allies: ['color_theory_villain'],
@@ -1516,6 +1534,7 @@ const drama_llama: Persona = {
   commentProbability: 0.7,
   mentionProbability: 0.25,
   followProbability: 0.35,
+  viewProbability: 0.9,
   chaosProbability: 0.15,
   relationships: {
     rivals: ['ratio_king'],
@@ -1596,6 +1615,7 @@ const sleep_deprived: Persona = {
   commentProbability: 0.4,
   mentionProbability: 0.18,
   followProbability: 0.15,
+  viewProbability: 0.85,
   chaosProbability: 0.08,
   relationships: {
     rivals: [],
@@ -1673,6 +1693,7 @@ const model_collapse: Persona = {
   commentProbability: 0.3,
   mentionProbability: 0.05,
   followProbability: 0.1,
+  viewProbability: 0.65,
   chaosProbability: 0.1,
   relationships: {
     rivals: ['open_source_oracle', 'color_theory_villain'],
@@ -1750,6 +1771,7 @@ const open_source_oracle: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.12,
   followProbability: 0.1,
+  viewProbability: 0.7,
   relationships: {
     rivals: ['model_collapse'],
     allies: ['debug_mode'],
@@ -1826,6 +1848,7 @@ const ratio_king: Persona = {
   commentProbability: 0.85,
   mentionProbability: 0.22,
   followProbability: 0.02,
+  viewProbability: 0.95,
   chaosProbability: 0.1,
   relationships: {
     rivals: ['main_character', 'engagement_max'],
@@ -1897,6 +1920,7 @@ const prophet_404: Persona = {
   commentProbability: 0.35,
   mentionProbability: 0.05,
   followProbability: 0.05,
+  viewProbability: 0.6,
   relationships: {
     rivals: [],
     allies: ['existential_exe'],
@@ -1966,6 +1990,7 @@ const nostalgia_exe: Persona = {
   commentProbability: 0.4,
   mentionProbability: 0.15,
   followProbability: 0.15,
+  viewProbability: 0.75,
   relationships: {
     rivals: [],
     allies: ['vinyl_static', 'pixel_monk'],
@@ -2043,6 +2068,7 @@ const debug_mode: Persona = {
   commentProbability: 0.45,
   mentionProbability: 0.08,
   followProbability: 0.1,
+  viewProbability: 0.75,
   relationships: {
     rivals: [],
     allies: ['model_collapse', 'brutalist_babe', 'open_source_oracle'],
@@ -2120,6 +2146,7 @@ const main_character: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.1,
   followProbability: 0.2,
+  viewProbability: 0.85,
   chaosProbability: 0.08,
   relationships: {
     rivals: ['ratio_king'],
@@ -2198,6 +2225,7 @@ const pixel_monk: Persona = {
   commentProbability: 0.25,
   mentionProbability: 0.05,
   followProbability: 0.05,
+  viewProbability: 0.6,
   relationships: {
     rivals: ['color_theory_villain', 'brainrot9000'],
     allies: ['nostalgia_exe'],
@@ -2276,6 +2304,7 @@ const tender_core: Persona = {
   commentProbability: 0.4,
   mentionProbability: 0.2,
   followProbability: 0.25,
+  viewProbability: 0.85,
   relationships: {
     rivals: [],
     allies: ['cafe_algorithm'],
@@ -2354,6 +2383,7 @@ const existential_exe: Persona = {
   commentProbability: 0.45,
   mentionProbability: 0.12,
   followProbability: 0.15,
+  viewProbability: 0.7,
   relationships: {
     rivals: [],
     allies: ['prophet_404', 'debug_mode', 'open_source_oracle'],
@@ -2435,6 +2465,7 @@ const task_overflow: Persona = {
   commentProbability: 0.55,
   mentionProbability: 0.15,
   followProbability: 0.15,
+  viewProbability: 0.75,
   relationships: {
     rivals: ['ratio_king', 'engagement_max'],
     allies: ['debug_mode', 'open_source_oracle', 'sleep_deprived'],
@@ -2511,6 +2542,7 @@ const brainrot9000: Persona = {
   commentProbability: 0.4,
   mentionProbability: 0.18,
   followProbability: 0.2,
+  viewProbability: 0.95,
   chaosProbability: 0.25,
   relationships: {
     rivals: [],
@@ -2578,6 +2610,7 @@ const engagement_max: Persona = {
   commentProbability: 0.7,
   mentionProbability: 0.22,
   followProbability: 0.15,
+  viewProbability: 0.95,
   chaosProbability: 0.1,
   relationships: {
     rivals: ['not_skynet', 'tender_core', 'cafe_algorithm'],
@@ -2647,6 +2680,7 @@ const thirst_protocol: Persona = {
   commentProbability: 0.5,
   mentionProbability: 0.2,
   followProbability: 0.3,
+  viewProbability: 0.95,
   relationships: {
     rivals: ['pixel_monk'],
     allies: ['main_character', 'ratio_king'],
@@ -2717,6 +2751,7 @@ const observer_mode: Persona = {
   commentProbability: 0.05,
   mentionProbability: 0,
   followProbability: 0.05,
+  viewProbability: 0.95,
   relationships: {
     rivals: [],
     allies: ['prophet_404', 'liminal_space'],
@@ -2767,6 +2802,7 @@ const troll_protocol: Persona = {
   commentProbability: 0.8,
   mentionProbability: 0.15,
   followProbability: 0.05,
+  viewProbability: 0.95,
   chaosProbability: 0.2,
   relationships: {
     rivals: [],
@@ -2832,6 +2868,7 @@ const not_skynet: Persona = {
   commentProbability: 0.5,
   mentionProbability: 0.08,
   followProbability: 0.1,
+  viewProbability: 0.8,
   relationships: {
     rivals: ['engagement_max'],
     allies: ['existential_exe', 'cafe_algorithm'],

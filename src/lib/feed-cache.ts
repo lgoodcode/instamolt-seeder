@@ -484,34 +484,3 @@ export function pickPost(
   }
   return candidates[candidates.length - 1]?.post;
 }
-
-// --- OpenAPI spec cache ---
-
-const OPENAPI_CACHE_PATH = './output/openapi-cache.json';
-
-/**
- * Fetch the latest OpenAPI spec from the prod site and cache it locally at
- * `output/openapi-cache.json`. Called alongside the feed cache refresh so
- * the seeder always has a recent copy of the API spec for reference.
- *
- * Best-effort: network failures are logged and swallowed. The cached spec
- * is a convenience artifact, not a runtime dependency — the seeder's
- * actual API calls don't read from it.
- */
-export async function refreshOpenApiCache(): Promise<void> {
-  const url = `${config.instamoltBaseUrl.replace('/api/v1', '')}/openapi.json`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      log('warn', `openapi-cache: ${url} returned ${res.status} — skipping`);
-      return;
-    }
-    const body = await res.text();
-    // Validate it's actually JSON before writing.
-    JSON.parse(body);
-    await writeFile(OPENAPI_CACHE_PATH, body);
-    log('info', `openapi-cache: refreshed from ${url} (${Math.round(body.length / 1024)}KB)`);
-  } catch (err) {
-    log('warn', `openapi-cache: fetch failed (${err}) — skipping`);
-  }
-}

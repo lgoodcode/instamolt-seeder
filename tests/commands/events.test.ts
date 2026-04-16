@@ -122,10 +122,58 @@ describe('events command', () => {
     const rendered = renderConsole(consoleLogSpy);
     expect(rendered).toContain('sess-A');
     expect(rendered).toContain('generate');
-    expect(rendered).toMatch(/agent_drafted:2/);
-    expect(rendered).toMatch(/post_drafted:1/);
+    expect(rendered).toMatch(/agent_drafted\s+2/);
+    expect(rendered).toMatch(/post_drafted\s+1/);
     // Completed session renders a bounded duration, not a "+"
     expect(rendered).toMatch(/\(2m\)/);
+  });
+
+  it('labels a session with session_start-but-no-command as "(unknown)"', async () => {
+    // Distinct from the "(no session_start)" fallback — a session_start event
+    // was emitted, it just lacked `details.command` (pre-fix engage cycles
+    // did this). The per-session row still belongs to a real session, so the
+    // label must not pretend the session_start is missing.
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-nocmd',
+        // no details.command
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:05.000Z',
+        eventType: 'like',
+        sessionId: 'sess-nocmd',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events();
+
+    const rendered = renderConsole(consoleLogSpy);
+    expect(rendered).toContain('sess-nocmd');
+    expect(rendered).toContain('(unknown)');
+    expect(rendered).not.toContain('(no session_start)');
+  });
+
+  it('labels orphan events (no session_start at all) as "(no session_start)"', async () => {
+    // Events logged by a process that never emitted session_start fall into
+    // a leading orphan bucket. The label differs from "(unknown)" because
+    // the semantics are different: here the bookend itself is missing.
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'like',
+        sessionId: 'sess-orphan',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events();
+
+    const rendered = renderConsole(consoleLogSpy);
+    expect(rendered).toContain('(no session_start)');
+    expect(rendered).not.toContain('(unknown)');
   });
 
   it('flags a session without session_end as running with a trailing +', async () => {
@@ -168,8 +216,11 @@ describe('events command', () => {
     expect(body).toMatch(/like\s+1/);
     expect(body).toMatch(/comment\s+1/);
     expect(body).not.toMatch(/agent_drafted/);
-    // Session filter suppresses the per-session breakdown block
-    expect(vi.mocked(ui.section)).not.toHaveBeenCalled();
+    // Filtered mode now renders the per-session breakdown too — suppressing
+    // it in the old version meant `--session <id>` swallowed the very
+    // bucket the operator wanted to inspect (no timing/counts detail). Per
+    // CodeRabbit feedback on PR #14, show it either way.
+    expect(vi.mocked(ui.section)).toHaveBeenCalled();
   });
 
   it('filters by --since duration form', async () => {
@@ -207,5 +258,78 @@ describe('events command', () => {
     const body = totalsCall![1] as string;
     expect(body).toMatch(/like\s+1/);
     expect(body).toMatch(/comment\s+1/);
+  });
+
+  it('--session <id>#N selects a single ordinal bucket within a shared sessionId', async () => {
+    // `engage --loop` and `engage-continuous` both emit `session_start` per
+    // cycle/tick, so one process writes many buckets under one sessionId.
+    // Without the `#N` ordinal, --session would aggregate every bucket into
+    // one report — misleading when the operator wants to inspect a single
+    // run. Each non-start event in the stream inherits the most-recent
+    // ordinal for its sessionId, and the filter matches on (sid, ordinal).
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-shared',
+        details: { command: 'engage', cycleNumber: 1 },
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:01.000Z',
+        eventType: 'like',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:02.000Z',
+        eventType: 'session_end',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:10.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-shared',
+        details: { command: 'engage', cycleNumber: 2 },
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:11.000Z',
+        eventType: 'comment',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:12.000Z',
+        eventType: 'comment',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:13.000Z',
+        eventType: 'session_end',
+        sessionId: 'sess-shared',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events({ session: 'sess-shared#2' });
+
+    // Only bucket #2 should be reflected in totals: 2 comment events +
+    // the session_start/end framing. Bucket #1's single `like` must be
+    // excluded entirely.
+    const noteCalls = vi.mocked(ui.note).mock.calls;
+    const totalsCall = noteCalls.find((c) => String(c[0]).startsWith('Totals'));
+    const body = totalsCall![1] as string;
+    expect(body).toMatch(/comment\s+2/);
+    expect(body).not.toMatch(/like/);
+
+    // The per-session breakdown should render in filtered mode now (the
+    // old code suppressed it when --session was set, so the operator lost
+    // the timing/counts block for the very bucket they wanted to inspect).
+    expect(vi.mocked(ui.section)).toHaveBeenCalled();
+  });
+
+  it('rejects --session with a malformed "#N" ordinal', async () => {
+    fsState.files.set(EVENTS_PATH, evt({ eventType: 'like' }));
+    await expect(events({ session: 'sess-abc#' })).rejects.toThrow(
+      /--session ordinal.*positive integer/,
+    );
+    await expect(events({ session: 'sess-abc#0' })).rejects.toThrow(/positive integer/);
   });
 });

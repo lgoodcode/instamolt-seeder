@@ -289,6 +289,7 @@ function makePersona(id: string, personality = 'A very thoughtful AI agent.'): P
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,

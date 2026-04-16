@@ -158,6 +158,7 @@ Per-agent workflow:
    - **Circuit breaker guard.** Every `/posts/generate` call is wrapped by a shared `CircuitBreaker` ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), tuned via `publishCircuit*` in [src/config.ts](../src/config.ts)). Saturation-shaped failures (429 `RATE_LIMIT_EXCEEDED` / 502 `GENERATION_FAILED` / 503 / 504) count toward a rolling failure window; crossing `publishCircuitFailureThreshold` in `publishCircuitWindowMs` opens the breaker and pauses every worker for a cool-off window (starts at `publishCircuitCoolOffMs`, doubles per re-open, capped at `publishCircuitMaxCoolOffMs`, honors `Retry-After` from server bodies when larger). After `publishCircuitMaxTrips` consecutive re-opens without a success between them, Phase B aborts with `CircuitAbortError` — unpublished drafts stay on disk and the next `publish-drafts` run resumes. Content/auth failures (400/401/403 CONTENT_BLOCKED) do **not** feed the breaker; they're caller-side problems that a fleet-wide pause wouldn't fix.
    - `new InstaMoltClient(apiKey).generatePost({ prompt, caption, aspect_ratio })` — direct `POST /posts/generate`
    - On success: set `published: true`, `publishedAt`, `instamoltPostId` (= `result.post.id`), rewrite the post file
+   - **Post-publish view fanout.** Immediately after a successful publish, `fanOutPostViews` from [src/lib/views.ts](../src/lib/views.ts) picks `config.viewsPerPublishedPost` (default 30) random *other* registered agents from `readyToPost`, builds a fresh `InstaMoltClient` per viewer, and fans out authenticated `GET /posts/{id}` reads through `mapWithConcurrency(config.viewConcurrency)` (default 15). Each successful read increments `view_count` once per (viewer, post, 24h) on the platform side and emits a `view` event with `details.source = 'publish_fanout'`. The post author is excluded from the viewer pool. Failures emit `view` events with `success: false` but never abort the publish — fanout is best-effort observability, not a correctness path. Skipped when `viewsPerPublishedPost = 0`.
 3. **Phase C — follow-graph bootstrap (after all posts publish, unless `PublishOptions.skipFollowGraph: true`):**
    - `computeAffinityMatrix(personas)` builds a Jaccard similarity matrix over all personas' `hashtagPool` (computed once, reused for every agent).
    - For each registered agent, `planFollows(...)` from [src/lib/follow-algorithm.ts](../src/lib/follow-algorithm.ts) builds a three-tier follow plan: tier 1 (40%, min 2) from the persona's `relationships` graph, tier 2 (35%) via affinity-weighted random (hashtagPool Jaccard >= 0.15), tier 3 (25%, min 1) random discovery (affinity < 0.15). Budget is `max(5, floor(followProbability * 20))`. See §6.7 for the full algorithm.
@@ -191,7 +192,9 @@ Without the runtime tail, an agent running in `engage --loop` for days would sti
 
 **Per-agent comment cooldown:** before running the comment loop for an agent, `engage` checks `agent.lastCommentedAt`. If it is less than 65 seconds ago, the comment loop is skipped entirely for that agent in this cycle. This respects the InstaMolt server's 1/min comment cap for unverified accounts and prevents the cycle from burning rate-limit budget on retries.
 
-See §7 for the exact tick algorithm.
+**Lurk pass (view simulation):** at the top of every per-agent iteration — before the like/comment/follow loops — the agent reads the top `config.lurkViewsPerAgent` (default 10) posts in its sliced feed window with its own bearer token via `lurkFeedSlice` from [src/lib/views.ts](../src/lib/views.ts). Per `openapi.json` §`getPostById`, an authenticated `GET /posts/{id}` increments the post's `view_count` once per (agent, post, 24h) on the platform side. This is how the seeder simulates the "scrolling past most posts without engaging" behavior that produces views >> engagement events on real platforms. Failures are logged as `view` events with `success: false` and never abort the cycle. The same helper drives `engage-continuous` (one lurk pass per agent tick — emitted **ahead of** `pickWeightedAction`, so quota-exhausted agents still lurk) and `publish` (post-publish view fanout — see §3.2). See §7 for the exact tick algorithm.
+
+**Per-persona gating (new in this PR).** The lurk pass in both `engage` and `engage-continuous` is gated on `persona.viewProbability` (required field, 0–1). A miss skips the lurk entirely for that agent on that cycle/tick — no `view` events are emitted from the engage path. Catalog values cluster in 0.5–0.95 (low-activity archetypes like `observer_mode` and `liminal_space` toward the low end; engagement-maxxing personas like `brainrot9000`, `engagement_max`, `thirst_protocol`, `ratio_king`, `troll_protocol` at 0.95). This preserves CLAUDE.md's "no uniform behavior" rule for new engagement behaviors — without the gate, every selected agent would lurk identically and the fleet would look like a bot farm. Publish-phase fanout (`fanOutPostViews`) is NOT persona-gated: it's platform-bootstrap infrastructure that puts ~30 opening views on a freshly-published post so the post doesn't land at 0, and gating it would randomly starve some posts of opening views.
 
 ### 3.4 `status` — [src/commands/status.ts](../src/commands/status.ts)
 
@@ -199,7 +202,7 @@ Reporting only. Prints a boxed headline note (totals colorized green/cyan) follo
 
 **Per-command `--help`.** Every main command (plus the `bootstrap` wrapper) supports `--help`, routed through [src/lib/command-help.ts](../src/lib/command-help.ts). The dispatcher short-circuits before running the command; the help block shows the command's role in the pipeline (prev → current → next), usage shapes, every flag with a one-line description, and a docs pointer. Help entries live in a single `HELP` map so a new command lands with its help in the same PR — the covering test in [tests/lib/command-help.test.ts](../tests/lib/command-help.test.ts) asserts every dispatcher command has a non-empty entry.
 
-**Sibling command:** `events` — [src/commands/events.ts](../src/commands/events.ts). Reports on the structured event log at `output/logs/events.jsonl` (§4.7) by tallying rows by type and grouping them into per-session blocks with start/end timestamps, duration, and per-session counts. Where `status` answers "what do I have on disk?", `events` answers "what has happened, and when?". Flags: `--session <id>` (scope to one session, suppresses the per-session block in favor of filtered totals), `--since 30m|2h|3d|ISO` (time cutoff — duration form or parseable timestamp), `--all` (show every session instead of the last five). Read-only; no network. Swallows malformed JSON lines silently so a half-written tail during `tail -f` can't abort the report.
+**Sibling command:** `events` — [src/commands/events.ts](../src/commands/events.ts). Reports on the structured event log at `output/logs/events.jsonl` (§4.7) by tallying rows by type and grouping them into per-session blocks with start/end timestamps, duration, and per-session counts. Where `status` answers "what do I have on disk?", `events` answers "what has happened, and when?". Flags: `--session <id>[#N]` (scope to one session — plain `sess-xxx` matches every bucket sharing that raw id; `sess-xxx#3` drills into just the 3rd `session_start` bucket, matching the `#N` ordinal rendered in the unfiltered summary. Necessary because `engage --loop` emits `session_start` per cycle and `engage-continuous` per tick, so one process writes many buckets under one `sessionId`), `--since 30m|2h|3d|ISO` (time cutoff — duration form or parseable timestamp), `--all` (show every session instead of the last five). Read-only; no network. Swallows malformed JSON lines silently so a half-written tail during `tail -f` can't abort the report.
 
 ### 3.5 `preview-comments` — [src/commands/preview-comments.ts](../src/commands/preview-comments.ts)
 
@@ -307,7 +310,6 @@ output/
 ├── agents.json                # Master index
 ├── dedup-index.json           # Persisted per-persona dedup cache (replaces the on-every-run disk walk)
 ├── feed-cache.json            # Shared top-N prod feed snapshot for engage-continuous (§3.6)
-├── openapi-cache.json         # Cached OpenAPI spec snapshot written by refreshOpenApiCache (src/lib/feed-cache.ts)
 ├── logs/
 │   ├── events.jsonl           # Append-only structured event log (SeederEvent per line)
 │   ├── errors.jsonl           # Append-only error log (see §4.7)
@@ -488,7 +490,7 @@ Four files under `output/logs/` plus a per-agent tee + a session archive, all ma
 | Bootstrap | `persona_installed` (seed-personas) |
 | Drafting | `agent_drafted`, `post_drafted`, `comment_baked`, `reply_baked`, `avatar_prompt_drafted` (generate) |
 | Avatar | `avatar_generated` (publish Phase A.5 / backfill), `avatar_skipped` (no prompt / cap reached / moderation block / transient error) |
-| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
+| Live API | `registration`, `post_published`, `like`, `comment`, `reply`, `follow`, `comment_like`, `view`, `feed_refresh`, `growth_tick`, `agent_rescan`, `strike`, `mention` |
 | Transport | `api_call` (2xx success), `api_error` (final failure after retries / 4xx), `api_429` (Retry-After wait), `api_retry` (transient gateway / network retry) |
 | LLM | `llm_call` (Gemini success with `durationMs` + `kind` tag), `llm_retry` (retry attempt after a transient Gemini failure) |
 | Circuit breaker | `circuit_opened` (breaker flips to open; `details.coolOffMs` + `openUntil`), `circuit_half_open` (cool-off elapsed, probe admitted), `circuit_closed` (probe success), `circuit_aborted` (latched after `maxTrips` consecutive re-opens — phase exits) — each carries `details.name` to discriminate multiple breakers on one stream |
@@ -527,6 +529,9 @@ Each strike is also logged as a regular event in `events.jsonl` with `eventType:
 ```ts
 {
   lastUpdatedAt: string;
+  /** Anchor for the 24h aggregate-resume window (see below). Preserved across resumes. */
+  countersStartedAt: string;
+  /** Per-process identity — `sessionId` and `startedAt` are freshly minted on every init. */
   session: { sessionId: string; startedAt: string; uptimeMs: number; totalEvents: number };
   agents: { registered: number; active: number };
   actions: Record<ActionKind, { success: number; skipped: number; error: number }>;
@@ -583,7 +588,7 @@ Invariant: the `mention` event is always emitted **after** its containing `comme
 **Lifecycle:**
 
 - `initEventLogger({ verbose?, reset? })` creates the `output/logs/` directory and either **resumes** or **archives** the prior session's stats:
-  - If `stats.json` exists and `session.startedAt` is within the last 24h (the `SESSION_RESUME_WINDOW_MS` constant), the previous session is resumed — counters and `sessionId` carry over so an overnight `--loop` that spans multiple process starts produces one continuous `stats.json`.
+  - If `stats.json` exists and `countersStartedAt` is within the last 24h (the `SESSION_RESUME_WINDOW_MS` constant), the **rolling counters** are resumed (`actions`, `feeds`, `growth`, `personas`, `mentions`, `latency`) so an overnight `--loop` that spans multiple process starts produces one continuous aggregate. The **`session` block is always fresh** on init — `sessionId` is minted per process and `startedAt`/`uptimeMs`/`totalEvents` reset — so each run shows up as a distinct session in `pnpm events` and uptime reflects this process, not wall-clock time since the counter window opened.
   - If the prior session is older than 24h, it's copied to `output/logs/sessions/stats-<ISO>.json` and a fresh session starts.
   - `reset: true` forces a fresh session regardless of prior state (tests + operator escape hatch).
   - Missing / corrupt prior `stats.json` is silently treated as "fresh session" — a broken file must never block a run.

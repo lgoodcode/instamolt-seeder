@@ -502,19 +502,25 @@ describe('sessionId stamping', () => {
 });
 
 describe('session resume / archive', () => {
-  it('resumes a prior session when its startedAt is within 24h', () => {
+  it('resumes rolling counters but mints a fresh sessionId on each process start', () => {
     // First run — stamp a session and flush.
     initEventLogger();
     logEvent({ eventType: 'like', success: true });
     flushStats();
     const firstSessionId = getStats()!.session.sessionId;
+    const firstCountersStartedAt = getStats()!.countersStartedAt;
     expect(getStats()!.session.totalEvents).toBe(1);
+    expect(getStats()!.actions.like.success).toBe(1);
 
-    // Second run — stats.json exists and is fresh; counters should carry over.
+    // Second run — stats.json exists and is within the 24h window. Rolling
+    // counters (actions, countersStartedAt) survive, but sessionId and
+    // totalEvents are per-process and reset.
     _resetForTest();
     initEventLogger();
-    expect(getStats()!.session.sessionId).toBe(firstSessionId);
-    expect(getStats()!.session.totalEvents).toBe(1);
+    expect(getStats()!.session.sessionId).not.toBe(firstSessionId);
+    expect(getStats()!.session.totalEvents).toBe(0);
+    expect(getStats()!.actions.like.success).toBe(1);
+    expect(getStats()!.countersStartedAt).toBe(firstCountersStartedAt);
   });
 
   it('archives a prior session older than 24h and starts fresh', () => {
@@ -523,6 +529,7 @@ describe('session resume / archive', () => {
     const oldStartedAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const oldStats = {
       lastUpdatedAt: oldStartedAt,
+      countersStartedAt: oldStartedAt,
       session: {
         sessionId: 'sess-old',
         startedAt: oldStartedAt,
@@ -587,6 +594,7 @@ describe('normalizeMentionsShape', () => {
   function baseStats(): SeederStats {
     return {
       lastUpdatedAt: new Date().toISOString(),
+      countersStartedAt: new Date().toISOString(),
       session: {
         sessionId: 'sess-test',
         startedAt: new Date().toISOString(),

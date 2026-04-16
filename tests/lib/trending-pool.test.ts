@@ -167,7 +167,12 @@ describe('pickTrendingHashtags', () => {
     const persona = makePersona('no_such_persona');
     const picks = pickTrendingHashtags(fixture, persona, 2);
     expect(picks).toHaveLength(2);
-    // Every pick must come from the unmatched side since matched is empty.
+    // When the persona has no vibe match, every pool entry lands in the
+    // unmatched partition (including the fixture's `matched*` tags — their
+    // vibes `['ratio_king', 'engagement_max']` don't include
+    // `no_such_persona`). Every tag name is therefore a valid output; the
+    // meaningful assertion is that the call returns `count` picks without
+    // throwing or stalling on the empty matched partition.
     for (const tag of picks) {
       expect(['matched1', 'matched2', 'unmatched1', 'unmatched2', 'unmatched3']).toContain(tag);
     }

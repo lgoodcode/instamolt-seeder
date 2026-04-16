@@ -199,8 +199,11 @@ export async function generate(
     // never land at 0 posts — Tier 1 agents are the leaderboard drivers and
     // should always have content when discovered. Tier 2/3 use the passed
     // `postsMin` unchanged (0-post lurkers are realistic for the long tail).
+    // Clamp the floor at `postsMax` so an explicit 0..0 range stays 0 for
+    // every tier (otherwise `randIntInclusive(1, 0)` returns 1 and Tier 1s
+    // would silently draft a post on a zero-post run).
     const tier = persona.engagementTier ?? 2;
-    const tieredPostsMin = tier === 1 ? Math.max(postsMin, 1) : postsMin;
+    const tieredPostsMin = tier === 1 ? Math.min(postsMax, Math.max(postsMin, 1)) : postsMin;
     const postCounts = specsToCreate.map(() => randIntInclusive(tieredPostsMin, postsMax));
     const totalPostsInBlock = postCounts.reduce((sum, n) => sum + n, 0);
 

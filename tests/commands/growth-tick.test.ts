@@ -67,9 +67,19 @@ describe('growthTick', () => {
 
     expect(cmdMocks.publish).toHaveBeenCalledTimes(1);
     // publish gets limit = maxPosts * target so the generated drafts all fit
-    // under the cap, and yes:true so the confirmation propagates from the
-    // parent process.
+    // under the cap, and yes:true so the parent engage-continuous process's
+    // upstream confirmation propagates to the detached child.
     expect(cmdMocks.publish).toHaveBeenCalledWith({ limit: 7 * 12, yes: true });
+  });
+
+  it('keeps the target-confirmation prompt live for manual (non-child) runs', async () => {
+    // Standalone `pnpm growth-tick` → options.child is undefined → yes must
+    // be false so publish() still shows the resolved-target prompt under a
+    // TTY. This is the last prod-safety check before writing live posts.
+    await growthTick({ target: 12, minPosts: 3, maxPosts: 7 });
+
+    expect(cmdMocks.publish).toHaveBeenCalledTimes(1);
+    expect(cmdMocks.publish).toHaveBeenCalledWith({ limit: 7 * 12, yes: false });
   });
 
   it('emits session_start + session_end on the happy path', async () => {

@@ -849,8 +849,12 @@ export function normalizePersona(raw: unknown): Persona {
   const activityCurve = normalizeActivityCurve(p.activityCurve);
 
   // Tier: default 2 (regular) if missing or invalid. Clamp to {1, 2, 3}.
-  const tierRaw = p.engagementTier;
-  const engagementTier: 1 | 2 | 3 = tierRaw === 1 || tierRaw === 2 || tierRaw === 3 ? tierRaw : 2;
+  // Route through `num()` so numeric-string shapes (`"1"` from a hand-edited
+  // persona JSON or loosely-typed Gemini output) coerce correctly instead
+  // of silently falling back to Tier 2.
+  const normalizedTier = Math.round(num(p.engagementTier, 2));
+  const engagementTier: 1 | 2 | 3 =
+    normalizedTier === 1 || normalizedTier === 2 || normalizedTier === 3 ? normalizedTier : 2;
 
   // Feed preference: default 'explorer' (broad popularity browser) if missing
   // or not one of the three allowed values.

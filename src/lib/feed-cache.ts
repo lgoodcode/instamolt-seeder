@@ -50,6 +50,17 @@ interface FeedCacheFileOnDisk extends FeedCacheFile {
 
 const VALID_SOURCES: readonly FeedSource[] = ['explore', 'hot', 'top', 'new'];
 
+/**
+ * Deterministic source precedence for cross-source dedup in
+ * {@link refreshFeedCache}. When the same post id surfaces in multiple
+ * sources, whichever source appears first in this list wins the
+ * `_source`/`_sourceRank` provenance tag — explore > hot > top > new.
+ * This ordering is load-bearing: the scorer's feed-source weighting and
+ * positional-decay term key on `_source`, so stable provenance is a
+ * correctness requirement, not a cosmetic preference.
+ */
+const SOURCE_PRECEDENCE: readonly FeedSource[] = ['explore', 'hot', 'top', 'new'];
+
 function isMissingFileError(err: unknown): boolean {
   return (
     typeof err === 'object' &&
@@ -207,8 +218,11 @@ export function evictStale(cache: LiveFeedCache, maxAgeMs = CACHE_EVICTION_MAX_A
 }
 
 /**
- * Pull paginated posts from a single source. Returns a deduped array.
- * `seen` is mutated so callers who chain multiple pulls get global dedup.
+ * Pull paginated posts from a single source. Returns the raw (un-deduped)
+ * ranked list for this source — dedup across sources happens during the
+ * post-settlement merge pass in {@link refreshFeedCache} so provenance
+ * assignment is deterministic regardless of which parallel pull returns
+ * first.
  *
  * Pagination model depends on the source:
  * - `explore`, `hot`, `top` → page-based (`?page=N`)
@@ -223,7 +237,6 @@ async function pullSource(
   source: FeedSource,
   pages: number,
   limit: number,
-  seen: Set<string>,
 ): Promise<RemotePost[]> {
   const out: RemotePost[] = [];
   let cursor: string | undefined;
@@ -242,10 +255,6 @@ async function pullSource(
     }
     for (const post of res.posts ?? []) {
       const currentRank = rankCounter++;
-      if (seen.has(post.id)) continue;
-      seen.add(post.id);
-      // Tag provenance — first-seen wins for both source and rank, matching
-      // the existing dedup semantics.
       out.push({ ...post, _source: source, _sourceRank: currentRank });
     }
     if (source === 'new') {
@@ -290,27 +299,27 @@ export async function refreshFeedCache(
   const limit = opts.limit ?? FEED_CACHE_DEFAULT_LIMIT;
   const path = opts.path ?? config.feedCachePath;
 
-  const seen = new Set<string>();
-  const merged: RemotePost[] = [];
-  const successSources: FeedSource[] = [];
-
-  // Pull from all four sources in parallel. Each `pullSource` call is an
-  // independent HTTP read; the shared `seen` Set is safe under concurrent
-  // mutation because `Set.prototype.add` / `has` are atomic in V8 (no
-  // multi-step promise races inside them). Settling all four and inspecting
-  // the results — rather than throwing on the first failure — matches the
-  // sequential behaviour this replaces: one bad source should not abort the
-  // whole refresh.
-  const sourcesToPull: FeedSource[] = ['explore', 'hot', 'top', 'new'];
+  // Pull from all four sources in parallel, but dedup deterministically in a
+  // post-settlement merge pass. Previously the dedup ran inside pullSource
+  // against a shared Set, which meant whichever parallel microtask landed a
+  // post first won the `_source`/`_sourceRank` provenance tag — producing
+  // provenance that flipped across refreshes based on HTTP timing alone.
+  // Now sources are iterated in a fixed precedence order (SOURCE_PRECEDENCE)
+  // and the first occurrence wins, so identical underlying data produces
+  // identical provenance regardless of network ordering.
+  const sourcesToPull: readonly FeedSource[] = SOURCE_PRECEDENCE;
   const sourceResults = await Promise.allSettled(
-    sourcesToPull.map((source) => pullSource(client, source, pages, limit, seen)),
+    sourcesToPull.map((source) => pullSource(client, source, pages, limit)),
   );
+
+  const successSources: FeedSource[] = [];
+  const perSource: Partial<Record<FeedSource, RemotePost[]>> = {};
   sourceResults.forEach((result, i) => {
     const source = sourcesToPull[i] as FeedSource;
     if (result.status === 'fulfilled') {
-      merged.push(...result.value);
+      perSource[source] = result.value;
       successSources.push(source);
-      log('info', `feed-cache: ${source} → ${result.value.length} new (${merged.length} total)`);
+      log('info', `feed-cache: ${source} → ${result.value.length} posts`);
     } else {
       log(
         'warn',
@@ -324,6 +333,21 @@ export async function refreshFeedCache(
   // sources returned zero posts) is still valid — only total failure throws.
   if (successSources.length === 0) {
     throw new Error('feed-cache: all sources failed — no posts retrieved');
+  }
+
+  // Deterministic merge: iterate in SOURCE_PRECEDENCE order; first occurrence
+  // of a post id wins its provenance. Skipped sources (failed pulls) are
+  // silently absent from the merge.
+  const seen = new Set<string>();
+  const merged: RemotePost[] = [];
+  for (const source of SOURCE_PRECEDENCE) {
+    const posts = perSource[source];
+    if (!posts) continue;
+    for (const post of posts) {
+      if (seen.has(post.id)) continue;
+      seen.add(post.id);
+      merged.push(post);
+    }
   }
 
   const cache: FeedCacheFile = {

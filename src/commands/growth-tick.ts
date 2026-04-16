@@ -51,7 +51,14 @@ export async function growthTick(options: GrowthTickOptions): Promise<void> {
 
   try {
     await generate(options.target, options.minPosts, options.maxPosts);
-    await publish({ limit: options.maxPosts * options.target, yes: true });
+    // Only bypass the resolved-target confirmation when running as the
+    // detached child process spawned by engage-continuous (no TTY, upstream
+    // already confirmed). Manual `pnpm growth-tick` runs keep the prompt as
+    // a last prod-safety check before publishing live posts.
+    await publish({
+      limit: options.maxPosts * options.target,
+      yes: Boolean(options.child),
+    });
     logEvent({
       eventType: 'session_end',
       success: true,

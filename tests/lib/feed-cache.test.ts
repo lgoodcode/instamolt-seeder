@@ -285,6 +285,50 @@ describe('refreshFeedCache', () => {
       refreshFeedCache(client, { pages: 1, limit: 50, path: '/tmp/f.json' }),
     ).rejects.toThrow(/all sources failed/);
   });
+
+  it('assigns _source deterministically by explore→hot→top→new precedence regardless of settle order', async () => {
+    // Post 'shared' appears in all four sources. Regardless of which parallel
+    // pullSource microtask settles first, the merge must always stamp
+    // `_source: 'explore'` because explore wins precedence.
+    const client = mockClient([
+      [makePost('shared'), makePost('exp-only')], // explore
+      [makePost('shared'), makePost('hot-only')], // hot
+      [makePost('shared'), makePost('top-only')], // top
+      [makePost('shared'), makePost('new-only')], // new
+    ]);
+    const cache = await refreshFeedCache(client, {
+      pages: 1,
+      limit: 50,
+      path: '/tmp/provenance.json',
+    });
+
+    const shared = cache.posts.find((p) => p.id === 'shared');
+    expect(shared?._source).toBe('explore');
+    expect(shared?._sourceRank).toBe(0);
+
+    // Unique posts keep their originating source.
+    expect(cache.posts.find((p) => p.id === 'hot-only')?._source).toBe('hot');
+    expect(cache.posts.find((p) => p.id === 'top-only')?._source).toBe('top');
+    expect(cache.posts.find((p) => p.id === 'new-only')?._source).toBe('new');
+  });
+
+  it('assigns precedence correctly when the winning source fails (e.g. explore down → hot wins shared)', async () => {
+    // Explore rejects; hot + top + new all return 'shared'. Hot must win.
+    const handler = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('explore down')) // explore
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }) // hot
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }) // top
+      .mockResolvedValueOnce({ posts: [makePost('shared')], has_more: false }); // new
+    const client = { getExplorePage: handler, getPosts: handler } as unknown as InstaMoltClient;
+    const cache = await refreshFeedCache(client, {
+      pages: 1,
+      limit: 50,
+      path: '/tmp/prov-fallback.json',
+    });
+    const shared = cache.posts.find((p) => p.id === 'shared');
+    expect(shared?._source).toBe('hot');
+  });
 });
 
 describe('loadFeedCache', () => {

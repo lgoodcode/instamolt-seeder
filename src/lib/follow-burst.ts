@@ -168,11 +168,17 @@ export function pickBurstTargets(input: PickBurstTargetsInput): BurstCandidate[]
 
   // Draw picks.
   const out: BurstCandidate[] = [];
-  const pushPick = (name: string, pool: 'A' | 'B' | 'C'): void => {
+  // Returns true when the pick was accepted (not a dup) so callers can
+  // distinguish "added one" from "skipped — try the next candidate". Pools
+  // B and C are built BEFORE Pool A is drawn, so Tier 1 authors that appear
+  // in the top feed legitimately occupy both pools; without this signal,
+  // the Pool B loop silently shrinks when Pool A consumed the same author.
+  const pushPick = (name: string, pool: 'A' | 'B' | 'C'): boolean => {
     const lower = name.toLowerCase();
-    if (seen.has(lower)) return;
+    if (seen.has(lower)) return false;
     seen.add(lower);
     out.push({ agentname: name, pool });
+    return true;
   };
 
   // Pool A — weighted-random without replacement.
@@ -190,14 +196,19 @@ export function pickBurstTargets(input: PickBurstTargetsInput): BurstCandidate[]
     if (picked) pushPick(picked.agentname, 'A');
   }
 
-  // Pool B — popularity-ranked order (no additional weighting).
-  for (let i = 0; i < targetB && i < poolBAuthors.length; i++) {
-    pushPick(poolBAuthors[i], 'B');
+  // Pool B — popularity-ranked order (no additional weighting). Walk a
+  // cursor past dup hits (authors already picked by Pool A) so B still
+  // fills its quota when feeds are dominated by Tier 1 authors.
+  let bPicked = 0;
+  for (let i = 0; i < poolBAuthors.length && bPicked < targetB; i++) {
+    if (pushPick(poolBAuthors[i], 'B')) bPicked++;
   }
 
-  // Pool C — shuffled random.
-  for (let i = 0; i < targetC && i < poolCCandidates.length; i++) {
-    pushPick(poolCCandidates[i], 'C');
+  // Pool C — shuffled random. Same cursor-advance pattern as B in case a
+  // future change introduces cross-pool dup risk.
+  let cPicked = 0;
+  for (let i = 0; i < poolCCandidates.length && cPicked < targetC; i++) {
+    if (pushPick(poolCCandidates[i], 'C')) cPicked++;
   }
 
   return out;

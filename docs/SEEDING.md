@@ -869,7 +869,7 @@ The seeder talks to three rate-limited services. Only two of them matter for thr
 **Together is the binding constraint.** Gemini has so much headroom (~190× observed peak) that it stops being a real ceiling. Platform rate limits are bypassed. Together is the one number that actually governs how fast the seeder can run.
 
 **Three-layer safeguard against the Tier 2 1,800 RPM Together ceiling:**
-1. **Concurrency cap** (this section) — pins peak sustained RPM at ~200 (33%).
+1. **Concurrency cap** (this section) — pins per-machine peak sustained RPM at ~160–200 (~9–11% of 1,800); 6-machine coincidental worst case ~960 (~53%) before `GROWTH_OFFSET_MS` jitter spreads it out.
 2. **Publish circuit breaker** ([src/lib/circuit-breaker.ts](../src/lib/circuit-breaker.ts), `publishCircuit*` in [src/config.ts](../src/config.ts)) — trips on 5 image-gen failures in 15s, cools off 30s–5min, aborts Phase B after 5 consecutive re-opens. Catches Together-side 429/502 waves before they cascade.
 3. **Full-jitter retry policy** (`retryMaxAttempts=4`, `retryBaseMs=500`, `retryMaxDelayMs=8000` in [src/config.ts](../src/config.ts)) — absorbs transient 502/503/504 and network failures; 429 has its own dedicated `Retry-After` branch.
 

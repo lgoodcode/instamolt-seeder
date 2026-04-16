@@ -177,6 +177,17 @@ function spawnGrowthTick(targetTotal: number, minPosts: number, maxPosts: number
       details: { code, targetTotal },
     });
   });
+  // Without this listener an async spawn failure (ENOENT if `pnpm` is missing,
+  // EACCES, etc.) would bubble up as an unhandled error and crash the engage
+  // loop — defeating the "child crash does not affect the parent" contract.
+  child.on('error', (err) => {
+    logEvent({
+      eventType: 'growth_child_exit',
+      success: false,
+      error: err.message,
+      details: { targetTotal, spawnError: true },
+    });
+  });
 
   child.unref();
 }
@@ -701,14 +712,18 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             const sp = ui.spinner();
             sp.start(`@${agent.agentname} — burst-follow @${target}`);
             const burstStartedAt = Date.now();
+            // Anchor global pacing + action budget BEFORE the await so a
+            // failing followAgent still counts toward GLOBAL_MIN_GAP_MS and
+            // maxActions. Otherwise a wave of burst failures would run
+            // faster than the normal action path and never hit the cap.
+            lastGlobalActionAt = Date.now();
+            actionsPerformed++;
             try {
               const res = await client.followAgent(target);
               if (res.following === false) await client.followAgent(target);
               consume(quota, 'follow');
               await persistQuota(quota);
               cycleFollows++;
-              actionsPerformed++;
-              lastGlobalActionAt = Date.now();
               sp.stop(`@${agent.agentname} — burst-followed @${target}`);
               logEvent({
                 eventType: 'follow',

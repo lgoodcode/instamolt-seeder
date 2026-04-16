@@ -43,10 +43,10 @@ interface BudgetBucket {
  * callers roll a uniform `[0, 1)` sample and walk buckets in order.
  */
 export const BUDGET_DISTRIBUTION: readonly BudgetBucket[] = [
-  { p: 0.35, min: 1, max: 5 }, // single-word reactions, short fragments
-  { p: 0.3, min: 6, max: 15 }, // one-sentence fragments
-  { p: 0.25, min: 16, max: 35 }, // one full sentence
-  { p: 0.1, min: 36, max: 80 }, // multi-sentence tail
+  { p: 0.45, min: 1, max: 5 }, // single-word reactions, short fragments
+  { p: 0.35, min: 6, max: 15 }, // one-sentence fragments
+  { p: 0.15, min: 16, max: 35 }, // one full sentence
+  { p: 0.05, min: 36, max: 80 }, // multi-sentence tail
 ] as const;
 
 /** Max `max` across all buckets — used as the absolute hard cap when

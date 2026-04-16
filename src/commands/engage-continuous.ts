@@ -325,7 +325,13 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     postsMax,
     enabled: !(options.noGrowth ?? false),
   };
-  let lastGrowthAt = 0;
+  // Anchor at process start (NOT 0) so the first growth tick respects both
+  // `growthIntervalMs` AND `GROWTH_OFFSET_MS`. With `lastGrowthAt = 0` the
+  // first rescan would fire growth immediately and the per-machine offset
+  // jitter would only kick in starting from the second tick — defeating
+  // the 6-machine stagger on the very batch that matters most (initial
+  // population ramp where everyone is empty).
+  let lastGrowthAt = Date.now();
 
   // Initialize structured event logging (output/logs/).
   initEventLogger({ verbose: options.verbose });
@@ -588,9 +594,12 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             growthConfig.maxAgents,
             growthConfig.growthRate,
           );
+          // Match the actual fire condition below — operator countdown should
+          // include the per-process offset jitter so the displayed "next batch
+          // in N minutes" matches reality.
           const nextTickIn = Math.max(
             0,
-            growthConfig.growthIntervalMs - (Date.now() - lastGrowthAt),
+            growthConfig.growthIntervalMs + GROWTH_OFFSET_MS - (Date.now() - lastGrowthAt),
           );
 
           log(

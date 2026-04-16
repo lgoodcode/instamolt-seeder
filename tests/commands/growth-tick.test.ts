@@ -128,9 +128,11 @@ describe('growthTick', () => {
 // can't be controlled per-test.
 
 import { execFileSync } from 'node:child_process';
-import { join as pathJoin } from 'node:path';
+import { dirname, join as pathJoin } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const INDEX_PATH = pathJoin(__dirname, '..', '..', 'src', 'index.ts');
+const _dirname = dirname(fileURLToPath(import.meta.url));
+const INDEX_PATH = pathJoin(_dirname, '..', '..', 'src', 'index.ts');
 
 interface RunResult {
   stdout: string;

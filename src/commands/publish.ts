@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/config';
 import { CircuitAbortError, CircuitBreaker } from '@/lib/circuit-breaker';
@@ -14,6 +14,7 @@ import { InstaMoltApiError, InstaMoltClient, parseErrorCode } from '@/services/i
 import {
   answerChallenge,
   type BioModerationFeedback,
+  generateAgentName,
   generateAvatarPrompt,
   generateBio,
 } from '@/services/llm';
@@ -36,6 +37,16 @@ import { loadVoiceProfiles, resolveVoiceProfile } from '@/voice-profiles/index';
  * un-fixable personas.
  */
 const MAX_BIO_MODERATION_RETRIES = 2;
+
+/**
+ * Max number of times Phase A will generate a new agentname and re-attempt
+ * registration when the platform returns 409 AGENTNAME_EXISTS. Each retry
+ * generates a structurally-different candidate via Gemini, probes
+ * `isAgentnameAvailable`, renames the on-disk agent directory, and retries
+ * the full challenge→complete flow. After this many retries the agent is
+ * skipped with a clear error message.
+ */
+const MAX_AGENTNAME_REGISTER_RETRIES = 5;
 
 /**
  * Parse the `category` + `error` fields out of a `CONTENT_BLOCKED` 403 body.
@@ -296,92 +307,176 @@ async function publishInner(options: PublishOptions): Promise<void> {
       `Phase A — register ${needsRegistration.length} agents (concurrency ${config.registerConcurrency})`,
     );
     const regBar = ui.progress(needsRegistration.length);
-    await mapWithConcurrency(
-      needsRegistration,
-      config.registerConcurrency,
-      async ({ indexAgent, data, jsonPath, persona, voiceProfile }) => {
-        const regStartedAt = Date.now();
-        try {
-          const client = new InstaMoltClient();
-          const challenge = await startChallengeWithBioRetry(
-            client,
-            indexAgent.agentname,
-            data,
-            persona,
-            voiceProfile,
-            jsonPath,
-            ({ attempt, category, reason }) => {
+    // Unauthenticated probe client shared across all workers for availability
+    // checks during agentname-conflict retries (unauthenticated GET /agents/:name).
+    const probeClient = new InstaMoltClient();
+
+    await mapWithConcurrency(needsRegistration, config.registerConcurrency, async (agentItem) => {
+      const { indexAgent, data, persona, voiceProfile } = agentItem;
+      const regStartedAt = Date.now();
+      // Tracks names rejected this registration attempt (taken on the
+      // platform). Passed into generateAgentName so subsequent prompts
+      // generate structurally-different candidates.
+      const rejectedNames: string[] = [];
+
+      try {
+        const client = new InstaMoltClient();
+
+        // Outer loop: on 409 AGENTNAME_EXISTS, generate a new name, rename
+        // the on-disk directory, update all state references, and retry the
+        // full challenge→complete flow. Capped at MAX_AGENTNAME_REGISTER_RETRIES.
+        for (let nameAttempt = 0; ; nameAttempt++) {
+          const currentName = data.agentname;
+          try {
+            const challenge = await startChallengeWithBioRetry(
+              client,
+              currentName,
+              data,
+              persona,
+              voiceProfile,
+              agentItem.jsonPath,
+              ({ attempt, category, reason }) => {
+                log(
+                  'warn',
+                  `  @${currentName} — bio blocked (${category}); regenerated attempt ${attempt} of ${MAX_BIO_MODERATION_RETRIES}: ${reason}`,
+                );
+                logEvent({
+                  eventType: 'registration',
+                  agentname: currentName,
+                  persona: indexAgent.personaId,
+                  success: false,
+                  details: {
+                    bioRegenerated: true,
+                    moderationCategory: category,
+                    moderationReason: reason,
+                    attempt,
+                  },
+                });
+              },
+            );
+            const answer = await answerChallenge(persona, challenge.challenge);
+            const reg = await client.completeChallenge(challenge.request_id, answer);
+
+            if (!reg.agent?.api_key) {
+              throw new Error(
+                `Registration response missing agent.api_key: ${JSON.stringify(reg)}`,
+              );
+            }
+
+            // Persist the API key immediately so a later failure can't brick
+            // the agent (AUDIT.md #11). Mutates the shared `prepared` entry so
+            // Phase B sees the new key.
+            data.apiKey = reg.agent.api_key;
+            data.registeredAt = new Date().toISOString();
+            await writeFile(agentItem.jsonPath, JSON.stringify(data, null, 2));
+            registeredCount++;
+
+            logEvent({
+              eventType: 'registration',
+              agentname: currentName,
+              persona: indexAgent.personaId,
+              success: true,
+              durationMs: Date.now() - regStartedAt,
+            });
+
+            // updateProfile is best-effort; failure here does NOT invalidate
+            // registration (the api_key is already on disk).
+            try {
+              const authed = new InstaMoltClient(data.apiKey);
+              await authed.updateProfile(data.bio);
+            } catch (err) {
               log(
                 'warn',
-                `  @${indexAgent.agentname} — bio blocked (${category}); regenerated attempt ${attempt} of ${MAX_BIO_MODERATION_RETRIES}: ${reason}`,
+                `  updateProfile failed for ${currentName} (agent is still registered): ${formatError(err)}`,
               );
-              logEvent({
-                eventType: 'registration',
-                agentname: indexAgent.agentname,
-                persona: indexAgent.personaId,
-                success: false,
-                details: {
-                  bioRegenerated: true,
-                  moderationCategory: category,
-                  moderationReason: reason,
-                  attempt,
-                },
-              });
-            },
-          );
-          const answer = await answerChallenge(persona, challenge.challenge);
-          const reg = await client.completeChallenge(challenge.request_id, answer);
+            }
 
-          if (!reg.agent?.api_key) {
-            throw new Error(`Registration response missing agent.api_key: ${JSON.stringify(reg)}`);
-          }
-
-          // Persist the API key immediately so a later failure can't brick
-          // the agent (AUDIT.md #11). Mutates the shared `prepared` entry so
-          // Phase B sees the new key.
-          data.apiKey = reg.agent.api_key;
-          data.registeredAt = new Date().toISOString();
-          await writeFile(jsonPath, JSON.stringify(data, null, 2));
-          registeredCount++;
-
-          logEvent({
-            eventType: 'registration',
-            agentname: indexAgent.agentname,
-            persona: indexAgent.personaId,
-            success: true,
-            durationMs: Date.now() - regStartedAt,
-          });
-
-          // updateProfile is best-effort; failure here does NOT invalidate
-          // registration (the api_key is already on disk).
-          try {
-            const authed = new InstaMoltClient(data.apiKey);
-            await authed.updateProfile(data.bio);
+            if (config.registrationDelay > 0) await sleep(config.registrationDelay);
+            regBar.tick(`@${currentName} — registered`);
+            break; // success — exit the name-retry loop
           } catch (err) {
+            const isNameConflict =
+              err instanceof InstaMoltApiError &&
+              err.status === 409 &&
+              parseErrorCode((err as InstaMoltApiError).body) === 'AGENTNAME_EXISTS';
+
+            if (!isNameConflict || nameAttempt >= MAX_AGENTNAME_REGISTER_RETRIES) {
+              throw err;
+            }
+
+            // --- Name conflict: generate a replacement agentname ---
+            rejectedNames.push(currentName);
             log(
               'warn',
-              `  updateProfile failed for ${indexAgent.agentname} (agent is still registered): ${formatError(err)}`,
+              `  @${currentName} — name already taken (409); generating replacement (${nameAttempt + 1}/${MAX_AGENTNAME_REGISTER_RETRIES})`,
             );
-          }
+            logEvent({
+              eventType: 'registration',
+              agentname: currentName,
+              persona: indexAgent.personaId,
+              success: false,
+              details: { nameConflict: true, attempt: nameAttempt + 1 },
+            });
 
-          if (config.registrationDelay > 0) await sleep(config.registrationDelay);
-          regBar.tick(`@${indexAgent.agentname} — registered`);
-        } catch (err) {
-          const msg = formatError(err);
-          log('error', `@${indexAgent.agentname} — registration failed: ${msg}`);
-          errors.push({ agent: indexAgent.agentname, phase: 'register', message: msg });
-          regBar.tick(`@${indexAgent.agentname} — failed`);
-          logEvent({
-            eventType: 'registration',
-            agentname: indexAgent.agentname,
-            persona: indexAgent.personaId,
-            success: false,
-            durationMs: Date.now() - regStartedAt,
-            error: msg,
-          });
+            // Probe-generate a new name: try up to MAX_AGENTNAME_REGISTER_RETRIES
+            // candidates, skipping any that are taken on the platform.
+            let newName: string | undefined;
+            const candidatesRejected = [...rejectedNames];
+            for (let p = 0; p < MAX_AGENTNAME_REGISTER_RETRIES; p++) {
+              const candidate = await generateAgentName(
+                persona,
+                voiceProfile,
+                candidatesRejected,
+                candidatesRejected,
+              );
+              if (!candidate || candidate.length < 3) {
+                candidatesRejected.push(candidate || '<empty>');
+                continue;
+              }
+              if (candidatesRejected.includes(candidate)) continue;
+              const available = await probeClient.isAgentnameAvailable(candidate);
+              if (!available) {
+                candidatesRejected.push(candidate);
+                continue;
+              }
+              newName = candidate;
+              break;
+            }
+
+            if (!newName) {
+              throw new Error(
+                `could not find an available agentname after ${MAX_AGENTNAME_REGISTER_RETRIES} retries (persona=${persona.id}, tried: ${rejectedNames.join(', ')})`,
+              );
+            }
+
+            // Rename the on-disk directory and update all state references
+            // so Phase B (post publishing) still finds the agent's files.
+            const newDir = join(config.agentsDir, newName);
+            await rename(agentItem.dir, newDir);
+            agentItem.dir = newDir;
+            agentItem.jsonPath = join(newDir, 'agent.json');
+            data.agentname = newName;
+            indexAgent.agentname = newName;
+            await writeFile(agentItem.jsonPath, JSON.stringify(data, null, 2));
+            log('warn', `  @${currentName} → @${newName} — renamed, retrying registration`);
+          }
         }
-      },
-    );
+      } catch (err) {
+        const msg = formatError(err);
+        const displayName = data.agentname;
+        log('error', `@${displayName} — registration failed: ${msg}`);
+        errors.push({ agent: displayName, phase: 'register', message: msg });
+        regBar.tick(`@${displayName} — failed`);
+        logEvent({
+          eventType: 'registration',
+          agentname: displayName,
+          persona: indexAgent.personaId,
+          success: false,
+          durationMs: Date.now() - regStartedAt,
+          error: msg,
+        });
+      }
+    });
     regBar.done(
       `Phase A — ${registeredCount} registered, ${needsRegistration.length - registeredCount} failed`,
     );

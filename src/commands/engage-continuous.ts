@@ -408,8 +408,18 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         let isNewAgent = false;
         try {
           await access(quotaFilePath(agent.agentname));
-        } catch {
-          isNewAgent = true;
+        } catch (err: unknown) {
+          const code =
+            typeof err === 'object' && err !== null && 'code' in err ? err.code : undefined;
+          if (code === 'ENOENT') {
+            isNewAgent = true;
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(
+              'warn',
+              `Skipping follow burst for ${agent.agentname}: quota.json check failed (${msg})`,
+            );
+          }
         }
         if (isNewAgent) {
           const targets = pickBurstTargets({
@@ -423,6 +433,20 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
               agent.agentname,
               targets.map((t) => t.agentname),
             );
+            logEvent({
+              eventType: 'follow_burst_scheduled',
+              agentname: agent.agentname,
+              persona: agent.personaId,
+              success: true,
+              details: {
+                count: targets.length,
+                pools: {
+                  A: targets.filter((t) => t.pool === 'A').length,
+                  B: targets.filter((t) => t.pool === 'B').length,
+                  C: targets.filter((t) => t.pool === 'C').length,
+                },
+              },
+            });
           }
         }
       }

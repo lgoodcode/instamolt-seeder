@@ -1,14 +1,4 @@
-import { readFile as actualReadFile } from 'node:fs/promises';
-import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  loadTrendingPool,
-  pickTrendingHashtags,
-  TRENDING_POOL_VERSION,
-  validateTrendingPool,
-} from '@/lib/trending-pool';
-import { PERSONA_CATALOG } from '@/personas/catalog';
-import type { Persona } from '@/types';
 
 // In-memory fs mock — same shape as tests/lib/feed-cache.test.ts. `readFile`
 // is the only fs call the trending-pool helper makes, and we need the real
@@ -30,6 +20,17 @@ vi.mock('node:fs/promises', async () => {
     }),
   };
 });
+
+import { readFile as actualReadFile } from 'node:fs/promises';
+import path from 'node:path';
+import {
+  loadTrendingPool,
+  pickTrendingHashtags,
+  TRENDING_POOL_VERSION,
+  validateTrendingPool,
+} from '@/lib/trending-pool';
+import { PERSONA_CATALOG } from '@/personas/catalog';
+import type { Persona } from '@/types';
 
 function makePersona(id: string): Persona {
   // Minimal shape — pickTrendingHashtags only reads `id`, so the other

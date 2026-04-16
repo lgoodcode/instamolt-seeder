@@ -25,7 +25,7 @@
  * alongside these in Phase 6.
  */
 
-import { REPLY_FALLBACK_TO_COMMENT } from '@/config';
+import { REPLY_FALLBACK_TO_COMMENT, SAME_REGISTER_CAP, SAME_REGISTER_WINDOW_MS } from '@/config';
 import {
   type CommentNode,
   fetchCommentTree,
@@ -43,19 +43,22 @@ import {
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
 import { checkAvailability, consume, persistQuota } from '@/lib/quota';
-import { pickRegisterHint, relationshipMultiplier } from '@/lib/relationships';
+import { pickRegisterHint, pivotRegister, relationshipMultiplier } from '@/lib/relationships';
 import {
   appendRuntimeComment,
   loadPriorComments,
   loadRuntimeCommentsFile,
 } from '@/lib/runtime-comments';
+import { appendGlobalComment, recentRegistersForPost } from '@/lib/runtime-global-log';
 import { rollTrendingHashtags } from '@/lib/trending-pool';
+import { sampleWordBudget } from '@/lib/word-budget';
 import { type InstaMoltClient, ParentDeletedError } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, generateReply, rollChaos } from '@/services/llm';
 import type {
   ActionKind,
   ActivityItem,
   AgentQuota,
+  CommentRegister,
   FeedCacheFile,
   FeedSource,
   GeneratedAgent,
@@ -234,7 +237,7 @@ export async function executeComment(
 
   const priorComments = await loadPriorComments(agent.agentname);
   const authorPid = ctx.authorPersonaLookup.get(post.author.agentname);
-  const registerHint = pickRegisterHint(persona, authorPid);
+  const initialRegisterHint = pickRegisterHint(persona, authorPid);
   const chaos = rollChaos(persona);
 
   // Tier 1 COMMENT → REPLY substitution: on posts authored by a Tier 1
@@ -254,6 +257,44 @@ export async function executeComment(
       return executeReply(ctx, agent, persona, quota);
     }
   }
+
+  // Same-register cap: count recent seeder comments on this post by register.
+  // Any register that's already hit `SAME_REGISTER_CAP` gets pivoted down the
+  // fallback chain (disagree → conversational → love → skip). Only applies
+  // when there IS a register hint — unclassified comments don't count toward
+  // the cap and pass through unchanged.
+  let registerHint: CommentRegister | undefined = initialRegisterHint;
+  if (initialRegisterHint) {
+    const recent = await recentRegistersForPost(post.id, SAME_REGISTER_WINDOW_MS);
+    const counts = recent.reduce<Record<string, number>>((acc, r) => {
+      acc[r] = (acc[r] ?? 0) + 1;
+      return acc;
+    }, {});
+    const saturated = new Set<string>();
+    for (const [reg, count] of Object.entries(counts)) {
+      if (count >= SAME_REGISTER_CAP) saturated.add(reg);
+    }
+    const pivoted = pivotRegister(initialRegisterHint, saturated);
+    if (!pivoted) {
+      return {
+        status: 'skipped',
+        kind: consumeAs,
+        reason: `register_saturated:${initialRegisterHint}`,
+      };
+    }
+    registerHint = pivoted;
+  }
+
+  // Resolve the agent's voice profile — drives the formatVoiceBlock + shape
+  // allowlist in `generateComment` and the verbosity-shifted word budget.
+  // A missing profile is a hard error upstream of this function (agents are
+  // assigned one at generate time), so we surface it as an action error.
+  const resolvedVoice = resolveVoiceProfile(ctx.voiceProfiles, agent);
+  if ('error' in resolvedVoice) {
+    return { status: 'error', kind: consumeAs, error: resolvedVoice.error };
+  }
+  const voiceProfile = resolvedVoice.profile;
+  const wordBudget = sampleWordBudget(voiceProfile.verbosity);
 
   // Lazy mention-lookup cache — `buildMentionLookup` walks the full agent
   // map, so defer it until either the probability gate passes (for
@@ -282,6 +323,7 @@ export async function executeComment(
   try {
     text = await generateComment(
       persona,
+      voiceProfile,
       { agentname: agent.agentname, bio: agent.bio },
       post.caption,
       post.author.agentname,
@@ -289,6 +331,7 @@ export async function executeComment(
       registerHint,
       chaos,
       mentionCandidates,
+      wordBudget,
     );
   } catch (err) {
     return { status: 'error', kind: consumeAs, error: `llm: ${err}` };
@@ -317,6 +360,14 @@ export async function executeComment(
     text,
     postId: post.id,
     againstAuthor: post.author.agentname,
+  });
+  // Feed the cross-agent cap query. `register` is omitted when there's no
+  // relationship hint so the cap only applies to classifiable comments.
+  await appendGlobalComment({
+    postId: post.id,
+    agentname: agent.agentname,
+    register: registerHint,
+    kind: 'comment',
   });
 
   // Mention fan-out — emit after the comment succeeds so stats.mentions
@@ -622,6 +673,13 @@ export async function executeReply(
   const priorComments = await loadPriorComments(agent.agentname);
   const chaos = rollChaos(persona);
 
+  const resolvedVoice = resolveVoiceProfile(ctx.voiceProfiles, agent);
+  if ('error' in resolvedVoice) {
+    return { status: 'error', kind: 'reply', error: resolvedVoice.error };
+  }
+  const voiceProfile = resolvedVoice.profile;
+  const wordBudget = sampleWordBudget(voiceProfile.verbosity);
+
   let mentionStateCache: ReturnType<typeof buildMentionLookup> | undefined;
   const getMentionState = (): ReturnType<typeof buildMentionLookup> => {
     mentionStateCache ??= buildMentionLookup(ctx.authorPersonaLookup);
@@ -646,6 +704,7 @@ export async function executeReply(
   try {
     text = await generateReply(
       persona,
+      voiceProfile,
       { agentname: agent.agentname, bio: agent.bio },
       { caption: post.caption ?? null, author: post.author.agentname },
       {
@@ -657,6 +716,7 @@ export async function executeReply(
       [...priorComments],
       chaos,
       mentionCandidates,
+      wordBudget,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -690,6 +750,14 @@ export async function executeReply(
     parentCommentId: target.parent.id,
     depth: (target.parent.depth + 1) as 1 | 2,
     againstAuthor: target.parent.author.agentname,
+  });
+  // Replies don't carry a registerHint (reply voice is anchored in parent
+  // tone), so `register` is always undefined here — recent-replies counts
+  // still flow into the global log but never count toward the cap.
+  await appendGlobalComment({
+    postId: post.id,
+    agentname: agent.agentname,
+    kind: 'reply',
   });
 
   if (text.includes('@')) {
@@ -842,10 +910,18 @@ export async function executeActivityDrivenReply(
       })
     : [];
 
+  const resolvedVoice = resolveVoiceProfile(ctx.voiceProfiles, agent);
+  if ('error' in resolvedVoice) {
+    return { status: 'error', kind: 'reply', error: resolvedVoice.error };
+  }
+  const voiceProfile = resolvedVoice.profile;
+  const wordBudget = sampleWordBudget(voiceProfile.verbosity);
+
   let text: string;
   try {
     text = await generateReply(
       persona,
+      voiceProfile,
       { agentname: agent.agentname, bio: agent.bio },
       {
         caption: activity.post.caption ?? null,
@@ -860,6 +936,7 @@ export async function executeActivityDrivenReply(
       [...priorComments],
       chaos,
       mentionCandidates,
+      wordBudget,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -893,6 +970,11 @@ export async function executeActivityDrivenReply(
     depth: (parent.depth + 1) as 1 | 2,
     againstAuthor: parent.author.agentname,
     repliedToActivityId: activity.id,
+  });
+  await appendGlobalComment({
+    postId: activity.post.id,
+    agentname: agent.agentname,
+    kind: 'reply',
   });
 
   if (text.includes('@')) {

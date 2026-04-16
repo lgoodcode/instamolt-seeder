@@ -218,7 +218,12 @@ describe('bakeAgentComments', () => {
       { author: 'peer2', caption: 'second', personaId: 'other' },
     ];
 
-    const samples = await bakeAgentComments(makePersona(), agent('alpha'), sources);
+    const samples = await bakeAgentComments(
+      makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
+      agent('alpha'),
+      sources,
+    );
 
     expect(samples).toHaveLength(2);
     expect(samples[0]).toMatchObject({
@@ -248,27 +253,38 @@ describe('bakeAgentComments', () => {
       { author: 'p3', caption: 'c' },
     ];
 
-    await bakeAgentComments(makePersona(), agent('alpha'), sources);
+    await bakeAgentComments(
+      makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
+      agent('alpha'),
+      sources,
+    );
 
     // Call 1: empty avoid list.
     // Call 2: [first reply]
     // Call 3: [first reply, second reply]
+    // Arg index 5 is `priorComments` — the call shape is
+    // (persona, voiceProfile, agent, caption, author, priorComments, ...).
     const calls = llmMocks.generateComment.mock.calls;
     expect(calls).toHaveLength(3);
-    expect((calls[0] as unknown[])[4]).toEqual([]);
-    expect((calls[1] as unknown[])[4]).toEqual(['first reply']);
-    expect((calls[2] as unknown[])[4]).toEqual(['first reply', 'second reply']);
+    expect((calls[0] as unknown[])[5]).toEqual([]);
+    expect((calls[1] as unknown[])[5]).toEqual(['first reply']);
+    expect((calls[2] as unknown[])[5]).toEqual(['first reply', 'second reply']);
   });
 
   it('passes the agent context (agentname + bio) to generateComment', async () => {
     llmMocks.generateComment.mockResolvedValueOnce('ok');
 
-    await bakeAgentComments(makePersona('cozy'), agent('glitchfern'), [
-      { author: 'p', caption: 'c' },
-    ]);
+    await bakeAgentComments(
+      makePersona('cozy'),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
+      agent('glitchfern'),
+      [{ author: 'p', caption: 'c' }],
+    );
 
+    // Arg index 2 is `agent` — (persona, voiceProfile, agent, ...).
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    expect(callArgs[1]).toEqual({
+    expect(callArgs[2]).toEqual({
       agentname: 'glitchfern',
       bio: 'glitchfern bio',
     });
@@ -453,10 +469,11 @@ describe('bakeAgentReplies', () => {
     vi.restoreAllMocks();
   });
 
-  function stubClient(): Parameters<typeof bakeAgentReplies>[2] {
+  function stubClient(): Parameters<typeof bakeAgentReplies>[3] {
     // bakeAgentReplies only passes the client through to fetchCommentTree
     // (which is mocked), so the client itself is never called directly.
-    return {} as Parameters<typeof bakeAgentReplies>[2];
+    // Position 3 in the signature: (persona, voiceProfile, agent, client, ...).
+    return {} as Parameters<typeof bakeAgentReplies>[3];
   }
 
   it('accepts caller-provided depthTargets of any length', () => {
@@ -483,6 +500,7 @@ describe('bakeAgentReplies', () => {
     const posts = [makePostWithComments('p1', 'peer', 'post caption', 2)];
     const samples = await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       posts,
@@ -494,20 +512,21 @@ describe('bakeAgentReplies', () => {
     expect(treeMocks.fetchCommentTree).toHaveBeenCalledWith(expect.anything(), 'p1');
     expect(llmMocks.generateReply).toHaveBeenCalledTimes(1);
 
+    // Call shape: (persona, voiceProfile, agent, post, parent, siblings, priorComments, ...).
     const callArgs = llmMocks.generateReply.mock.calls[0] as unknown[];
-    expect((callArgs[1] as { agentname: string }).agentname).toBe('alpha');
-    expect(callArgs[2] as { caption: string; author: string }).toEqual({
+    expect((callArgs[2] as { agentname: string }).agentname).toBe('alpha');
+    expect(callArgs[3] as { caption: string; author: string }).toEqual({
       caption: 'post caption',
       author: 'peer',
     });
-    expect(callArgs[3] as { text: string; author: string; depth: 0 | 1 }).toEqual({
+    expect(callArgs[4] as { text: string; author: string; depth: 0 | 1 }).toEqual({
       text: parent.content,
       author: 'peer',
       depth: 0,
     });
-    expect(callArgs[4]).toEqual([sibling.content]);
+    expect(callArgs[5]).toEqual([sibling.content]);
     // Prior avoid list passes through at call time.
-    expect(callArgs[5]).toEqual(['prior comment one']);
+    expect(callArgs[6]).toEqual(['prior comment one']);
 
     expect(samples).toHaveLength(1);
     expect(samples[0]).toMatchObject({
@@ -538,6 +557,7 @@ describe('bakeAgentReplies', () => {
     ];
     await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       posts,
@@ -545,10 +565,11 @@ describe('bakeAgentReplies', () => {
       ['seed'],
     );
 
+    // Arg index 6 is `priorComments` — (persona, voiceProfile, agent, post, parent, siblings, priorComments).
     const calls = llmMocks.generateReply.mock.calls as unknown[][];
-    expect(calls[0]?.[5]).toEqual(['seed']);
-    expect(calls[1]?.[5]).toEqual(['seed', 'first reply']);
-    expect(calls[2]?.[5]).toEqual(['seed', 'first reply', 'second reply']);
+    expect(calls[0]?.[6]).toEqual(['seed']);
+    expect(calls[1]?.[6]).toEqual(['seed', 'first reply']);
+    expect(calls[2]?.[6]).toEqual(['seed', 'first reply', 'second reply']);
   });
 
   it('silently skips a post when fetchCommentTree throws', async () => {
@@ -565,6 +586,7 @@ describe('bakeAgentReplies', () => {
     ];
     const samples = await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       posts,
@@ -583,6 +605,7 @@ describe('bakeAgentReplies', () => {
     const posts = [makePostWithComments('p1', 'a', 'x', 1)];
     const samples = await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       posts,
@@ -612,6 +635,7 @@ describe('bakeAgentReplies', () => {
     ];
     const samples = await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       posts,
@@ -635,6 +659,7 @@ describe('bakeAgentReplies', () => {
 
     const samples = await bakeAgentReplies(
       makePersona(),
+      makeVoiceProfile({ verbosity: 'one_sentence' }),
       { agentname: 'alpha', bio: 'alpha bio' },
       stubClient(),
       [makePostWithComments('p1', 'a', 'x', 1)],

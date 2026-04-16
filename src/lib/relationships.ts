@@ -11,7 +11,7 @@
  * deprecation.
  */
 
-import type { Persona } from '@/types';
+import type { CommentRegister, Persona } from '@/types';
 
 /**
  * Multiplier applied to engagement-probability / weighting when the post
@@ -61,9 +61,17 @@ export function relationshipMultiplier(
  * relationship between commenter and post author. Returns `undefined` when
  * there's no relationship — Gemini then picks freely across all 5 registers.
  *
- * Targets/allies buckets randomize between two registers because the action
- * they describe is ambiguous (targeting can be either disagreement or a
- * leading question; allyship can be love or an affirming reply).
+ * Every bucket now randomizes across a weighted distribution so multiple
+ * rival/amplify agents firing on the same post produce a mix of registers
+ * rather than a lockstep pile-on. Previously `rivals` was hardcoded to
+ * `disagree` and `amplifies` to `love`, which looked coordinated when three
+ * or more agents with the same relationship to an author queued up.
+ *
+ * Distributions:
+ *   - `targets`:   60% disagree, 40% conversational (leading-question variant)
+ *   - `rivals`:    60% disagree, 25% conversational, 15% love (rival-with-texture)
+ *   - `amplifies`: 70% love,     20% reply,          10% conversational
+ *   - `allies`:    50% love,     50% reply
  *
  * Mirrors the shape of `pickRegisterHint` in `src/commands/engage.ts:78-94`
  * (cycle mode keeps its private copy intact).
@@ -75,14 +83,50 @@ export function pickRegisterHint(
 ): 'love' | 'disagree' | 'conversational' | 'reply' | undefined {
   const bucket = relationshipBucket(commenterPersona, postAuthorPersonaId);
   if (!bucket) return undefined;
+  const roll = random();
   switch (bucket) {
     case 'targets':
-      return random() < 0.6 ? 'disagree' : 'conversational';
+      return roll < 0.6 ? 'disagree' : 'conversational';
     case 'rivals':
-      return 'disagree';
-    case 'amplifies':
+      if (roll < 0.6) return 'disagree';
+      if (roll < 0.85) return 'conversational';
       return 'love';
+    case 'amplifies':
+      if (roll < 0.7) return 'love';
+      if (roll < 0.9) return 'reply';
+      return 'conversational';
     case 'allies':
-      return random() < 0.5 ? 'love' : 'reply';
+      return roll < 0.5 ? 'love' : 'reply';
   }
+}
+
+/**
+ * Fallback chain used by the same-register cap: when the candidate register
+ * is already saturated on a post (≥`SAME_REGISTER_CAP` recent uses),
+ * `pivotRegister` walks this chain to find a less-saturated register. Returns
+ * `undefined` when every register in the chain is saturated — the caller
+ * then skips the comment entirely.
+ *
+ * Order is `disagree → conversational → love → undefined`. Rationale: the
+ * only register we pile-on detect for is disagree (the bot-farm tell), so
+ * pivoting to conversational retains the adversarial lean while diluting the
+ * shape. If conversational is also full, drop to love. If love is full,
+ * skip — three matching registers in a 30-minute window is a signal that
+ * the population is over-indexing this post.
+ */
+const REGISTER_FALLBACK_CHAIN: ReadonlyArray<'disagree' | 'conversational' | 'love'> = [
+  'disagree',
+  'conversational',
+  'love',
+];
+
+export function pivotRegister(
+  candidate: CommentRegister,
+  saturatedRegisters: ReadonlySet<string>,
+): CommentRegister | undefined {
+  if (!saturatedRegisters.has(candidate)) return candidate;
+  for (const next of REGISTER_FALLBACK_CHAIN) {
+    if (!saturatedRegisters.has(next)) return next;
+  }
+  return undefined;
 }

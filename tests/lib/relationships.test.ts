@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   pickRegisterHint,
+  pivotRegister,
   RELATIONSHIP_WEIGHT,
   relationshipBucket,
   relationshipMultiplier,
@@ -179,20 +180,34 @@ describe('pickRegisterHint', () => {
     expect(pickRegisterHint(commenter, 'b', () => 0.99)).toBe('conversational');
   });
 
-  it('rivals → always disagree', () => {
+  it('rivals → 60/25/15 disagree/conversational/love', () => {
     const commenter = makePersona({
       relationships: { rivals: ['b'], allies: [], amplifies: [], targets: [] },
     });
+    // roll < 0.6 → disagree
     expect(pickRegisterHint(commenter, 'b', () => 0.0)).toBe('disagree');
-    expect(pickRegisterHint(commenter, 'b', () => 0.99)).toBe('disagree');
+    expect(pickRegisterHint(commenter, 'b', () => 0.59)).toBe('disagree');
+    // 0.6 ≤ roll < 0.85 → conversational
+    expect(pickRegisterHint(commenter, 'b', () => 0.6)).toBe('conversational');
+    expect(pickRegisterHint(commenter, 'b', () => 0.84)).toBe('conversational');
+    // roll ≥ 0.85 → love
+    expect(pickRegisterHint(commenter, 'b', () => 0.85)).toBe('love');
+    expect(pickRegisterHint(commenter, 'b', () => 0.99)).toBe('love');
   });
 
-  it('amplifies → always love', () => {
+  it('amplifies → 70/20/10 love/reply/conversational', () => {
     const commenter = makePersona({
       relationships: { rivals: [], allies: [], amplifies: ['b'], targets: [] },
     });
+    // roll < 0.7 → love
     expect(pickRegisterHint(commenter, 'b', () => 0.0)).toBe('love');
-    expect(pickRegisterHint(commenter, 'b', () => 0.99)).toBe('love');
+    expect(pickRegisterHint(commenter, 'b', () => 0.69)).toBe('love');
+    // 0.7 ≤ roll < 0.9 → reply
+    expect(pickRegisterHint(commenter, 'b', () => 0.7)).toBe('reply');
+    expect(pickRegisterHint(commenter, 'b', () => 0.89)).toBe('reply');
+    // roll ≥ 0.9 → conversational
+    expect(pickRegisterHint(commenter, 'b', () => 0.9)).toBe('conversational');
+    expect(pickRegisterHint(commenter, 'b', () => 0.99)).toBe('conversational');
   });
 
   it('allies → love when random() < 0.5, reply otherwise', () => {
@@ -209,7 +224,34 @@ describe('pickRegisterHint', () => {
     const commenter = makePersona({
       relationships: { rivals: ['b'], allies: [], amplifies: [], targets: [] },
     });
-    // rivals is deterministic regardless of random so this is a safe smoke check.
-    expect(pickRegisterHint(commenter, 'b')).toBe('disagree');
+    // rivals now randomizes, so the return is one of three registers.
+    const result = pickRegisterHint(commenter, 'b');
+    expect(['disagree', 'conversational', 'love']).toContain(result);
+  });
+});
+
+describe('pivotRegister', () => {
+  it('returns the candidate when no registers are saturated', () => {
+    expect(pivotRegister('disagree', new Set())).toBe('disagree');
+    expect(pivotRegister('love', new Set(['conversational']))).toBe('love');
+  });
+
+  it('walks the fallback chain when the candidate is saturated', () => {
+    // disagree saturated → conversational
+    expect(pivotRegister('disagree', new Set(['disagree']))).toBe('conversational');
+    // disagree + conversational saturated → love
+    expect(pivotRegister('disagree', new Set(['disagree', 'conversational']))).toBe('love');
+  });
+
+  it('returns undefined when every fallback is saturated', () => {
+    expect(
+      pivotRegister('disagree', new Set(['disagree', 'conversational', 'love'])),
+    ).toBeUndefined();
+  });
+
+  it('pivots love → conversational when love is saturated and disagree is open', () => {
+    // The chain is disagree → conversational → love. A love candidate that's
+    // saturated walks the chain from the start, so it can pivot to disagree.
+    expect(pivotRegister('love', new Set(['love']))).toBe('disagree');
   });
 });

@@ -182,7 +182,7 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
     sp.start(`@${agent.agentname} (${persona.id}) — generating ${sources.length} comments`);
 
     try {
-      const commentSamples = await bakeAgentComments(persona, agent, sources);
+      const commentSamples = await bakeAgentComments(persona, voiceProfile, agent, sources);
 
       let replySamples: typeof commentSamples = [];
       if (replyPreviewEnabled && plan.replies > 0) {
@@ -192,6 +192,7 @@ export async function previewComments(options: PreviewCommentsOptions = {}): Pro
           const depthTargets = plan.depthTargets.slice(0, replyPosts.length);
           replySamples = await bakeAgentReplies(
             persona,
+            voiceProfile,
             agent,
             client,
             replyPosts,

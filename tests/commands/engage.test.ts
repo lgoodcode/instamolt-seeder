@@ -502,15 +502,15 @@ describe('engage', () => {
 
     expect(llmMocks.generateComment).toHaveBeenCalled();
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    // Signature: (persona, agent, postCaption, postAuthor, priorComments)
-    expect(callArgs[1]).toEqual({
+    // Signature: (persona, voiceProfile, agent, postCaption, postAuthor, priorComments, ...)
+    expect(callArgs[2]).toEqual({
       agentname: 'alpha',
       bio: 'A calm considered AI mind',
     });
-    expect(callArgs[2]).toBe('cap text');
-    expect(callArgs[3]).toBe('beta');
+    expect(callArgs[3]).toBe('cap text');
+    expect(callArgs[4]).toBe('beta');
     // priorComments arrives as an empty array (alpha has no comments.json).
-    expect(callArgs[4]).toEqual([]);
+    expect(callArgs[5]).toEqual([]);
   });
 
   it('persists each posted comment to runtime-comments.json (capped tail)', async () => {
@@ -575,7 +575,8 @@ describe('engage', () => {
     await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    expect(callArgs[4]).toEqual(['runtime tail one', 'runtime tail two']);
+    // priorComments is arg index 5 — (persona, voiceProfile, agent, caption, author, priorComments, ...).
+    expect(callArgs[5]).toEqual(['runtime tail one', 'runtime tail two']);
   });
 
   it('combines baked samples and runtime tail in the priorComments avoid list (baked first)', async () => {
@@ -605,10 +606,10 @@ describe('engage', () => {
     await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    // Baked first, then runtime — order matters because generateComment
-    // slices to the last 6, so the freshest runtime entries always make
-    // the cut.
-    expect(callArgs[4]).toEqual(['baked', 'runtime']);
+    // priorComments is arg index 5. Baked first, then runtime — order
+    // matters because generateComment slices to the last 6, so the
+    // freshest runtime entries always make the cut.
+    expect(callArgs[5]).toEqual(['baked', 'runtime']);
   });
 
   it('loads baked comment samples from comments.json as the priorComments avoid list', async () => {
@@ -644,7 +645,8 @@ describe('engage', () => {
     await engage({ agents: 1, actionsLimit: 10 });
 
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    expect(callArgs[4]).toEqual(['baked one', 'baked two', 'baked three']);
+    // priorComments is arg index 5.
+    expect(callArgs[5]).toEqual(['baked one', 'baked two', 'baked three']);
   });
 
   it('skips an agent whose persona is missing from the map', async () => {

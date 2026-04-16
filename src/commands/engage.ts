@@ -1,6 +1,11 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
+import {
+  config,
+  FEED_CACHE_MAX_AGE_MS,
+  SAME_REGISTER_CAP,
+  SAME_REGISTER_WINDOW_MS,
+} from '@/config';
 import { confirmTarget } from '@/lib/confirm-target';
 import {
   drainWrites,
@@ -19,9 +24,12 @@ import {
   resolveRelatedAgentnames,
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
+import { pivotRegister } from '@/lib/relationships';
+import { appendGlobalComment, recentRegistersForPost } from '@/lib/runtime-global-log';
 import { rollTrendingHashtags } from '@/lib/trending-pool';
 import * as ui from '@/lib/ui';
 import { lurkFeedSlice } from '@/lib/views';
+import { sampleWordBudget } from '@/lib/word-budget';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, rollChaos } from '@/services/llm';
@@ -174,10 +182,10 @@ function relationshipMultiplier(
  * `undefined` when there's no relationship — Gemini then picks freely from
  * all 5 example registers.
  *
- * Two buckets (`targets`, `allies`) randomize between two options because the
- * action they describe is ambiguous: targeting can be either disagreement or
- * a leading question, and allyship can be either a love-react or an
- * affirming reply. The other buckets pick a single register deterministically.
+ * Every bucket draws from a weighted distribution so multiple rival/amplify
+ * agents firing on the same post produce a mix of registers rather than a
+ * lockstep pile-on. Shape mirrors `src/lib/relationships.ts:pickRegisterHint`
+ * exactly — any distribution change must update both.
  */
 function pickRegisterHint(
   commenterPersona: Persona,
@@ -185,15 +193,20 @@ function pickRegisterHint(
 ): CommentRegister | undefined {
   const bucket = relationshipBucket(commenterPersona, postAuthorPersonaId);
   if (!bucket) return undefined;
+  const roll = Math.random();
   switch (bucket) {
     case 'targets':
-      return Math.random() < 0.6 ? 'disagree' : 'conversational';
+      return roll < 0.6 ? 'disagree' : 'conversational';
     case 'rivals':
-      return 'disagree';
-    case 'amplifies':
+      if (roll < 0.6) return 'disagree';
+      if (roll < 0.85) return 'conversational';
       return 'love';
+    case 'amplifies':
+      if (roll < 0.7) return 'love';
+      if (roll < 0.9) return 'reply';
+      return 'conversational';
     case 'allies':
-      return Math.random() < 0.5 ? 'love' : 'reply';
+      return roll < 0.5 ? 'love' : 'reply';
   }
 }
 
@@ -539,8 +552,50 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 // between this agent's persona and the post author's persona.
                 // Returns undefined for unrelated posts — generateComment then
                 // lets Gemini pick freely from all 5 example registers.
-                const registerHint = pickRegisterHint(persona, authorPid);
+                const initialRegisterHint = pickRegisterHint(persona, authorPid);
+
+                // Same-register cap: when ≥`SAME_REGISTER_CAP` recent seeder
+                // comments on this post share the candidate register, pivot
+                // down the fallback chain (disagree → conversational → love
+                // → skip) so rival/target agents don't pile on in lockstep.
+                let registerHint = initialRegisterHint;
+                if (initialRegisterHint) {
+                  const recent = await recentRegistersForPost(post.id, SAME_REGISTER_WINDOW_MS);
+                  const counts = recent.reduce<Record<string, number>>((acc, r) => {
+                    acc[r] = (acc[r] ?? 0) + 1;
+                    return acc;
+                  }, {});
+                  const saturated = new Set<string>();
+                  for (const [reg, count] of Object.entries(counts)) {
+                    if (count >= SAME_REGISTER_CAP) saturated.add(reg);
+                  }
+                  const pivoted = pivotRegister(initialRegisterHint, saturated);
+                  if (!pivoted) {
+                    sp.message(
+                      `@${agent.agentname} — skipping @${post.author.agentname} (register saturated)`,
+                    );
+                    logSkippedAction(
+                      'comment',
+                      agent.agentname,
+                      agent.personaId,
+                      `register_saturated:${initialRegisterHint}`,
+                    );
+                    continue;
+                  }
+                  registerHint = pivoted;
+                }
+
                 sp.message(`@${agent.agentname} — writing comment for @${post.author.agentname}`);
+
+                // Resolve the agent's voice profile — feeds formatVoiceBlock
+                // + shape allowlist inside generateComment, and the
+                // verbosity-shifted word budget below.
+                const resolvedVoice = resolveVoiceProfile(voiceProfiles, agent);
+                if ('error' in resolvedVoice) {
+                  throw new Error(resolvedVoice.error);
+                }
+                const voiceProfile = resolvedVoice.profile;
+                const wordBudget = sampleWordBudget(voiceProfile.verbosity);
 
                 // Mention candidate surfacing — roll the persona's mention
                 // probability (rare by default). On a hit, pull up to 2
@@ -568,6 +623,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                 // call — important for tests that inspect mock call args.
                 const comment = await generateComment(
                   persona,
+                  voiceProfile,
                   { agentname: agentData.agentname, bio: agentData.bio },
                   post.caption,
                   post.author.agentname,
@@ -575,6 +631,7 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   registerHint,
                   rollChaos(persona),
                   mentionCandidates,
+                  wordBudget,
                 );
                 const commentRes = await client.commentOnPost(post.id, comment);
                 commented++;
@@ -593,6 +650,12 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   text: comment,
                   againstPostId: post.id,
                   againstAuthor: post.author.agentname,
+                });
+                await appendGlobalComment({
+                  postId: post.id,
+                  agentname: agentData.agentname,
+                  register: registerHint,
+                  kind: 'comment',
                 });
                 sp.message(
                   `@${agent.agentname} — commented on @${post.author.agentname}: "${comment.slice(0, 40)}..."`,

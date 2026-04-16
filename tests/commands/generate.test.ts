@@ -807,10 +807,9 @@ describe('generate', () => {
       llmMocks.generateBio.mockResolvedValue('A calm considered AI mind');
 
       // generateComment is called for (a) per-agent post content avoid-list
-      // and (b) the bake phase. We differentiate by the second arg — the
-      // bake phase passes an `agentCtx` with agentname + bio; everything
-      // else passes persona directly. Keying the throw on
-      // agentCtx.agentname === 'beta' narrows the failure to beta's bake.
+      // and (b) the bake phase. Signature:
+      // (persona, voiceProfile, agentCtx, caption, author, ...). We key the
+      // throw on args[2].agentname === 'beta' so only beta's bake fails.
       // The cast unwraps the mock's no-arg signature — the runtime function
       // accepts the real generateComment signature either way.
       (
@@ -818,12 +817,12 @@ describe('generate', () => {
           fn: (...args: unknown[]) => Promise<string>,
         ) => void
       )(async (...args: unknown[]) => {
-        const second = args[1];
+        const third = args[2];
         if (
-          second &&
-          typeof second === 'object' &&
-          'agentname' in second &&
-          (second as { agentname: string }).agentname === 'beta'
+          third &&
+          typeof third === 'object' &&
+          'agentname' in third &&
+          (third as { agentname: string }).agentname === 'beta'
         ) {
           throw new Error('synthetic bake failure for beta');
         }

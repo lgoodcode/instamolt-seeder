@@ -655,7 +655,7 @@ describe('generateComment', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generateComment(p(), agentStub(), 'a peer caption', 'someone');
+    await generateComment(p(), vp(), agentStub(), 'a peer caption', 'someone');
 
     const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
       | string
@@ -672,7 +672,7 @@ describe('generateComment', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generateComment(p(), agentStub(), 'cap', 'auth');
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth');
 
     const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
       | string
@@ -685,7 +685,7 @@ describe('generateComment', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await generateComment(p(), agentStub(), 'cap', 'auth', [
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth', [
       'ok but the framing here is doing too much work',
       'tell me more about the third panel',
     ]);
@@ -714,7 +714,7 @@ describe('generateComment', () => {
       'recent eight',
       'recent nine',
     ];
-    await generateComment(p(), agentStub(), 'cap', 'auth', priors);
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth', priors);
 
     const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as
       | string
@@ -735,8 +735,162 @@ describe('generateComment', () => {
       vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('  a sharp little reply  ')),
     );
 
-    const text = await generateComment(p(), agentStub(), 'cap', 'auth');
+    const text = await generateComment(p(), vp(), agentStub(), 'cap', 'auth');
     expect(text).toBe('a sharp little reply');
+  });
+
+  it('splices the voice profile dials into the comment prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(
+      p(),
+      vp({ verbosity: 'fragment', capitalization: 'lowercase', punctuation: 'dropped' }),
+      agentStub(),
+      'cap',
+      'auth',
+    );
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    // formatVoiceBlock spells out each dial verbatim — the comment prompt
+    // should now include them since voiceProfile is threaded.
+    expect(body).toContain('lowercase caps');
+    expect(body).toContain('dropped punctuation');
+    expect(body).toContain('fragment length');
+  });
+
+  it('includes the negative-constraint block (DO NOT ...) in the comment prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth');
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    expect(body).toContain('DO NOT');
+    expect(body).toContain('Respectfully');
+    expect(body).toContain('I hear you but');
+    expect(body).toContain('Invent hashtags');
+  });
+
+  it('includes the shape-allowlist block in the comment prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth');
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    expect(body).toContain('ALLOWED SHAPES');
+    expect(body).toContain('Single-word reactions');
+  });
+
+  it('softens the shape allowlist when the voice profile leans formal', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(
+      p(),
+      vp({ capitalization: 'proper', punctuation: 'proper' }),
+      agentStub(),
+      'cap',
+      'auth',
+    );
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    expect(body).toContain('voice profile leans formal');
+  });
+
+  it('reframes the directive from "write a comment" to "react"', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('hi'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth');
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    // The new prompt opens its closing directive with "React to this post".
+    expect(body).toContain('React to this post');
+    // And explicitly frames a reaction as a fragment, not an essay.
+    expect(body).toContain('fragment or a sentence, not an essay');
+  });
+
+  it('injects the sampled word budget verbatim into the prompt', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(geminiOk('short reply'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateComment(p(), vp(), agentStub(), 'cap', 'auth', [], undefined, false, [], {
+      min: 4,
+      max: 9,
+    });
+
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string;
+    expect(body).toContain('4 and 9 words');
+    expect(body).toContain('Hard cap: 9 words');
+  });
+
+  it('regenerates with a stricter prompt when output overshoots the budget', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      // First call: 30-word output overshoots a 1–5 word budget by ~6×.
+      .mockResolvedValueOnce(
+        geminiOk(
+          'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty',
+        ),
+      )
+      // Second call: 3-word output fits.
+      .mockResolvedValueOnce(geminiOk('tight retry text'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const text = await generateComment(
+      p(),
+      vp(),
+      agentStub(),
+      'cap',
+      'auth',
+      [],
+      undefined,
+      false,
+      [],
+      { min: 1, max: 5 },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(text).toBe('tight retry text');
+
+    // The retry prompt should carry the STRICT RETRY marker.
+    const retryBody = (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body as string;
+    expect(retryBody).toContain('STRICT RETRY');
+  });
+
+  it('falls back to truncation when the retry also overshoots', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        geminiOk(
+          'one two three four five six seven eight nine ten eleven twelve. thirteen fourteen.',
+        ),
+      )
+      .mockResolvedValueOnce(
+        geminiOk(
+          'one two three four five six seven eight nine ten eleven twelve thirteen fourteen.',
+        ),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const text = await generateComment(
+      p(),
+      vp(),
+      agentStub(),
+      'cap',
+      'auth',
+      [],
+      undefined,
+      false,
+      [],
+      { min: 1, max: 5 },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Hard truncation lands on word cap (5) since no sentence boundary fits.
+    expect(text.split(/\s+/)).toHaveLength(5);
   });
 });
 

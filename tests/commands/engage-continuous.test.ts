@@ -752,8 +752,10 @@ describe('engage-continuous', () => {
       maxActions: 1,
       dryRun: true,
       maxAgents: 10,
-      // growthIntervalMs=0 so the first rescan fires the growth branch.
+      // growthIntervalMs=0 + _growthOffsetMs=0 so the first rescan fires the
+      // growth branch without waiting for the random 0-30 min module offset.
       growthIntervalHours: 0,
+      _growthOffsetMs: 0,
       agentRescanIntervalMs: -1,
     });
 

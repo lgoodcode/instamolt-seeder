@@ -111,6 +111,11 @@ export interface ContinuousOptions {
   /** Log every event to stdout in addition to events.jsonl. */
   verbose?: boolean;
   /**
+   * Override the per-machine growth jitter offset. Internal — only used by
+   * tests to force the growth tick to fire without waiting up to 30 min.
+   */
+  _growthOffsetMs?: number;
+  /**
    * Skip the interactive "confirm target URL" prompt. Under non-TTY the
    * prompt is already skipped so unattended runs (cron, Docker) don't hang;
    * this flag is for TTY-scripted runs where the operator has pre-confirmed.
@@ -325,8 +330,10 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     postsMax,
     enabled: !(options.noGrowth ?? false),
   };
+  const growthOffsetMs = options._growthOffsetMs ?? GROWTH_OFFSET_MS;
+
   // Anchor at process start (NOT 0) so the first growth tick respects both
-  // `growthIntervalMs` AND `GROWTH_OFFSET_MS`. With `lastGrowthAt = 0` the
+  // `growthIntervalMs` AND `growthOffsetMs`. With `lastGrowthAt = 0` the
   // first rescan would fire growth immediately and the per-machine offset
   // jitter would only kick in starting from the second tick — defeating
   // the 6-machine stagger on the very batch that matters most (initial
@@ -599,7 +606,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           // in N minutes" matches reality.
           const nextTickIn = Math.max(
             0,
-            growthConfig.growthIntervalMs + GROWTH_OFFSET_MS - (Date.now() - lastGrowthAt),
+            growthConfig.growthIntervalMs + growthOffsetMs - (Date.now() - lastGrowthAt),
           );
 
           log(
@@ -613,7 +620,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
           // coincidental Together AI peaks across a 6-machine fleet so the
           // 1,800 RPM ceiling stays comfortable.
           if (
-            Date.now() - lastGrowthAt >= growthConfig.growthIntervalMs + GROWTH_OFFSET_MS &&
+            Date.now() - lastGrowthAt >= growthConfig.growthIntervalMs + growthOffsetMs &&
             batchSize > 0
           ) {
             const targetTotal = Math.min(currentCount + batchSize, growthConfig.maxAgents);

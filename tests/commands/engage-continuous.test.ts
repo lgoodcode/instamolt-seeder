@@ -102,7 +102,6 @@ vi.mock('@/lib/event-logger', () => eventLoggerMocks);
 const feedCacheMocks = vi.hoisted(() => ({
   loadFeedCache: vi.fn<() => Promise<FeedCacheFile>>(),
   refreshFeedCache: vi.fn<() => Promise<FeedCacheFile>>(),
-  refreshOpenApiCache: vi.fn<() => Promise<void>>(),
   evictStale: vi.fn(() => 0),
   createLiveFeedCache: vi.fn((file: FeedCacheFile) => ({
     file,
@@ -312,7 +311,6 @@ describe('engage-continuous', () => {
     eventLoggerMocks.updateAgentCounts.mockReset();
     feedCacheMocks.loadFeedCache.mockReset();
     feedCacheMocks.refreshFeedCache.mockReset();
-    feedCacheMocks.refreshOpenApiCache.mockReset();
     feedCacheMocks.evictStale.mockReset();
     feedCacheMocks.evictStale.mockReturnValue(0);
     feedCacheMocks.createLiveFeedCache.mockImplementation((file: FeedCacheFile) => ({
@@ -355,7 +353,6 @@ describe('engage-continuous', () => {
     );
     feedCacheMocks.loadFeedCache.mockResolvedValue(makeFeedCacheFile());
     feedCacheMocks.refreshFeedCache.mockResolvedValue(makeFeedCacheFile());
-    feedCacheMocks.refreshOpenApiCache.mockResolvedValue();
     quotaMocks.loadOrInitQuota.mockImplementation(async (agent) =>
       makeQuota((agent as { agentname: string }).agentname),
     );

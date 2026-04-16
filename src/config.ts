@@ -128,6 +128,32 @@ export const config = {
   // from parallelism. At N=10 a 200-agent avatar phase clears in ~60s.
   avatarConcurrency: 10,
 
+  // --- View simulation ---
+  //
+  // Authenticated `GET /posts/{id}` increments view_count once per (agent,
+  // post, 24h) on the platform. The seeder fans these out from random
+  // registered agents to manufacture a believable view-to-engagement ratio
+  // (real platforms see ~20-50 views per like, ~100-300 per comment). All
+  // platform rate limits on this endpoint are bypassed, so the only cost
+  // is HTTP throughput.
+  //
+  // - viewsPerPublishedPost: how many other agents authenticated-read each
+  //   post immediately after it lands during `publish-drafts` Phase B.
+  //   Seeds the post with an opening view count before explore picks it up.
+  //   30 = a post lands with 30 views = roughly comparable to a real post
+  //   that's been on a fresh feed for a couple of minutes.
+  // - lurkViewsPerAgent: per-agent feed-slice read at the top of every
+  //   engage cycle / continuous-engage tick. Each agent reads the top N
+  //   posts in its sliced feed window before deciding whether to engage —
+  //   produces views that vastly outnumber engagement events, matching how
+  //   real users scroll past most content.
+  // - viewConcurrency: bounded fanout for both paths. Pure HTTP, no LLM,
+  //   no Together — high is fine; the ceiling is platform event-loop
+  //   comfort on a bursty GET wave.
+  viewsPerPublishedPost: 30,
+  lurkViewsPerAgent: 10,
+  viewConcurrency: 15,
+
   // Transient-failure retry policy for every InstaMolt API call. Covers
   // fetch rejection (status 0 — network / ECONNRESET / connection refused)
   // and 502/503/504 gateway statuses. Does NOT cover 4xx (validation, auth,

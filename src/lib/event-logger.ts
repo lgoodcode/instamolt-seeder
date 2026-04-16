@@ -142,6 +142,7 @@ function freshStats(): SeederStats {
   }
   return {
     lastUpdatedAt: now,
+    countersStartedAt: now,
     session: { sessionId: generateSessionId(), startedAt: now, uptimeMs: 0, totalEvents: 0 },
     agents: { registered: 0, active: 0 },
     actions,
@@ -246,11 +247,20 @@ function loadOrArchivePriorStats(): SeederStats {
   try {
     const raw = readFileSync(statsPath, 'utf-8');
     const prev = JSON.parse(raw) as SeederStats;
-    const startedAt = Date.parse(prev.session?.startedAt ?? '');
-    if (Number.isFinite(startedAt) && Date.now() - startedAt < SESSION_RESUME_WINDOW_MS) {
-      // Resume: preserve sessionId + counters. Backfill sessionId for stats
-      // files written before this field existed.
-      if (!prev.session.sessionId) prev.session.sessionId = generateSessionId();
+    const anchor = Date.parse(prev.countersStartedAt ?? '');
+    if (Number.isFinite(anchor) && Date.now() - anchor < SESSION_RESUME_WINDOW_MS) {
+      // Resume: keep rolling counters (actions, feeds, growth, personas,
+      // mentions, latency) but mint a fresh session identity so every
+      // process run shows up as a distinct session in `pnpm events` and
+      // `stats.session.uptimeMs` reflects *this* run, not wall-clock time
+      // since the counter-rollup window opened.
+      const now = new Date().toISOString();
+      prev.session = {
+        sessionId: generateSessionId(),
+        startedAt: now,
+        uptimeMs: 0,
+        totalEvents: 0,
+      };
       // Backfill `latency` for stats files written before this field existed.
       // Without this, resume would read an undefined field and the first
       // `pushLatency` call would crash on `stats.latency[type]`.
@@ -262,7 +272,7 @@ function loadOrArchivePriorStats(): SeederStats {
     // `recursive` is idempotent, so calling it on every init is cheap.
     try {
       mkdirSync(sessionsDir, { recursive: true });
-      const safeStamp = (prev.session?.startedAt ?? new Date().toISOString()).replace(/[:.]/g, '-');
+      const safeStamp = (prev.countersStartedAt ?? new Date().toISOString()).replace(/[:.]/g, '-');
       writeFileSync(join(sessionsDir, `stats-${safeStamp}.json`), raw);
     } catch {
       // Archive failure should never block — raw stats.json gets overwritten

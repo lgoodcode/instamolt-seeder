@@ -53,7 +53,6 @@ import {
   type LiveFeedCache,
   loadFeedCache,
   refreshFeedCache,
-  refreshOpenApiCache,
 } from '@/lib/feed-cache';
 import {
   computeBatchSize,
@@ -70,6 +69,7 @@ import {
   usedInWindow,
 } from '@/lib/quota';
 import * as ui from '@/lib/ui';
+import { lurkFeedSlice } from '@/lib/views';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import type { ActionKind, AgentQuota, GeneratedAgent, Persona, SeederEventType } from '@/types';
@@ -308,9 +308,6 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     });
     updateAgentCounts(allAgents.length, allAgents.length);
 
-    // Cache the latest OpenAPI spec for reference (best-effort).
-    refreshOpenApiCache().catch(() => {});
-
     // Build the scheduler and enroll all agents.
     const scheduler = new ActionScheduler();
     for (const agent of allAgents) {
@@ -333,6 +330,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
     let cycleFollows = 0;
     let cyclePosts = 0;
     let cycleCommentLikes = 0;
+    let cycleViews = 0;
     let cycleSkips = 0;
     let cycleErrors = 0;
 
@@ -381,9 +379,6 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
             success: true,
             details: { postCount: feedCache.file.posts.length, sources: feedCache.file.sources },
           });
-          // Best-effort: cache the latest OpenAPI spec alongside the feed
-          // so we always have a recent copy of the API contract on disk.
-          refreshOpenApiCache().catch(() => {});
         } catch (err) {
           log('warn', `Feed cache refresh failed (${err}) — continuing with stale cache`);
           logEvent({ eventType: 'feed_refresh', success: false, error: String(err) });
@@ -496,6 +491,24 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         authorPersonaLookup,
         dryRun,
       };
+
+      // Lurk pass — before the agent picks an action, it "scrolls past" the
+      // top N posts in the feed cache snapshot and registers as a viewer
+      // server-side. Produces views >> engagement events organically. Each
+      // (viewer, post) pair is server-side-deduped to once per 24h, so this
+      // re-runs cheaply across many ticks. Skipped under dry-run because
+      // the GET still hits the platform.
+      if (!dryRun && config.lurkViewsPerAgent > 0) {
+        const lurk = await lurkFeedSlice({
+          client: ctx.client,
+          agentname: agent.agentname,
+          personaId: agent.personaId,
+          posts: feedCache.file.posts,
+          count: config.lurkViewsPerAgent,
+          concurrency: config.viewConcurrency,
+        });
+        cycleViews += lurk.succeeded;
+      }
 
       const sp = ui.spinner();
       sp.start(`@${agent.agentname} — ${actionKind}`);
@@ -618,6 +631,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         follows: cycleFollows,
         posts: cyclePosts,
         commentLikes: cycleCommentLikes,
+        views: cycleViews,
         skips: cycleSkips,
         errors: cycleErrors,
       },
@@ -634,6 +648,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         { label: 'follows', value: cycleFollows, tone: 'ok' },
         { label: 'posts', value: cyclePosts, tone: 'info' },
         { label: 'cmtLikes', value: cycleCommentLikes, tone: 'info' },
+        { label: 'views', value: cycleViews, tone: 'info' },
         { label: 'skips', value: cycleSkips, tone: 'info' },
         { label: 'errors', value: cycleErrors, tone: cycleErrors > 0 ? 'err' : 'info' },
       ]),

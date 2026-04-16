@@ -11,6 +11,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { confirmTarget } from '@/lib/confirm-target';
+import * as ui from '@/lib/ui';
 
 const CLI_ENTRY = resolve(import.meta.dirname, '..', 'src', 'index.ts');
 
@@ -117,7 +119,7 @@ function printHelp(): void {
 `);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.includes('--help')) {
     printHelp();
@@ -126,14 +128,23 @@ function main(): void {
   const parsed = parseArgs(rawArgs);
   assertAllFlagsRouted(parsed);
 
+  // Gate target confirmation once at the orchestrator level so the operator
+  // isn't re-prompted between `generate` (no network writes, no prompt) and
+  // `publish` / `engage-continuous` (which each call `confirmTarget` on their
+  // own). Skipping this and letting `publish` ask mid-run produced a stalled
+  // bootstrap where the operator had wandered off and came back to an idle
+  // "Hit PRODUCTION?" prompt.
+  if (!(await confirmTarget('bootstrap'))) {
+    ui.outro(ui.color.yellow(`${ui.symbol.warn} bootstrap aborted — target not confirmed`));
+    return;
+  }
+
   runPhase('generate', flagsFor(parsed, GENERATE_FLAGS));
-  runPhase('publish', flagsFor(parsed, PUBLISH_FLAGS));
-  runPhase('engage-continuous', flagsFor(parsed, ENGAGE_FLAGS));
+  runPhase('publish', [...flagsFor(parsed, PUBLISH_FLAGS), '--yes']);
+  runPhase('engage-continuous', [...flagsFor(parsed, ENGAGE_FLAGS), '--yes']);
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   console.error(`\n✖ ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
-}
+});

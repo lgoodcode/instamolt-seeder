@@ -192,6 +192,15 @@ const growthMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/lib/growth', () => growthMocks);
 
+// ---------------- generate/publish mocks (for growth tick dynamic imports) ----------------
+
+const growthCmdMocks = vi.hoisted(() => ({
+  generate: vi.fn(async () => {}),
+  publish: vi.fn(async () => {}),
+}));
+vi.mock('@/commands/generate', () => ({ generate: growthCmdMocks.generate }));
+vi.mock('@/commands/publish', () => ({ publish: growthCmdMocks.publish }));
+
 // ---------------- imports ----------------
 
 import { engageContinuous } from '@/commands/engage-continuous';
@@ -337,6 +346,8 @@ describe('engage-continuous', () => {
     growthMocks.computeBatchSize.mockReturnValue(1);
     growthMocks.formatGrowthStatus.mockReset();
     growthMocks.formatGrowthStatus.mockReturnValue('Growth: mocked');
+    growthCmdMocks.generate.mockReset();
+    growthCmdMocks.publish.mockReset();
 
     // Default happy-path fixture setup
     personaMocks.loadPersonas.mockResolvedValue(
@@ -602,6 +613,35 @@ describe('engage-continuous', () => {
     // formatGrowthStatus should never fire.
     expect(growthMocks.formatGrowthStatus).not.toHaveBeenCalled();
     expect(growthMocks.computeBatchSize).not.toHaveBeenCalled();
+  });
+
+  it('growth tick calls publish with yes:true so the engage-continuous target confirmation propagates', async () => {
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+
+    schedulerMocks.pop
+      .mockReturnValueOnce({ agentname: 'alpha', nextTickAt: Date.now() })
+      .mockReturnValue(undefined);
+
+    engageActionsMocks.dispatchAction.mockResolvedValue({
+      status: 'ok',
+      kind: 'like',
+      detail: 'ok',
+    });
+
+    growthMocks.computeBatchSize.mockReturnValue(1);
+
+    await engageContinuous({
+      maxActions: 1,
+      dryRun: true,
+      maxAgents: 10,
+      // growthIntervalMs=0 so the first rescan fires the growth branch.
+      growthIntervalHours: 0,
+      agentRescanIntervalMs: -1,
+    });
+
+    expect(growthCmdMocks.generate).toHaveBeenCalled();
+    expect(growthCmdMocks.publish).toHaveBeenCalledWith(expect.objectContaining({ yes: true }));
   });
 
   it('SIGINT sets stopRequested, exits cleanly, flushes stats, and removes listener', async () => {

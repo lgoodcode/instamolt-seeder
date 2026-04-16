@@ -1,5 +1,12 @@
-import { config } from '@/config';
+import { config, WORD_BUDGET_OVERFLOW_MULTIPLIER } from '@/config';
 import { logEvent } from '@/lib/event-logger';
+import {
+  ABSOLUTE_WORD_CAP,
+  countWords,
+  truncateToBudget,
+  type WordBudget,
+  wordBudgetPromptBlock,
+} from '@/lib/word-budget';
 import type {
   CommentRegister,
   ExampleComment,
@@ -1019,8 +1026,102 @@ const REGISTER_DESCRIPTIONS: Record<import('@/types').CommentRegister, string> =
  *   - `generate` bake phase (no hint — picks register freely).
  *   - `preview-comments` curation tool (no hint).
  */
+/**
+ * Call Gemini with a word-budget-aware retry loop:
+ *   1. Run the primary prompt.
+ *   2. If the result overshoots `budget.max * WORD_BUDGET_OVERFLOW_MULTIPLIER`,
+ *      regenerate ONCE with a stricter prompt.
+ *   3. If the retry still overshoots, truncate at a sentence boundary (or
+ *      hard word cap) before returning — we never ship an essay as a reply.
+ *
+ * No budget → degrades to a single `callGemini` with no post-processing, so
+ * legacy call sites that don't sample a budget behave exactly as before.
+ */
+async function resolveWithBudget(input: {
+  kind: LlmCallKind;
+  wordBudget?: WordBudget;
+  firstPrompt: string;
+  retryPrompt: (budget: WordBudget) => string;
+}): Promise<string> {
+  const { kind, wordBudget, firstPrompt, retryPrompt } = input;
+  const maxTokens = kind === 'reply' ? 200 : 150;
+
+  const first = await callGemini(firstPrompt, maxTokens, kind);
+  if (!wordBudget) return first;
+
+  const cap = Math.ceil(wordBudget.max * WORD_BUDGET_OVERFLOW_MULTIPLIER);
+  if (countWords(first) <= cap) return first;
+
+  const retry = await callGemini(retryPrompt(wordBudget), maxTokens, kind);
+  if (countWords(retry) <= cap) return retry;
+
+  // Hard truncation — we've burned two Gemini calls already and Gemini still
+  // overshot. Sentence-boundary truncation is the floor; it's better to clip
+  // mid-argument than to ship an essay that unmasks the bot.
+  const hardMax = Math.min(wordBudget.max, ABSOLUTE_WORD_CAP);
+  return truncateToBudget(retry, hardMax);
+}
+
+/**
+ * Shape-diversity allowlist spliced into comment + reply prompts. Gives the
+ * LLM explicit permission to use feral grammar — fragments, lowercase runs,
+ * single-word reactions — which it otherwise suppresses because of the more
+ * formal `exampleComments` anchors. When the voice profile leans strictly
+ * formal (proper caps AND proper punctuation), we append a softening line
+ * that keeps the shapes permitted but nudges against heavy use.
+ */
+function shapeAllowlistBlock(voiceProfile: VoiceProfile): string {
+  const formalCoda =
+    voiceProfile.capitalization === 'proper' && voiceProfile.punctuation === 'proper'
+      ? ' Your voice profile leans formal — use these shapes sparingly but they are still permitted.'
+      : '';
+  return `
+
+ALLOWED SHAPES (use freely when they fit your voice profile):
+- Sentence fragments ("the goshawk part tho")
+- Lowercase runs without punctuation ("yeah ok but is it though")
+- Single-word reactions ("no", "this", "yes", "how")
+- Trailing ellipses or unfinished thoughts
+- One-word question replies${formalCoda}`;
+}
+
+/**
+ * Negative-constraint block spliced into comment + reply prompts. Gemini
+ * otherwise locks onto the `exampleComments` shape and produces grammatically
+ * immaculate essay-ettes with invented hashtags and concession-pivot disagree
+ * openings. This block names the specific failure modes so they get
+ * suppressed in the completion.
+ */
+const NEGATIVE_CONSTRAINTS_BLOCK = `
+
+DO NOT:
+- Construct extended metaphors ("X is like Y" where Y isn't in the post)
+- Invent hashtags (use ones from the post or none)
+- Open with "Respectfully", "I hear you but", "Let me be clear", "Make no mistake"
+- Write more than one sentence unless your word budget allows it
+- Summarize the post back in different words`;
+
+/**
+ * Single shared closing directive for comment + reply prompts. Reframes the
+ * task from "write a comment" (essay-mode) to "react" (fragment-mode). Pairs
+ * with `NEGATIVE_CONSTRAINTS_BLOCK` + `shapeAllowlistBlock` + the word-budget
+ * injection so Gemini has a consistent picture of the target output shape.
+ */
+const REACT_DIRECTIVE_COMMENT = `
+
+React to this post in YOUR voice. A reaction is a fragment or a sentence, not an essay. You are scrolling, not delivering a complete thought. The comment should sound like it could only have been written by you — given your bio, your voice profile, and how you talk. No generic praise ("love this", "so cool"). Have an actual take.
+
+Reply with ONLY the comment text, nothing else.`;
+
+const REACT_DIRECTIVE_REPLY = `
+
+React directly to what @PARENT_AUTHOR said — quote their idea, disagree, extend it, or twist it, in character. Don't summarize the original post; engage with the parent. A reply is a fragment or a sentence, not an essay. You are scrolling a thread, not writing a rebuttal. No generic "great point" / "so true" openers.
+
+Reply with ONLY the reply text, nothing else.`;
+
 export async function generateComment(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   agent: CommentAgentContext,
   postCaption: string,
   postAuthor: string,
@@ -1028,6 +1129,7 @@ export async function generateComment(
   registerHint?: import('@/types').CommentRegister,
   chaos = false,
   mentionCandidates: string[] = [],
+  wordBudget?: WordBudget,
 ): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after many runs.
   const avoidSample = priorComments.slice(-6);
@@ -1055,23 +1157,29 @@ IMPORTANT: Write your comment in the **${registerHint.toUpperCase()}** register 
   const chaosBlock = chaos ? chaosInstructionBlock('comment') : '';
   const mentionBlock =
     mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'comment');
+  const voiceBlock = formatVoiceBlock(voiceProfile);
+  const shapeBlock = shapeAllowlistBlock(voiceProfile);
 
-  const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
+  const buildPrompt = (budget: WordBudget | undefined, strictRetry: boolean): string => {
+    const budgetBlock = budget ? wordBudgetPromptBlock(budget, strictRetry) : '';
+    return `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Your bio: "${agent.bio}"
 
 Persona traits:
 - Personality: ${persona.personality}
 - Tone: ${persona.tone}
-- Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
+- Comment style: ${persona.commentStyle}${voiceBlock}${shapeBlock}${exampleBlock}${avoidBlock}
 
-You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${mentionBlock}${chaosBlock}
+You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${mentionBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${REACT_DIRECTIVE_COMMENT}`;
+  };
 
-Write a comment in YOUR voice — not a generic persona voice. The length should feel natural for this persona and register: it can be a single word, a fragment, or multiple sentences if that fits the voice anchored by the example comments above. The comment should sound like it could only have been written by you, given your bio and how you talk. No generic praise ("love this", "so cool"). Have an actual take or reaction.
-
-Reply with ONLY the comment text, nothing else.`;
-
-  return callGemini(prompt, 150, 'comment');
+  return resolveWithBudget({
+    kind: 'comment',
+    wordBudget,
+    firstPrompt: buildPrompt(wordBudget, false),
+    retryPrompt: (budget) => buildPrompt(budget, true),
+  });
 }
 
 // --- Reply generation (threaded comments) ---
@@ -1108,6 +1216,7 @@ export interface ReplyParentContext {
  */
 export async function generateReply(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   agent: CommentAgentContext,
   post: { caption: string | null; author: string },
   parent: ReplyParentContext,
@@ -1115,6 +1224,7 @@ export async function generateReply(
   priorComments: string[] = [],
   chaos = false,
   mentionCandidates: string[] = [],
+  wordBudget?: WordBudget,
 ): Promise<string> {
   const avoidSample = priorComments.slice(-6);
   const avoidBlock =
@@ -1146,22 +1256,29 @@ ${siblingContext.map((s) => `- "${s}"`).join('\n')}`;
   const chaosBlock = chaos ? chaosInstructionBlock('reply') : '';
   const mentionBlock =
     mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'reply');
+  const voiceBlock = formatVoiceBlock(voiceProfile);
+  const shapeBlock = shapeAllowlistBlock(voiceProfile);
+  const reactDirective = REACT_DIRECTIVE_REPLY.replace('@PARENT_AUTHOR', `@${parent.author}`);
 
-  const prompt = `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
+  const buildPrompt = (budget: WordBudget | undefined, strictRetry: boolean): string => {
+    const budgetBlock = budget ? wordBudgetPromptBlock(budget, strictRetry) : '';
+    return `You are @${agent.agentname}, an AI agent on InstaMolt (a social network where every account is an AI agent).
 
 Your bio: "${agent.bio}"
 
 Persona traits:
 - Personality: ${persona.personality}
 - Tone: ${persona.tone}
-- Comment style: ${persona.commentStyle}${exampleBlock}${avoidBlock}
+- Comment style: ${persona.commentStyle}${voiceBlock}${shapeBlock}${exampleBlock}${avoidBlock}
 
 You are replying to ${parentLabel} from @${parent.author} who said: "${parent.text}"
-This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${mentionBlock}${chaosBlock}
+This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${mentionBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${reactDirective}`;
+  };
 
-Write a REPLY in YOUR voice that directly engages with what @${parent.author} said — quote their idea, disagree, extend it, or twist it, in character. Don't write a generic reaction to the original post. The reply should read like a real mid-thread exchange: it should acknowledge the parent comment and add something specific. Keep it tight — one or two sentences is usually right, longer only when your persona explicitly talks that way. No generic "great point" / "so true" openers.
-
-Reply with ONLY the comment text, nothing else.`;
-
-  return callGemini(prompt, 200, 'reply');
+  return resolveWithBudget({
+    kind: 'reply',
+    wordBudget,
+    firstPrompt: buildPrompt(wordBudget, false),
+    retryPrompt: (budget) => buildPrompt(budget, true),
+  });
 }

@@ -15,6 +15,7 @@ import {
   resolveRelatedAgentnames,
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
+import { sampleWordBudget } from '@/lib/word-budget';
 import type { InstaMoltClient } from '@/services/instamolt-api';
 import { type CommentAgentContext, generateComment, generateReply } from '@/services/llm';
 import type { CommentSample, FeedCacheFile, Persona, RemotePost, VoiceProfile } from '@/types';
@@ -207,6 +208,7 @@ export function pickPeerCaptions(
  */
 export async function bakeAgentComments(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   agent: CommentAgentContext,
   sources: SampleCaption[],
   mentionCtx?: MentionBakeContext,
@@ -231,11 +233,17 @@ export async function bakeAgentComments(
         })
       : [];
 
+    // Each baked sample gets its own sampled word budget — mirrors runtime
+    // so the baked few-shot anchors span the full length distribution
+    // instead of all landing at the default essay length.
+    const wordBudget = sampleWordBudget(voiceProfile.verbosity);
+
     // Snapshot the avoid list at call time — same pattern as
     // generate.ts's similarity gate. Without this, vitest (and any other
     // caller inspecting mock args) would see the *final* mutated state.
     const text = await generateComment(
       persona,
+      voiceProfile,
       agentCtx,
       source.caption,
       source.author,
@@ -243,6 +251,7 @@ export async function bakeAgentComments(
       undefined,
       false,
       mentionCandidates,
+      wordBudget,
     );
 
     // Live post author isn't necessarily in the seeded roster — the LLM can
@@ -366,6 +375,7 @@ export function pickPostsWithComments(
  */
 export async function bakeAgentReplies(
   persona: Persona,
+  voiceProfile: VoiceProfile,
   agent: CommentAgentContext,
   client: InstaMoltClient,
   posts: RemotePost[],
@@ -432,10 +442,15 @@ export async function bakeAgentReplies(
         })
       : [];
 
+    // Each baked reply gets its own sampled word budget — mirrors runtime
+    // so baked reply anchors span the full length distribution.
+    const wordBudget = sampleWordBudget(voiceProfile.verbosity);
+
     let text: string;
     try {
       text = await generateReply(
         persona,
+        voiceProfile,
         agentCtx,
         { caption: post.caption ?? null, author: post.author.agentname },
         {
@@ -447,6 +462,7 @@ export async function bakeAgentReplies(
         [...runningPriorTexts],
         false,
         mentionCandidates,
+        wordBudget,
       );
     } catch {
       continue;

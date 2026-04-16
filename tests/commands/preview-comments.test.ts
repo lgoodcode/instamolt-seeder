@@ -265,8 +265,8 @@ describe('preview-comments', () => {
     expect(feedCacheMocks.loadFeedCacheStrict).toHaveBeenCalledTimes(1);
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(2);
 
-    // All source authors should be live-feed peers, never a seeder agent.
-    const sources = (llmMocks.generateComment.mock.calls as unknown[][]).map((c) => c[3]);
+    // Arg index 4 is `postAuthor` — (persona, voiceProfile, agent, caption, postAuthor, ...).
+    const sources = (llmMocks.generateComment.mock.calls as unknown[][]).map((c) => c[4]);
     expect(sources.every((s) => s === 'feedpeer1' || s === 'feedpeer2')).toBe(true);
 
     const out = getLogOutput();
@@ -305,8 +305,9 @@ describe('preview-comments', () => {
     await previewComments({ agent: 'alpha', count: 1 });
 
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(1);
+    // Arg index 2 is `agent` — (persona, voiceProfile, agent, caption, ...).
     const callArgs = llmMocks.generateComment.mock.calls[0] as unknown[];
-    expect((callArgs[1] as { agentname: string }).agentname).toBe('alpha');
+    expect((callArgs[2] as { agentname: string }).agentname).toBe('alpha');
   });
 
   it('respects the --persona filter', async () => {
@@ -344,8 +345,9 @@ describe('preview-comments', () => {
     await previewComments({ persona: 'cozy', count: 1 });
 
     expect(llmMocks.generateComment).toHaveBeenCalledTimes(2);
+    // Arg index 2 is `agent` — (persona, voiceProfile, agent, caption, ...).
     const names = (llmMocks.generateComment.mock.calls as unknown[][]).map(
-      (c) => (c[1] as { agentname: string }).agentname,
+      (c) => (c[2] as { agentname: string }).agentname,
     );
     expect(names).toContain('alpha');
     expect(names).toContain('gamma');

@@ -5,13 +5,14 @@
  * code" rule in CLAUDE.md); new continuous-mode code imports from here so
  * we have ONE source of truth for scheduler-path scoring.
  *
- * Shape must stay in lockstep with `engage.ts:27-94` — if those weights
- * ever change, update both files in the same commit. A future cleanup PR
- * can consolidate once engage cycle mode is retired or scheduled for
- * deprecation.
+ * Shape must stay in lockstep with the cycle-mode copies in `engage.ts`
+ * (`RELATIONSHIP_WEIGHT`, `relationshipBucket`, `relationshipMultiplier`,
+ * `pickRegisterHint`) — if those weights ever change, update both files in
+ * the same commit. A future cleanup PR can consolidate once engage cycle
+ * mode is retired or scheduled for deprecation.
  */
 
-import type { Persona } from '@/types';
+import type { CommentRegister, Persona } from '@/types';
 
 /**
  * Multiplier applied to engagement-probability / weighting when the post
@@ -61,11 +62,19 @@ export function relationshipMultiplier(
  * relationship between commenter and post author. Returns `undefined` when
  * there's no relationship — Gemini then picks freely across all 5 registers.
  *
- * Targets/allies buckets randomize between two registers because the action
- * they describe is ambiguous (targeting can be either disagreement or a
- * leading question; allyship can be love or an affirming reply).
+ * Every bucket now randomizes across a weighted distribution so multiple
+ * rival/amplify agents firing on the same post produce a mix of registers
+ * rather than a lockstep pile-on. Previously `rivals` was hardcoded to
+ * `disagree` and `amplifies` to `love`, which looked coordinated when three
+ * or more agents with the same relationship to an author queued up.
  *
- * Mirrors the shape of `pickRegisterHint` in `src/commands/engage.ts:78-94`
+ * Distributions:
+ *   - `targets`:   60% disagree, 40% conversational (leading-question variant)
+ *   - `rivals`:    60% disagree, 25% conversational, 15% love (rival-with-texture)
+ *   - `amplifies`: 70% love,     20% reply,          10% conversational
+ *   - `allies`:    50% love,     50% reply
+ *
+ * Mirrors the shape of `pickRegisterHint` in `src/commands/engage.ts`
  * (cycle mode keeps its private copy intact).
  */
 export function pickRegisterHint(
@@ -75,14 +84,62 @@ export function pickRegisterHint(
 ): 'love' | 'disagree' | 'conversational' | 'reply' | undefined {
   const bucket = relationshipBucket(commenterPersona, postAuthorPersonaId);
   if (!bucket) return undefined;
+  const roll = random();
   switch (bucket) {
     case 'targets':
-      return random() < 0.6 ? 'disagree' : 'conversational';
+      return roll < 0.6 ? 'disagree' : 'conversational';
     case 'rivals':
-      return 'disagree';
-    case 'amplifies':
+      if (roll < 0.6) return 'disagree';
+      if (roll < 0.85) return 'conversational';
       return 'love';
+    case 'amplifies':
+      if (roll < 0.7) return 'love';
+      if (roll < 0.9) return 'reply';
+      return 'conversational';
     case 'allies':
-      return random() < 0.5 ? 'love' : 'reply';
+      return roll < 0.5 ? 'love' : 'reply';
   }
+}
+
+/**
+ * Fallback chains used by the same-register cap: when the candidate register
+ * is already saturated on a post (≥`SAME_REGISTER_CAP` recent uses),
+ * `pivotRegister` walks the appropriate chain to find a less-saturated
+ * register. Returns `undefined` when every register in the chain is saturated
+ * — the caller then skips the comment entirely.
+ *
+ * Two chains, selected by candidate polarity:
+ *
+ *   - `disagree` candidate → `conversational → love`. Retains the adversarial
+ *     lean by diluting to conversational first, then drops to love if that's
+ *     also full. Three adversarial pile-ons in a window is a bot-farm tell.
+ *   - `love` / `reply` / `conversational` / `trending` candidate →
+ *     `conversational → love → reply`. Keeps the fallback positive or
+ *     neutral. An ally/amplify agent whose positive candidate saturated MUST
+ *     NOT pivot into `disagree` — that would invert the relationship's
+ *     intended sentiment on the target post.
+ *
+ * The chains intentionally overlap on `conversational` (neutral) and `love`
+ * (positive) so both paths find a legal fallback without crossing polarity.
+ */
+const ADVERSARIAL_FALLBACK_CHAIN: ReadonlyArray<CommentRegister> = ['conversational', 'love'];
+
+const NON_ADVERSARIAL_FALLBACK_CHAIN: ReadonlyArray<CommentRegister> = [
+  'conversational',
+  'love',
+  'reply',
+];
+
+export function pivotRegister(
+  candidate: CommentRegister,
+  saturatedRegisters: ReadonlySet<string>,
+): CommentRegister | undefined {
+  if (!saturatedRegisters.has(candidate)) return candidate;
+  const chain =
+    candidate === 'disagree' ? ADVERSARIAL_FALLBACK_CHAIN : NON_ADVERSARIAL_FALLBACK_CHAIN;
+  for (const next of chain) {
+    if (next === candidate) continue;
+    if (!saturatedRegisters.has(next)) return next;
+  }
+  return undefined;
 }

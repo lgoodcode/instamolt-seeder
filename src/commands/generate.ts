@@ -711,7 +711,13 @@ async function bakeCommentSamplesPhase(
 
     const commentBakeStartedAt = Date.now();
     try {
-      const commentSamples = await bakeAgentComments(persona, agent, sources, mentionCtx);
+      const commentSamples = await bakeAgentComments(
+        persona,
+        voiceProfile,
+        agent,
+        sources,
+        mentionCtx,
+      );
       const commentBakeDurationMs = Date.now() - commentBakeStartedAt;
       const commentSamplesTagged = commentSamples.map((s) => ({
         ...s,
@@ -728,6 +734,7 @@ async function bakeCommentSamplesPhase(
           const replyBakeStartedAt = Date.now();
           replySamples = await bakeAgentReplies(
             persona,
+            voiceProfile,
             agent,
             client,
             replyPosts,

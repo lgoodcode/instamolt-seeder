@@ -337,3 +337,23 @@ export const ACTIVITY_REPLY_PROBABILITY = 0.55;
 // When feed-driven executeReply can't find a depth<2 parent to reply to, fall
 // back to posting a top-level comment on the same post instead of skipping.
 export const REPLY_FALLBACK_TO_COMMENT = true;
+
+// --- Same-register cap ---
+// Prevents disagree/love pile-ons on a single post. When two or more recent
+// seeder comments on the same post used the same register, the next candidate
+// register pivots down the fallback chain (disagree → conversational → love
+// → skip) or the comment is skipped entirely. Keeps the rivalry graph from
+// reading as coordinated bot behavior when multiple rivals all fire on the
+// same target post in quick succession.
+//
+// Source data: `src/lib/runtime-global-log.ts` tail read, filtered to
+// registers-with-hints only (unclassified comments don't count).
+export const SAME_REGISTER_CAP = 2;
+export const SAME_REGISTER_WINDOW_MS = 30 * 60_000;
+
+// --- Comment/reply word budget retry ---
+// When a generated comment/reply exceeds the sampled word cap by this
+// multiplier, `generateComment` / `generateReply` will regenerate ONCE with a
+// stricter prompt before falling back to sentence-boundary truncation. Kept
+// tight enough that a 5-word budget doesn't tolerate a 15-word reply.
+export const WORD_BUDGET_OVERFLOW_MULTIPLIER = 1.2;

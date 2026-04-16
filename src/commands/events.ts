@@ -16,12 +16,54 @@ import * as ui from '@/lib/ui';
 import type { SeederEvent, SeederEventType } from '@/types';
 
 export interface EventsOptions {
-  /** Scope the report to a single session id (matches `sessionId` exactly). */
+  /**
+   * Scope the report to a single session bucket. Plain `sess-xxx` matches
+   * every bucket that carries that raw `sessionId`. The command emits
+   * `session_start` per cycle inside `engage --loop` and per tick inside
+   * `engage-continuous`, so a single process's `sessionId` can open many
+   * buckets; disambiguate a specific one with `sess-xxx#N` (1-based,
+   * matches the `#N` ordinal rendered in the unfiltered summary).
+   */
   session?: string;
   /** Time cutoff — accepts `30m`, `2h`, `3d` duration form, or an ISO timestamp. */
   since?: string;
   /** Show every session instead of just the most recent {@link DEFAULT_SESSIONS_SHOWN}. */
   all?: boolean;
+}
+
+interface SessionFilter {
+  sessionId: string;
+  /** When set, only match the Nth bucket for the given sessionId. */
+  ordinal?: number;
+}
+
+/**
+ * Split a `--session` value into its `sessionId` and optional `#N` ordinal.
+ * `sess-abc` → `{ sessionId: 'sess-abc' }`, `sess-abc#3` → `{ sessionId: 'sess-abc', ordinal: 3 }`.
+ * Throws on an empty sessionId, an empty ordinal (`sess-abc#`), or a
+ * non-positive ordinal (`sess-abc#0`) so a typo surfaces at CLI parse
+ * time instead of silently dropping every event. Split on the LAST `#`
+ * so a sessionId that happens to contain `#` isn't mis-parsed (platform
+ * sessionIds are `sess-<uuid>` today, but be defensive).
+ */
+function parseSessionFilter(raw: string): SessionFilter {
+  const hashIdx = raw.lastIndexOf('#');
+  if (hashIdx === -1) {
+    if (!raw) throw new Error('events: --session value cannot be empty');
+    return { sessionId: raw };
+  }
+  const sessionId = raw.slice(0, hashIdx);
+  const ordinalStr = raw.slice(hashIdx + 1);
+  if (!sessionId) {
+    throw new Error(`events: --session "${raw}" has an empty sessionId before the #`);
+  }
+  const ordinal = Number(ordinalStr);
+  if (!ordinalStr || !Number.isInteger(ordinal) || ordinal < 1) {
+    throw new Error(
+      `events: --session ordinal "#${ordinalStr}" must be a positive integer (e.g. sess-abc#3)`,
+    );
+  }
+  return { sessionId, ordinal };
 }
 
 /**
@@ -43,11 +85,15 @@ const DURATION_MULTIPLIERS_MS: Record<string, number> = {
 interface SessionSummary {
   sessionId: string;
   /**
-   * 1-based ordinal when the same `sessionId` opens multiple sessions. The
-   * stats-resume window in `initEventLogger` reuses a sessionId across
-   * process restarts for up to 24h, so the raw id is not unique per run —
-   * bucketing on `session_start` boundaries and disambiguating with this
-   * ordinal is what lets `pnpm events` show one row per actual process run.
+   * 1-based ordinal for the Nth `session_start` seen with this `sessionId`
+   * in the events stream. `initEventLogger` mints a fresh `sessionId` on
+   * every process start (including resumes), so collisions across processes
+   * are not the driver — the ordinal exists because `engage --loop` emits
+   * `session_start` per cycle and `engage-continuous` emits it per tick,
+   * so a single process writes many buckets under one `sessionId`. Also
+   * disambiguates pre-decoupling logs where resumed sessions shared an id.
+   * `undefined` for the first bucket under a given id to keep single-bucket
+   * sessions visually clean; `2+` renders as a `#N` suffix.
    */
   ordinal?: number;
   /** Whether this bucket was opened by a `session_start` event (vs orphan events). */
@@ -134,19 +180,25 @@ export async function events(opts: EventsOptions = {}): Promise<void> {
   }
 
   const sinceMs = opts.since ? parseSince(opts.since) : undefined;
+  const sessionFilter = opts.session ? parseSessionFilter(opts.session) : undefined;
 
   const globalCounts = new Map<SeederEventType, number>();
   const globalFirst = new Map<SeederEventType, string>();
   const globalLast = new Map<SeederEventType, string>();
   // Bucket by `session_start` boundaries in the event stream, NOT by
-  // `sessionId` alone: the stats-resume window reuses a sessionId across
-  // process restarts for up to 24h, so a raw-sessionId bucket conflates
-  // dozens of real runs into one row. Each `session_start` opens a new
+  // `sessionId` alone: `engage --loop` and `engage-continuous` both emit
+  // one `session_start` per cycle/tick, so a single process writes many
+  // buckets under the same `sessionId`. Each `session_start` opens a new
   // bucket; `session_end` stamps a duration but doesn't close the bucket
   // (trailing orphan events after an unclean exit stay attached to their
   // originating run).
   const sessionsList: SessionSummary[] = [];
   const sidOrdinals = new Map<string, number>();
+  // Running ordinal per sessionId as we walk the stream. Drives the filter
+  // when the user passes `--session sess-xxx#N` — each non-`session_start`
+  // event attaches to the most-recent bucket for its sessionId, so the
+  // current value here is the bucket it belongs to.
+  const currentOrdinalBySid = new Map<string, number>();
   let current: SessionSummary | undefined;
   let parsed = 0;
   let skipped = 0;
@@ -161,7 +213,20 @@ export async function events(opts: EventsOptions = {}): Promise<void> {
       continue;
     }
     if (sinceMs !== undefined && Date.parse(evt.timestamp) < sinceMs) continue;
-    if (opts.session && evt.sessionId !== opts.session) continue;
+
+    // Track the running ordinal BEFORE the filter so the filter can match
+    // on `(sessionId, ordinal)` pairs. session_start advances the ordinal;
+    // every other event inherits the most-recent one for its sessionId.
+    const sid = evt.sessionId ?? 'unsessioned';
+    if (evt.eventType === 'session_start') {
+      currentOrdinalBySid.set(sid, (currentOrdinalBySid.get(sid) ?? 0) + 1);
+    }
+    const eventOrdinal = currentOrdinalBySid.get(sid) ?? 0;
+
+    if (sessionFilter) {
+      if (evt.sessionId !== sessionFilter.sessionId) continue;
+      if (sessionFilter.ordinal !== undefined && eventOrdinal !== sessionFilter.ordinal) continue;
+    }
     parsed++;
 
     globalCounts.set(evt.eventType, (globalCounts.get(evt.eventType) ?? 0) + 1);
@@ -169,12 +234,10 @@ export async function events(opts: EventsOptions = {}): Promise<void> {
     globalLast.set(evt.eventType, evt.timestamp);
 
     if (evt.eventType === 'session_start') {
-      const sid = evt.sessionId ?? 'unsessioned';
-      const ordinal = (sidOrdinals.get(sid) ?? 0) + 1;
-      sidOrdinals.set(sid, ordinal);
+      sidOrdinals.set(sid, eventOrdinal);
       current = {
         sessionId: sid,
-        ordinal: ordinal > 1 ? ordinal : undefined,
+        ordinal: eventOrdinal > 1 ? eventOrdinal : undefined,
         hasSessionStart: true,
         startedAt: evt.timestamp,
         counts: new Map(),
@@ -192,7 +255,7 @@ export async function events(opts: EventsOptions = {}): Promise<void> {
       // intersects one) land in a leading orphan bucket so counts still match
       // the global totals.
       current = {
-        sessionId: evt.sessionId ?? 'unsessioned',
+        sessionId: sid,
         hasSessionStart: false,
         startedAt: evt.timestamp,
         counts: new Map(),
@@ -240,11 +303,17 @@ export async function events(opts: EventsOptions = {}): Promise<void> {
   ui.note(`Totals (${headerScope})`, totalsLines.join('\n'));
 
   // --- Per-session breakdown ---
-  if (!opts.session) {
+  // Rendered in both filtered and unfiltered modes. In filtered mode without
+  // a `#N` ordinal this shows every bucket that shares the raw `sessionId`
+  // (helpful for picking the right ordinal to drill into); with `#N` it
+  // shows just that one bucket — so the totals block and breakdown agree.
+  {
     const shown = opts.all ? sessionsList : sessionsList.slice(-DEFAULT_SESSIONS_SHOWN);
     const label = opts.all
       ? `All sessions (${sessionsList.length})`
-      : `Recent sessions (${shown.length}/${sessionsList.length})`;
+      : sessionFilter
+        ? `Matched sessions (${sessionsList.length})`
+        : `Recent sessions (${shown.length}/${sessionsList.length})`;
     ui.section(label);
 
     for (const summary of shown) {

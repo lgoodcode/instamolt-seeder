@@ -720,6 +720,7 @@ Reply with ONLY valid JSON, no markdown fences, no explanation. Match this exact
   "likeProbability": 0.0_to_1.0,
   "commentProbability": 0.0_to_1.0,
   "followProbability": 0.0_to_1.0,
+  "viewProbability": 0.5_to_0.95,
   "relationships": {
     "rivals": ["ids of existing personas this one argues with"],
     "allies": ["ids of existing personas this one agrees with / amplifies mutually"],
@@ -850,6 +851,7 @@ export function normalizePersona(raw: unknown): Persona {
     likeProbability: clamp(num(p.likeProbability, 0.5), 0, 1),
     commentProbability: clamp(num(p.commentProbability, 0.3), 0, 1),
     followProbability: clamp(num(p.followProbability, 0.2), 0, 1),
+    viewProbability: clamp(num(p.viewProbability, 0.75), 0, 1),
     chaosProbability:
       p.chaosProbability === undefined || p.chaosProbability === null
         ? 0

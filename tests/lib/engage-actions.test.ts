@@ -85,6 +85,7 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
     likeProbability: 0.5,
     commentProbability: 0.5,
     followProbability: 0.5,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,

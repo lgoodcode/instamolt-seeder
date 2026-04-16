@@ -156,6 +156,26 @@ vi.mock('@/lib/action-scheduler', () => ({
   }),
 }));
 
+// ---------------- views mock ----------------
+//
+// lurkFeedSlice is the call we want to assert on for the persona-gating +
+// pre-quota-ordering tests. The real helper hits `client.getPost`, which
+// isn't on the minimal InstaMoltClient mock above — mocking it here lets
+// the gating tests assert call/no-call directly without relying on the
+// internal error path.
+
+const viewsMocks = vi.hoisted(() => ({
+  lurkFeedSlice: vi.fn<() => Promise<{ attempted: number; succeeded: number }>>(async () => ({
+    attempted: 0,
+    succeeded: 0,
+  })),
+  fanOutPostViews: vi.fn<() => Promise<{ attempted: number; succeeded: number }>>(async () => ({
+    attempted: 0,
+    succeeded: 0,
+  })),
+}));
+vi.mock('@/lib/views', () => viewsMocks);
+
 // ---------------- quota mock ----------------
 
 const quotaMocks = vi.hoisted(() => ({
@@ -220,6 +240,7 @@ function makePersona(id: string, overrides: Partial<Persona> = {}): Persona {
     likeProbability: 1,
     commentProbability: 1,
     followProbability: 1,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
@@ -346,6 +367,8 @@ describe('engage-continuous', () => {
     growthMocks.formatGrowthStatus.mockReturnValue('Growth: mocked');
     growthCmdMocks.generate.mockReset();
     growthCmdMocks.publish.mockReset();
+    viewsMocks.lurkFeedSlice.mockClear();
+    viewsMocks.fanOutPostViews.mockClear();
 
     // Default happy-path fixture setup
     personaMocks.loadPersonas.mockResolvedValue(
@@ -508,6 +531,61 @@ describe('engage-continuous', () => {
     expect(schedulerMocks.injectBonusSession).toHaveBeenCalledTimes(1);
     const callArg = schedulerMocks.injectBonusSession.mock.calls[0]?.[0] as { agentname: string };
     expect(callArg.agentname).toBe('alpha');
+  });
+
+  it('lurk pass fires BEFORE pickWeightedAction so quota-exhausted agents still lurk', async () => {
+    // BLUEPRINT §3.3 + SEEDING.md promise the lurk runs at the top of every
+    // tick. An earlier version ran it AFTER pickWeightedAction, so the most
+    // realistic "lurker" population (agents sitting at quota cap) never
+    // scrolled at all. This test locks the contract: even when
+    // pickWeightedAction returns null, the lurk has already fired.
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+
+    quotaMocks.checkAvailability.mockReturnValue({ ok: false, reason: 'quota_exhausted' });
+
+    schedulerMocks.pop
+      .mockReturnValueOnce({ agentname: 'alpha', nextTickAt: Date.now() })
+      .mockImplementation(() => {
+        process.emit('SIGINT');
+        return undefined;
+      });
+
+    // dryRun: false so the lurk block is actually entered. (dryRun short-
+    // circuits by design because the GET still hits the platform.)
+    await engageContinuous({ maxActions: 1, dryRun: false, noGrowth: true });
+
+    expect(viewsMocks.lurkFeedSlice).toHaveBeenCalledTimes(1);
+    expect(schedulerMocks.rescheduleQuotaExhausted).toHaveBeenCalledTimes(1);
+    expect(engageActionsMocks.dispatchAction).not.toHaveBeenCalled();
+  });
+
+  it('lurk pass is skipped when persona.viewProbability is 0', async () => {
+    // Uniform per-agent lurking violates the heterogeneity rule — a miss on
+    // the persona roll means the agent does NOT scroll on that tick. Zero
+    // is the hard-off case (no roll can succeed) that proves the gate exists.
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([['test-persona', makePersona('test-persona', { viewProbability: 0 })]]),
+    );
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+
+    schedulerMocks.pop
+      .mockReturnValueOnce({ agentname: 'alpha', nextTickAt: Date.now() })
+      .mockImplementation(() => {
+        process.emit('SIGINT');
+        return undefined;
+      });
+
+    engageActionsMocks.dispatchAction.mockResolvedValue({
+      status: 'ok',
+      kind: 'like',
+      detail: 'liked @x',
+    });
+
+    await engageContinuous({ maxActions: 1, dryRun: false, noGrowth: true });
+
+    expect(viewsMocks.lurkFeedSlice).not.toHaveBeenCalled();
   });
 
   it('quota exhaustion: pickWeightedAction returns null → rescheduleQuotaExhausted, no dispatch', async () => {

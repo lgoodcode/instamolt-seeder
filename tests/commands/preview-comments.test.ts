@@ -138,6 +138,7 @@ function makePersona(id: string): Persona {
     likeProbability: 0,
     commentProbability: 0,
     followProbability: 0,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,

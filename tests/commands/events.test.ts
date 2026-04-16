@@ -216,8 +216,11 @@ describe('events command', () => {
     expect(body).toMatch(/like\s+1/);
     expect(body).toMatch(/comment\s+1/);
     expect(body).not.toMatch(/agent_drafted/);
-    // Session filter suppresses the per-session breakdown block
-    expect(vi.mocked(ui.section)).not.toHaveBeenCalled();
+    // Filtered mode now renders the per-session breakdown too — suppressing
+    // it in the old version meant `--session <id>` swallowed the very
+    // bucket the operator wanted to inspect (no timing/counts detail). Per
+    // CodeRabbit feedback on PR #14, show it either way.
+    expect(vi.mocked(ui.section)).toHaveBeenCalled();
   });
 
   it('filters by --since duration form', async () => {
@@ -255,5 +258,78 @@ describe('events command', () => {
     const body = totalsCall![1] as string;
     expect(body).toMatch(/like\s+1/);
     expect(body).toMatch(/comment\s+1/);
+  });
+
+  it('--session <id>#N selects a single ordinal bucket within a shared sessionId', async () => {
+    // `engage --loop` and `engage-continuous` both emit `session_start` per
+    // cycle/tick, so one process writes many buckets under one sessionId.
+    // Without the `#N` ordinal, --session would aggregate every bucket into
+    // one report — misleading when the operator wants to inspect a single
+    // run. Each non-start event in the stream inherits the most-recent
+    // ordinal for its sessionId, and the filter matches on (sid, ordinal).
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-shared',
+        details: { command: 'engage', cycleNumber: 1 },
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:01.000Z',
+        eventType: 'like',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:02.000Z',
+        eventType: 'session_end',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:10.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-shared',
+        details: { command: 'engage', cycleNumber: 2 },
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:11.000Z',
+        eventType: 'comment',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:12.000Z',
+        eventType: 'comment',
+        sessionId: 'sess-shared',
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:13.000Z',
+        eventType: 'session_end',
+        sessionId: 'sess-shared',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events({ session: 'sess-shared#2' });
+
+    // Only bucket #2 should be reflected in totals: 2 comment events +
+    // the session_start/end framing. Bucket #1's single `like` must be
+    // excluded entirely.
+    const noteCalls = vi.mocked(ui.note).mock.calls;
+    const totalsCall = noteCalls.find((c) => String(c[0]).startsWith('Totals'));
+    const body = totalsCall![1] as string;
+    expect(body).toMatch(/comment\s+2/);
+    expect(body).not.toMatch(/like/);
+
+    // The per-session breakdown should render in filtered mode now (the
+    // old code suppressed it when --session was set, so the operator lost
+    // the timing/counts block for the very bucket they wanted to inspect).
+    expect(vi.mocked(ui.section)).toHaveBeenCalled();
+  });
+
+  it('rejects --session with a malformed "#N" ordinal', async () => {
+    fsState.files.set(EVENTS_PATH, evt({ eventType: 'like' }));
+    await expect(events({ session: 'sess-abc#' })).rejects.toThrow(
+      /--session ordinal.*positive integer/,
+    );
+    await expect(events({ session: 'sess-abc#0' })).rejects.toThrow(/positive integer/);
   });
 });

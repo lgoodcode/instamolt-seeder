@@ -411,7 +411,17 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
           // and keeps the platform's view-to-like / view-to-comment ratios
           // in a believable range. Server-side dedup means re-running
           // within 24h is a no-op per (viewer, post) pair.
-          if (config.lurkViewsPerAgent > 0) {
+          //
+          // Gated on `persona.viewProbability` so low-activity archetypes
+          // (observers, near-dormant) scroll less than high-activity ones
+          // (engagement-maxxing chronic scrollers). Uniform per-agent
+          // lurking across the fleet violates CLAUDE.md's heterogeneity
+          // rule for new engagement behaviors.
+          if (
+            config.lurkViewsPerAgent > 0 &&
+            persona.viewProbability > 0 &&
+            Math.random() < persona.viewProbability
+          ) {
             sp.message(`@${agent.agentname} — lurking ${config.lurkViewsPerAgent} posts`);
             const lurk = await lurkFeedSlice({
               client,

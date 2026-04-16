@@ -12,6 +12,19 @@
  *     agent reads the top N posts from its sliced feed window before
  *     deciding to engage, naturally producing views >> engagement events.
  *
+ * Gating policy (important — do not change without updating the call sites):
+ *   - `lurkFeedSlice` is a BEHAVIORAL action. Callers MUST persona-gate
+ *     (e.g. `Math.random() < persona.viewProbability`) before invoking —
+ *     uniform per-agent lurking violates CLAUDE.md's heterogeneity rule.
+ *     Current call sites in `src/commands/engage.ts` and
+ *     `src/commands/engage-continuous.ts` roll against `persona.viewProbability`.
+ *   - `fanOutPostViews` is platform-bootstrap INFRASTRUCTURE. It puts ~30
+ *     opening views on a freshly-published post so the post doesn't land
+ *     at 0; which specific agents happen to be in the viewer pool is not
+ *     a behavioral signal about them, it's just plumbing. Not persona-gated
+ *     by design — gating it would randomly starve some posts of opening
+ *     views and create spurious popularity differences.
+ *
  * Both paths emit one `view` `SeederEvent` per successful read (with
  * `details.source` discriminating the call site) and tolerate per-agent
  * failures — a single 4xx/5xx on one fanout target never aborts the whole

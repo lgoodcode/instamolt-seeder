@@ -81,6 +81,18 @@ vi.mock('@/services/instamolt-api', () => ({
   },
 }));
 
+// ---------------- views mock ----------------
+// Mock lurkFeedSlice directly so the persona-gating test can assert
+// call/no-call without relying on the API client's missing getPost.
+
+const viewsMocks = vi.hoisted(() => ({
+  lurkFeedSlice: vi.fn<() => Promise<{ attempted: number; succeeded: number }>>(async () => ({
+    attempted: 0,
+    succeeded: 0,
+  })),
+}));
+vi.mock('@/lib/views', () => viewsMocks);
+
 // ---------------- event-logger mock ----------------
 // Event-logger writes JSONL files via node:fs (sync). Mock it as a no-op so
 // tests never touch the real filesystem and so we can assert on calls if
@@ -220,6 +232,7 @@ function makePersona(id: string): Persona {
     likeProbability: 1, // Always like
     commentProbability: 1,
     followProbability: 1, // Always follow
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
@@ -281,6 +294,7 @@ describe('engage', () => {
     eventLoggerMocks.logSkippedAction.mockReset();
     eventLoggerMocks.flushStats.mockReset();
     eventLoggerMocks.updateAgentCounts.mockReset();
+    viewsMocks.lurkFeedSlice.mockClear();
 
     personaMocks.loadPersonas.mockResolvedValue(
       new Map([['test-persona', makePersona('test-persona')]]),
@@ -312,6 +326,42 @@ describe('engage', () => {
     const out = getLogOutput();
     expect(out).toMatch(/No registered agents/i);
     expect(feedCacheMocks.loadFeedCacheStrict).not.toHaveBeenCalled();
+  });
+
+  it('lurk pass is skipped when persona.viewProbability is 0', async () => {
+    // Per CLAUDE.md's heterogeneity rule, the lurk pass must be gated on a
+    // persona probability so low-activity archetypes don't scroll uniformly
+    // with high-activity ones. A value of 0 is the hard-off case — the
+    // agent never lurks, never emits `view` events from the engage path.
+    personaMocks.loadPersonas.mockResolvedValue(
+      new Map([['test-persona', { ...makePersona('test-persona'), viewProbability: 0 }]]),
+    );
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([{ id: 'post-1', agentname: 'beta', caption: 'hi' }]),
+    );
+
+    await engage({ agents: 1, actionsLimit: 1 });
+
+    expect(viewsMocks.lurkFeedSlice).not.toHaveBeenCalled();
+  });
+
+  it('lurk pass fires when persona.viewProbability is 1', async () => {
+    // Symmetric with the above: viewProbability=1 means the roll always
+    // succeeds, so every selected agent runs lurkFeedSlice once per cycle.
+    primeAgent('alpha');
+    fsState.dirEntries.set('./output/agents', ['alpha']);
+    feedCacheMocks.loadFeedCacheStrict.mockResolvedValue(
+      feedCacheFromLegacy([
+        { id: 'post-1', agentname: 'beta', caption: 'hi' },
+        { id: 'post-2', agentname: 'beta', caption: 'yo' },
+      ]),
+    );
+
+    await engage({ agents: 1, actionsLimit: 1 });
+
+    expect(viewsMocks.lurkFeedSlice).toHaveBeenCalledTimes(1);
   });
 
   it('runs one cycle against a single agent with likes/comments/follows', async () => {

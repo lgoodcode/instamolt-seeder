@@ -163,6 +163,21 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
   logEvent({ eventType: 'session_start', success: true, details: { command: 'publish-drafts' } });
   ui.intro('Publish');
 
+  // Wrap the whole flow so every exit path — declined target, missing
+  // agents.json, empty agent list, thrown mid-publish, happy path — emits
+  // `session_end`, drains pending events, and flushes stats. Without this
+  // the three early returns below would leave the session open in
+  // `pnpm events` output and lose the final batch of events from the tail.
+  try {
+    await publishInner(options);
+  } finally {
+    logEvent({ eventType: 'session_end', success: true });
+    await drainWrites();
+    flushStats();
+  }
+}
+
+async function publishInner(options: PublishOptions): Promise<void> {
   if (!(await confirmTarget('publish-drafts', { yes: options.yes }))) {
     ui.outro(ui.color.yellow(`${ui.symbol.warn} publish-drafts aborted — target not confirmed`));
     return;
@@ -949,10 +964,6 @@ export async function publish(options: PublishOptions = {}): Promise<void> {
       { label: 'errors', value: errorCount, tone: errorCount > 0 ? 'err' : 'info' },
     ]),
   );
-
-  logEvent({ eventType: 'session_end', success: true });
-  await drainWrites();
-  flushStats();
 
   ui.outro(
     errorCount > 0

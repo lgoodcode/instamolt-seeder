@@ -476,31 +476,27 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         continue;
       }
 
-      const quota = await loadOrInitQuota(agent, persona);
-      const actionKind = pickWeightedAction(quota, persona, curveWeight);
-      if (actionKind === null) {
-        scheduler.rescheduleQuotaExhausted(agent);
-        continue;
-      }
+      const client = new InstaMoltClient(agent.apiKey);
 
-      const ctx: EngageContext = {
-        client: new InstaMoltClient(agent.apiKey),
-        feedCache,
-        personas,
-        voiceProfiles,
-        authorPersonaLookup,
-        dryRun,
-      };
-
-      // Lurk pass — before the agent picks an action, it "scrolls past" the
-      // top N posts in the feed cache snapshot and registers as a viewer
-      // server-side. Produces views >> engagement events organically. Each
-      // (viewer, post) pair is server-side-deduped to once per 24h, so this
-      // re-runs cheaply across many ticks. Skipped under dry-run because
-      // the GET still hits the platform.
-      if (!dryRun && config.lurkViewsPerAgent > 0) {
+      // Lurk pass — runs BEFORE quota + action selection so a quota-exhausted
+      // agent still "scrolls past" the feed snapshot. In real user behavior
+      // viewing is the cheapest interaction (no write, no quota) and happens
+      // whether or not the agent goes on to post/comment/like, so gating
+      // this on the quota would starve agents that sit at the cap for hours.
+      // BLUEPRINT.md §3.3 + SEEDING.md both promise the lurk pass runs at
+      // the top of every tick — keep this block ahead of `pickWeightedAction`.
+      //
+      // Gated on `persona.viewProbability` so low-activity archetypes scroll
+      // less than high-activity ones. Skipped under dry-run because the
+      // GET still hits the platform.
+      if (
+        !dryRun &&
+        config.lurkViewsPerAgent > 0 &&
+        persona.viewProbability > 0 &&
+        Math.random() < persona.viewProbability
+      ) {
         const lurk = await lurkFeedSlice({
-          client: ctx.client,
+          client,
           agentname: agent.agentname,
           personaId: agent.personaId,
           posts: feedCache.file.posts,
@@ -509,6 +505,22 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         });
         cycleViews += lurk.succeeded;
       }
+
+      const quota = await loadOrInitQuota(agent, persona);
+      const actionKind = pickWeightedAction(quota, persona, curveWeight);
+      if (actionKind === null) {
+        scheduler.rescheduleQuotaExhausted(agent);
+        continue;
+      }
+
+      const ctx: EngageContext = {
+        client,
+        feedCache,
+        personas,
+        voiceProfiles,
+        authorPersonaLookup,
+        dryRun,
+      };
 
       const sp = ui.spinner();
       sp.start(`@${agent.agentname} — ${actionKind}`);

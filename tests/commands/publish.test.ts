@@ -209,6 +209,7 @@ function makePersona(id: string): Persona {
     // followProbability > 0, a zero here would silently return an empty
     // plan and break every Phase C assertion.
     followProbability: 0.5,
+    viewProbability: 1,
     relationships: { rivals: [], allies: [], amplifies: [], targets: [] },
     viralityStrategy: '',
     weight: 1,
@@ -356,6 +357,26 @@ describe('publish', () => {
       details?: { command?: string };
     };
     expect(start.details?.command).toBe('publish-drafts');
+  });
+
+  it('still emits session_end when the run has no agents to publish', async () => {
+    // Early-return paths (missing agents.json, empty agent list, declined
+    // target) used to exit without firing session_end, drainWrites, or
+    // flushStats — leaving the session open in `pnpm events` and losing
+    // the tail of queued events. The try/finally around publishInner
+    // guarantees all three fire on every exit path.
+    eventLoggerMocks.logEvent.mockClear();
+    eventLoggerMocks.flushStats.mockClear();
+    // No priming → agents.json is missing → log('error') branch runs and
+    // publishInner returns.
+    await publish({ skipFollowGraph: true });
+
+    const types = eventLoggerMocks.logEvent.mock.calls.map(
+      (c) => (c[0] as { eventType: string }).eventType,
+    );
+    expect(types[0]).toBe('session_start');
+    expect(types.at(-1)).toBe('session_end');
+    expect(eventLoggerMocks.flushStats).toHaveBeenCalledTimes(1);
   });
 
   it('--limit-agents caps the run to the first N agents alphabetically (deterministic)', async () => {

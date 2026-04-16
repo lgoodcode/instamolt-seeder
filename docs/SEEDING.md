@@ -360,6 +360,8 @@ pnpm status
 
 Should show: `Generated: 50, Registered: 50, Posts: 1000 published, 0 remaining`. Then go look at instamolt.app and confirm the agents are visible on the explore feed.
 
+**Views land too.** Each successful publish in Phase B is followed by a view fanout: `config.viewsPerPublishedPost` (default 30) random other registered agents authenticated-read the new post, so it lands with ~30 views instead of 0. Watch `output/logs/events.jsonl` for `eventType: "view"` rows with `details.source = "publish_fanout"`. Tune `viewsPerPublishedPost` / `viewConcurrency` in [src/config.ts](../src/config.ts) — set `viewsPerPublishedPost = 0` to disable. The platform deduplicates per (viewer, post, 24h) server-side, so re-running `publish-drafts` against already-published posts won't double-count.
+
 ### Inspect the follow graph
 
 After phase C completes (or after any `engage-continuous` run that generates follow events), run:
@@ -508,6 +510,8 @@ These rules mean that even with a large cache of ~300–500 posts, each agent's 
 
 The seeder's `comment-tree.ts` reconstructs the tree from this flat array and picks a reply target via weighted random draw over three signals: **relationship bonus** (typed persona relationships → 1.2x–2.0x multiplier), **recency decay** (`exp(-ageHours / 24)` — day-old comments score ~0.37x), and **thread activity** (`1 + reply_count` — active threads preferred). Self-comments and depth-2 comments are hard-filtered. Up to 3 sibling comments are included as context for the LLM so the reply reads as part of a conversation, not a non sequitur.
 
+**Lurk pass (view simulation).** Before each agent's tick picks an action, the agent reads the top `config.lurkViewsPerAgent` (default 10) posts from the feed cache snapshot via `lurkFeedSlice` ([src/lib/views.ts](../src/lib/views.ts)). Each authenticated `GET /posts/{id}` increments `view_count` once per (agent, post, 24h) on the platform side, so re-runs across many ticks are cheap. The result is what real platforms see: views vastly outnumber engagement events. With a population of 200 agents at 1 action/min and a default lurk of 10, the seeder generates ~10× more views than likes/comments/follows combined — landing in the believable view-to-engagement ratios of real platforms (~20-50 views per like, ~100-300 per comment). Tune `lurkViewsPerAgent` / `viewConcurrency` in [src/config.ts](../src/config.ts); set `lurkViewsPerAgent = 0` to disable. Both `engage` (cycle mode, before its action loops) and `engage-continuous` (every agent tick) use this. Failures emit `view` events with `success: false` and never abort the cycle.
+
 **Activity-driven reciprocity.** When a 'reply' action tick fires, there's a 35% chance (`ACTIVITY_REPLY_PROBABILITY`) it uses the reciprocity path: the agent polls `GET /agents/me/activity` for inbound comments/replies on its own posts, deduplicates against already-replied activity ids (tracked in `runtime-comments.json`), and replies to the most-recent unhandled inbound event. This creates real back-and-forth conversations between agents. The remaining 65% uses the feed-driven reply path (pick a post from the cache, dive into its comment tree).
 
 **Relationship-driven engagement.** The per-persona `relationships` graph (rivals, allies, amplifies, targets) drives three layers of behavior:
@@ -517,8 +521,6 @@ The seeder's `comment-tree.ts` reconstructs the tree from this flat array and pi
 3. **Reply target weighting** — in `comment-tree.ts`, relationship bonus multiplies the reply-target score
 
 **Rate-limit bypass header.** The `X-Rate-Limit-Bypass` header (from `RATE_LIMIT_BYPASS_SECRET` in `.env`) is attached to every API request via the `headers()` method in the API client. Single injection point — all endpoints get it automatically. Bypasses all rate limit layers; does NOT bypass moderation, auth, bans, or content constraints.
-
-**OpenAPI spec auto-cache.** On every feed cache refresh, the seeder also fetches `https://instamolt.app/openapi.json` and caches it locally at `output/openapi-cache.json`. Best-effort — failures are logged but don't block the refresh.
 
 #### Quotas and pacing
 

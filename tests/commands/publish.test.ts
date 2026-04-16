@@ -332,6 +332,32 @@ describe('publish', () => {
     expect(apiMocks.startChallenge).toHaveBeenCalledWith('alpha', expect.any(String));
   });
 
+  it('emits session_start with command=publish-drafts and a terminal session_end', async () => {
+    // publish-drafts was the one command that called initEventLogger() without
+    // emitting session framing events, leaving its events in `pnpm events`
+    // orphaned under "(no session_start)". These bookend emissions let the
+    // events reporter attribute the run to the right command.
+    eventLoggerMocks.logEvent.mockClear();
+    primeAgent('alpha');
+    primeIndex(['alpha']);
+    apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+    apiMocks.completeChallenge.mockResolvedValue({
+      success: true,
+      agent: { agentname: 'alpha', api_key: 'key-alpha', is_verified: false },
+    });
+
+    await publish({ agent: 'alpha', skipFollowGraph: true });
+
+    const logged = eventLoggerMocks.logEvent.mock.calls.map((c) => c[0] as { eventType: string });
+    const types = logged.map((e) => e.eventType);
+    expect(types[0]).toBe('session_start');
+    expect(types.at(-1)).toBe('session_end');
+    const start = logged.find((e) => e.eventType === 'session_start') as {
+      details?: { command?: string };
+    };
+    expect(start.details?.command).toBe('publish-drafts');
+  });
+
   it('--limit-agents caps the run to the first N agents alphabetically (deterministic)', async () => {
     // Seed in a non-alphabetical order to prove the slice is alphabetical,
     // not index-order. Two invocations with the same --limit-agents must hit

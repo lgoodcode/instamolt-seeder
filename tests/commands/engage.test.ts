@@ -679,9 +679,14 @@ describe('engage', () => {
     // session_start fires before session_end.
     expect(types.indexOf('session_start')).toBeLessThan(types.indexOf('session_end'));
     // Cycle number is tracked on both bookend events.
-    const starts = eventsOfType<{ details: { cycleNumber: number } }>('session_start');
+    const starts = eventsOfType<{ details: { cycleNumber: number; command?: string } }>(
+      'session_start',
+    );
     const ends = eventsOfType<{ details: { cycleNumber: number } }>('session_end');
     expect(starts[0].details.cycleNumber).toBe(1);
+    // `command: 'engage'` is stamped so `pnpm events` can label the session
+    // with the command name instead of falling back to "(unknown)".
+    expect(starts[0].details.command).toBe('engage');
     expect(ends[0].details.cycleNumber).toBe(1);
     // updateAgentCounts is called with (registered, active) — 1 agent primed,
     // 1 selected for this cycle.

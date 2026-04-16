@@ -122,10 +122,58 @@ describe('events command', () => {
     const rendered = renderConsole(consoleLogSpy);
     expect(rendered).toContain('sess-A');
     expect(rendered).toContain('generate');
-    expect(rendered).toMatch(/agent_drafted:2/);
-    expect(rendered).toMatch(/post_drafted:1/);
+    expect(rendered).toMatch(/agent_drafted\s+2/);
+    expect(rendered).toMatch(/post_drafted\s+1/);
     // Completed session renders a bounded duration, not a "+"
     expect(rendered).toMatch(/\(2m\)/);
+  });
+
+  it('labels a session with session_start-but-no-command as "(unknown)"', async () => {
+    // Distinct from the "(no session_start)" fallback — a session_start event
+    // was emitted, it just lacked `details.command` (pre-fix engage cycles
+    // did this). The per-session row still belongs to a real session, so the
+    // label must not pretend the session_start is missing.
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'session_start',
+        sessionId: 'sess-nocmd',
+        // no details.command
+      }),
+      evt({
+        timestamp: '2026-04-14T10:00:05.000Z',
+        eventType: 'like',
+        sessionId: 'sess-nocmd',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events();
+
+    const rendered = renderConsole(consoleLogSpy);
+    expect(rendered).toContain('sess-nocmd');
+    expect(rendered).toContain('(unknown)');
+    expect(rendered).not.toContain('(no session_start)');
+  });
+
+  it('labels orphan events (no session_start at all) as "(no session_start)"', async () => {
+    // Events logged by a process that never emitted session_start fall into
+    // a leading orphan bucket. The label differs from "(unknown)" because
+    // the semantics are different: here the bookend itself is missing.
+    const log = [
+      evt({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        eventType: 'like',
+        sessionId: 'sess-orphan',
+      }),
+    ].join('');
+    fsState.files.set(EVENTS_PATH, log);
+
+    await events();
+
+    const rendered = renderConsole(consoleLogSpy);
+    expect(rendered).toContain('(no session_start)');
+    expect(rendered).not.toContain('(unknown)');
   });
 
   it('flags a session without session_end as running with a trailing +', async () => {

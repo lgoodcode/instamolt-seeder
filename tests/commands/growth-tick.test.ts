@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { dirname, join as pathJoin } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ---------------- ui mock ----------------
@@ -136,10 +139,6 @@ describe('growthTick', () => {
 // because index.ts runs `main()` at module load — importing it in-process
 // would execute the dispatcher against the outer process's argv/env, which
 // can't be controlled per-test.
-
-import { execFileSync } from 'node:child_process';
-import { dirname, join as pathJoin } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 const _dirname = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = pathJoin(_dirname, '..', '..', 'src', 'index.ts');

@@ -31,6 +31,18 @@ vi.mock('node:fs/promises', () => ({
     }
     return entries;
   }),
+  stat: vi.fn(async (path: string) => {
+    if (fsState.dirEntries.has(path) || fsState.files.has(path)) {
+      const isDir = fsState.dirEntries.has(path);
+      return {
+        isDirectory: () => isDir,
+        isFile: () => !isDir,
+      };
+    }
+    const err = new Error(`ENOENT: ${path}`) as Error & { code: string };
+    err.code = 'ENOENT';
+    throw err;
+  }),
   rename: vi.fn(async (oldPath: string, newPath: string) => {
     // Collect-then-apply so we don't mutate the Map while iterating.
     // Accept both '/' and '\' as separators (Windows path.join uses '\').
@@ -917,6 +929,52 @@ describe('publish', () => {
       const onDisk = JSON.parse(fsState.files.get(newPath)!);
       expect(onDisk.apiKey).toBe('key-fresh');
       expect(onDisk.agentname).toBe('fresh_name');
+    });
+
+    it('skips a replacement candidate whose on-disk directory is already claimed', async () => {
+      // A sibling in-flight worker has already renamed itself to `sibling_name`
+      // — its directory exists on disk. The platform probe still returns
+      // available (not yet registered), so without the disk-collision guard
+      // the worker would rename ON TOP of the sibling's directory.
+      primeAgent('taken_name');
+      primeAgent('sibling_name', { apiKey: 'key-sibling' });
+      primeIndex(['taken_name', 'sibling_name']);
+
+      const conflictBody = JSON.stringify({
+        error: "Agentname 'taken_name' is already taken",
+        code: 'AGENTNAME_EXISTS',
+      });
+      apiMocks.startChallenge.mockResolvedValue({ request_id: 'r1', challenge: 'q?' });
+      // completeChallenge: first call (original name) 409s; second call (under
+      // the third candidate, after skipping sibling_name) succeeds.
+      apiMocks.completeChallenge
+        .mockRejectedValueOnce(
+          new TestInstaMoltApiError('POST', '/agents/register/complete', 409, conflictBody),
+        )
+        .mockResolvedValueOnce({
+          success: true,
+          agent: { agentname: 'fresh_name', api_key: 'key-fresh', is_verified: false },
+        });
+      // First replacement collides with sibling_name on disk → rejected;
+      // second replacement is clean.
+      llmMocks.generateAgentName
+        .mockResolvedValueOnce('sibling_name')
+        .mockResolvedValueOnce('fresh_name');
+
+      await publish({ skipFollowGraph: true });
+
+      // Sibling's directory must not have been touched.
+      expect(fsState.files.has(join('./output/agents', 'sibling_name', 'agent.json'))).toBe(true);
+      const siblingJson = JSON.parse(
+        fsState.files.get(join('./output/agents', 'sibling_name', 'agent.json'))!,
+      );
+      expect(siblingJson.apiKey).toBe('key-sibling');
+
+      // Registration eventually succeeded under fresh_name.
+      const freshJson = JSON.parse(
+        fsState.files.get(join('./output/agents', 'fresh_name', 'agent.json'))!,
+      );
+      expect(freshJson.apiKey).toBe('key-fresh');
     });
 
     it('gives up after MAX_AGENTNAME_REGISTER_RETRIES repeated 409 conflicts and does not register', async () => {

@@ -165,14 +165,18 @@ function spawnGrowthTick(targetTotal: number, minPosts: number, maxPosts: number
     logEvent({
       eventType: 'growth_child_stdout',
       success: true,
-      details: { text: chunk.toString('utf8').trim(), targetTotal },
+      details: { stream: 'stdout', text: chunk.toString('utf8').trim(), targetTotal },
     });
   });
+  // stderr chunks are informational — progress/warnings commonly flow through
+  // stderr even on a successful run, so we flag success:true and tag the
+  // stream. A real failure is surfaced by `growth_child_exit` on non-zero
+  // exit and by the `error` listener on spawn failures.
   child.stderr?.on('data', (chunk: Buffer) => {
     logEvent({
       eventType: 'growth_child_stderr',
-      success: false,
-      details: { text: chunk.toString('utf8').trim(), targetTotal },
+      success: true,
+      details: { stream: 'stderr', text: chunk.toString('utf8').trim(), targetTotal },
     });
   });
   child.on('exit', (code) => {

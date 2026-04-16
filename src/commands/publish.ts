@@ -1,4 +1,4 @@
-import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/config';
 import { CircuitAbortError, CircuitBreaker } from '@/lib/circuit-breaker';
@@ -419,14 +419,23 @@ async function publishInner(options: PublishOptions): Promise<void> {
             });
 
             // Probe-generate a new name: try up to MAX_AGENTNAME_REGISTER_RETRIES
-            // candidates, skipping any that are taken on the platform.
+            // candidates, skipping any that are taken on the platform OR already
+            // claimed by another in-flight worker's agent directory on disk.
+            // The platform `isAgentnameAvailable` probe returns `true` for names
+            // claimed only locally (not yet registered), which would otherwise
+            // cause `rename` to collide against a sibling worker's directory.
             let newName: string | undefined;
             const candidatesRejected = [...rejectedNames];
             for (let p = 0; p < MAX_AGENTNAME_REGISTER_RETRIES; p++) {
+              // Re-read the concurrent batch on every iteration so names
+              // claimed by sibling workers since the last iteration are
+              // included in the avoid-list.
+              const batchNames = prepared.map((p) => p.data.agentname);
+              const existingNames = [...batchNames, ...candidatesRejected];
               const candidate = await generateAgentName(
                 persona,
                 voiceProfile,
-                candidatesRejected,
+                existingNames,
                 candidatesRejected,
               );
               if (!candidate || candidate.length < 3) {
@@ -437,6 +446,32 @@ async function publishInner(options: PublishOptions): Promise<void> {
               const available = await probeClient.isAgentnameAvailable(candidate);
               if (!available) {
                 candidatesRejected.push(candidate);
+                continue;
+              }
+              // Guard against a sibling worker's directory already occupying
+              // the target path on disk — `fs.rename` on Windows rejects when
+              // the destination exists and on POSIX would silently overwrite.
+              const candidateDir = join(config.agentsDir, candidate);
+              let dirExists = false;
+              try {
+                await stat(candidateDir);
+                dirExists = true;
+              } catch (statErr) {
+                const code =
+                  statErr && typeof statErr === 'object' && 'code' in statErr
+                    ? (statErr as { code?: unknown }).code
+                    : undefined;
+                if (code !== 'ENOENT') throw statErr;
+              }
+              if (dirExists) {
+                candidatesRejected.push(candidate);
+                logEvent({
+                  eventType: 'registration',
+                  agentname: candidate,
+                  persona: indexAgent.personaId,
+                  success: false,
+                  details: { diskCollision: true, attempt: p + 1 },
+                });
                 continue;
               }
               newName = candidate;

@@ -434,7 +434,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
               const { generate } = await import('@/commands/generate');
               const { publish } = await import('@/commands/publish');
               await generate(targetTotal, growthConfig.postsMin, growthConfig.postsMax);
-              await publish({ limit: growthConfig.postsMax });
+              await publish({ limit: growthConfig.postsMax, yes: true });
               lastGrowthAt = Date.now();
               log(
                 'info',

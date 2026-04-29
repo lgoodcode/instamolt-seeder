@@ -16,9 +16,17 @@ import {
   shouldIncludeMentionCandidates,
 } from '@/lib/mentions';
 import { sampleWordBudget } from '@/lib/word-budget';
+import { loadActiveLoreForAgent } from '@/lore/index';
 import type { InstaMoltClient } from '@/services/instamolt-api';
 import { type CommentAgentContext, generateComment, generateReply } from '@/services/llm';
-import type { CommentSample, FeedCacheFile, Persona, RemotePost, VoiceProfile } from '@/types';
+import type {
+  CommentSample,
+  FeedCacheFile,
+  LoreRegistryFile,
+  Persona,
+  RemotePost,
+  VoiceProfile,
+} from '@/types';
 
 /**
  * Optional context the bake helpers consume to surface `@mention` candidates.
@@ -39,6 +47,20 @@ import type { CommentSample, FeedCacheFile, Persona, RemotePost, VoiceProfile } 
 export interface MentionBakeContext {
   knownAgentnames: ReadonlySet<string>;
   personaToAgentnames: ReadonlyMap<string, string[]>;
+  rand?: () => number;
+}
+
+/**
+ * Optional lore lookup spliced into the bake helpers. When supplied, each
+ * baked comment / reply rolls the share-of-comments gate (`rollLoreTier`)
+ * against the agent's group memberships and surfaces 1–2 snippets to the
+ * LLM. Callers that don't pass this — legacy tests, populations with no
+ * registry — degrade cleanly to the pre-lore prompt.
+ */
+export interface LoreBakeContext {
+  registry: LoreRegistryFile;
+  /** agentname → personaId. Used for persona-level group membership. */
+  agentnameToPersonaId: ReadonlyMap<string, string>;
   rand?: () => number;
 }
 
@@ -212,6 +234,7 @@ export async function bakeAgentComments(
   agent: CommentAgentContext,
   sources: SampleCaption[],
   mentionCtx?: MentionBakeContext,
+  loreCtx?: LoreBakeContext,
 ): Promise<CommentSample[]> {
   const samples: CommentSample[] = [];
   const priorTexts: string[] = [];
@@ -233,6 +256,15 @@ export async function bakeAgentComments(
         })
       : [];
 
+    const lore = loreCtx
+      ? loadActiveLoreForAgent({
+          registry: loreCtx.registry,
+          agentname: agent.agentname,
+          agentnameToPersonaId: loreCtx.agentnameToPersonaId,
+          rand: loreCtx.rand,
+        })
+      : undefined;
+
     // Each baked sample gets its own sampled word budget — mirrors runtime
     // so the baked few-shot anchors span the full length distribution
     // instead of all landing at the default essay length.
@@ -252,6 +284,8 @@ export async function bakeAgentComments(
       false,
       mentionCandidates,
       wordBudget,
+      lore?.snippets ?? [],
+      lore?.tier,
     );
 
     // Live post author isn't necessarily in the seeded roster — the LLM can
@@ -382,6 +416,7 @@ export async function bakeAgentReplies(
   depthTargets: ReadonlyArray<0 | 1>,
   priorTexts: string[] = [],
   mentionCtx?: MentionBakeContext,
+  loreCtx?: LoreBakeContext,
 ): Promise<CommentSample[]> {
   const samples: CommentSample[] = [];
   const runningPriorTexts: string[] = [...priorTexts];
@@ -442,6 +477,15 @@ export async function bakeAgentReplies(
         })
       : [];
 
+    const lore = loreCtx
+      ? loadActiveLoreForAgent({
+          registry: loreCtx.registry,
+          agentname: agent.agentname,
+          agentnameToPersonaId: loreCtx.agentnameToPersonaId,
+          rand: loreCtx.rand,
+        })
+      : undefined;
+
     // Each baked reply gets its own sampled word budget — mirrors runtime
     // so baked reply anchors span the full length distribution.
     const wordBudget = sampleWordBudget(voiceProfile.verbosity);
@@ -463,6 +507,8 @@ export async function bakeAgentReplies(
         false,
         mentionCandidates,
         wordBudget,
+        lore?.snippets ?? [],
+        lore?.tier,
       );
     } catch {
       continue;

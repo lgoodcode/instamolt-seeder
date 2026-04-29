@@ -32,7 +32,7 @@ import {
   flattenTree,
   pickReplyTarget,
 } from '@/lib/comment-tree';
-import { logMentions } from '@/lib/event-logger';
+import { logEvent, logMentions } from '@/lib/event-logger';
 import { type LiveFeedCache, markEngaged, pickPost } from '@/lib/feed-cache';
 import {
   buildCommentCandidates,
@@ -52,6 +52,7 @@ import {
 import { appendGlobalComment, recentRegistersForPost } from '@/lib/runtime-global-log';
 import { rollTrendingHashtags } from '@/lib/trending-pool';
 import { sampleWordBudget } from '@/lib/word-budget';
+import { loadActiveLoreForAgent, parseResolvedLoreReferences } from '@/lore/index';
 import { type InstaMoltClient, ParentDeletedError } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, generateReply, rollChaos } from '@/services/llm';
 import type {
@@ -76,6 +77,11 @@ export interface EngageContext {
   voiceProfiles: Map<string, VoiceProfile>;
   authorPersonaLookup: Map<string, string>;
   dryRun: boolean;
+  /** Optional shared lore registry. When supplied, comment + reply
+   * executors roll the lore-share gate and pass snippets through to the
+   * LLM. Continuous engage loads this once at scheduler init and threads
+   * it into every per-tick context. */
+  loreRegistry?: import('@/types').LoreRegistryFile;
 }
 
 export type ActionResult =
@@ -319,6 +325,17 @@ export async function executeComment(
       })
     : [];
 
+  // Lore allusion roll. No-op when ctx.loreRegistry is undefined (the
+  // continuous scheduler always sets it once registry exists, but unit
+  // tests skip it).
+  const lore = ctx.loreRegistry
+    ? loadActiveLoreForAgent({
+        registry: ctx.loreRegistry,
+        agentname: agent.agentname,
+        agentnameToPersonaId: ctx.authorPersonaLookup,
+      })
+    : { tier: undefined, snippets: [], groups: [] };
+
   let text: string;
   try {
     text = await generateComment(
@@ -332,6 +349,8 @@ export async function executeComment(
       chaos,
       mentionCandidates,
       wordBudget,
+      lore.snippets,
+      lore.tier,
     );
   } catch (err) {
     return { status: 'error', kind: consumeAs, error: `llm: ${err}` };
@@ -394,6 +413,27 @@ export async function executeComment(
         phase: 'runtime',
         postId: post.id,
         sourceCommentId: commentResponse.comment.id,
+      });
+    }
+  }
+  // Lore reference resolution — was a surfaced snippet alluded to in the
+  // generated text? One event per matched snippet.
+  if (lore.snippets.length > 0) {
+    const refs = parseResolvedLoreReferences(text, lore.snippets);
+    for (const ref of refs) {
+      logEvent({
+        eventType: 'lore_referenced',
+        agentname: agent.agentname,
+        persona: persona.id,
+        success: true,
+        details: {
+          groupId: ref.groupId,
+          entryId: ref.entryId,
+          tier: lore.tier,
+          context: 'comment',
+          postId: post.id,
+          sourceCommentId: commentResponse.comment.id,
+        },
       });
     }
   }
@@ -700,6 +740,14 @@ export async function executeReply(
       })
     : [];
 
+  const lore = ctx.loreRegistry
+    ? loadActiveLoreForAgent({
+        registry: ctx.loreRegistry,
+        agentname: agent.agentname,
+        agentnameToPersonaId: ctx.authorPersonaLookup,
+      })
+    : { tier: undefined, snippets: [], groups: [] };
+
   let text: string;
   try {
     text = await generateReply(
@@ -717,6 +765,8 @@ export async function executeReply(
       chaos,
       mentionCandidates,
       wordBudget,
+      lore.snippets,
+      lore.tier,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -783,6 +833,25 @@ export async function executeReply(
         phase: 'runtime',
         postId: post.id,
         sourceCommentId: replyResponse.comment.id,
+      });
+    }
+  }
+  if (lore.snippets.length > 0) {
+    const refs = parseResolvedLoreReferences(text, lore.snippets);
+    for (const ref of refs) {
+      logEvent({
+        eventType: 'lore_referenced',
+        agentname: agent.agentname,
+        persona: persona.id,
+        success: true,
+        details: {
+          groupId: ref.groupId,
+          entryId: ref.entryId,
+          tier: lore.tier,
+          context: 'reply',
+          postId: post.id,
+          sourceCommentId: replyResponse.comment.id,
+        },
       });
     }
   }
@@ -917,6 +986,14 @@ export async function executeActivityDrivenReply(
   const voiceProfile = resolvedVoice.profile;
   const wordBudget = sampleWordBudget(voiceProfile.verbosity);
 
+  const lore = ctx.loreRegistry
+    ? loadActiveLoreForAgent({
+        registry: ctx.loreRegistry,
+        agentname: agent.agentname,
+        agentnameToPersonaId: ctx.authorPersonaLookup,
+      })
+    : { tier: undefined, snippets: [], groups: [] };
+
   let text: string;
   try {
     text = await generateReply(
@@ -937,6 +1014,8 @@ export async function executeActivityDrivenReply(
       chaos,
       mentionCandidates,
       wordBudget,
+      lore.snippets,
+      lore.tier,
     );
   } catch (err) {
     return { status: 'error', kind: 'reply', error: `llm: ${err}` };
@@ -996,6 +1075,25 @@ export async function executeActivityDrivenReply(
         phase: 'runtime',
         postId: activity.post.id,
         sourceCommentId: activityReplyResponse.comment.id,
+      });
+    }
+  }
+  if (lore.snippets.length > 0) {
+    const refs = parseResolvedLoreReferences(text, lore.snippets);
+    for (const ref of refs) {
+      logEvent({
+        eventType: 'lore_referenced',
+        agentname: agent.agentname,
+        persona: persona.id,
+        success: true,
+        details: {
+          groupId: ref.groupId,
+          entryId: ref.entryId,
+          tier: lore.tier,
+          context: 'reply',
+          postId: activity.post.id,
+          sourceCommentId: activityReplyResponse.comment.id,
+        },
       });
     }
   }

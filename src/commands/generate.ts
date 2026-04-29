@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { synthesizeLoreRegistry } from '@/commands/seed-lore';
 import { config, FEED_CACHE_MAX_AGE_MS } from '@/config';
 import {
   bakeAgentComments,
@@ -522,6 +523,38 @@ export async function generate(
     );
   }
 
+  // --- Phase: bake the lore registry ---
+  //
+  // Synthesizes `output/lore-registry.json` from the persona graph + agent
+  // roster. Runs BEFORE the comment bake phase so the comment baker can
+  // surface lore snippets to a fraction of agents (10–15% cryptic, 20%
+  // circlejerk, 10% fan_club shares per `config.lore*Share`).
+  //
+  // Idempotent: groups whose archetype + member set already exist in the
+  // prior registry are carried over rather than re-baked. The operator can
+  // re-bake fresh with `pnpm seed-lore --force`.
+  //
+  // Best-effort: a lore-phase failure does NOT abort the run. The comment
+  // bake phase tolerates a missing/empty registry by skipping allusions.
+  const lorePhaseStart = Date.now();
+  let loreSummary: Awaited<ReturnType<typeof synthesizeLoreRegistry>>;
+  try {
+    loreSummary = await synthesizeLoreRegistry({ silent: false });
+  } catch (err) {
+    log(
+      'warn',
+      `Lore phase failed (${err instanceof Error ? err.message : String(err)}) — continuing without lore`,
+    );
+    loreSummary = {
+      registry: { version: 1, generatedAt: new Date().toISOString(), groups: [] },
+      fresh: 0,
+      carriedOver: 0,
+      totalGroups: 0,
+      totalEntries: 0,
+    };
+  }
+  const lorePhaseMs = Date.now() - lorePhaseStart;
+
   // --- Phase: bake comment samples (Option A) ---
   //
   // Walks every agent and writes 3 sample comments per agent against random
@@ -531,10 +564,14 @@ export async function generate(
   //   2. the day-1 voice anchor that `engage` loads as `priorComments` so
   //      runtime comments don't sound generic.
   //
+  // Comment baker also reads the lore registry minted by the prior phase so
+  // ~10–15% of comments lean cryptic, ~20% are circlejerk-flavored, ~10%
+  // fan-club-flavored. Distribution targets live in `config.lore*Share`.
+  //
   // Idempotent: skips agents that already have a `comments.json`.
   const commentsPhaseStart = Date.now();
   const { commentsBaked, commentsSkipped, commentsFailed, repliesBaked } =
-    await bakeCommentSamplesPhase(allAgents, personas);
+    await bakeCommentSamplesPhase(allAgents, personas, loreSummary.registry);
   const commentsPhaseMs = Date.now() - commentsPhaseStart;
 
   const totalDurationMs = Date.now() - startedAt;
@@ -555,7 +592,12 @@ export async function generate(
         { label: 'skipped', value: commentsSkipped, tone: 'info' },
         { label: 'failed', value: commentsFailed, tone: commentsFailed > 0 ? 'err' : 'info' },
       ]),
-      `${ui.color.dim('duration:')} ${formatDuration(totalDurationMs)} ${ui.color.dim(`(agents ${formatDuration(agentsPhaseMs)}, comments ${formatDuration(commentsPhaseMs)}${created > 0 ? `, ~${formatDuration(avgPerAgentMs)}/agent` : ''})`)}`,
+      ui.summaryLine([
+        { label: 'lore groups', value: loreSummary.totalGroups, tone: 'ok' },
+        { label: 'new', value: loreSummary.fresh, tone: 'info' },
+        { label: 'lore entries', value: loreSummary.totalEntries, tone: 'info' },
+      ]),
+      `${ui.color.dim('duration:')} ${formatDuration(totalDurationMs)} ${ui.color.dim(`(agents ${formatDuration(agentsPhaseMs)}, lore ${formatDuration(lorePhaseMs)}, comments ${formatDuration(commentsPhaseMs)}${created > 0 ? `, ~${formatDuration(avgPerAgentMs)}/agent` : ''})`)}`,
       `${ui.color.dim('output:')} ${config.outputDir}/`,
       `${ui.color.dim('next:')}   pnpm publish-drafts`,
     ].join('\n'),
@@ -594,6 +636,7 @@ export async function generate(
 async function bakeCommentSamplesPhase(
   allAgents: GeneratedAgent[],
   personas: Map<string, Persona>,
+  loreRegistry?: import('@/types').LoreRegistryFile,
 ): Promise<{
   commentsBaked: number;
   commentsSkipped: number;
@@ -604,12 +647,19 @@ async function bakeCommentSamplesPhase(
   // roster. Same shape used by top-level comment and reply baking.
   const knownAgentnames = new Set<string>(allAgents.map((a) => a.agentname));
   const personaToAgentnames = new Map<string, string[]>();
+  const agentnameToPersonaId = new Map<string, string>();
   for (const a of allAgents) {
     const list = personaToAgentnames.get(a.personaId) ?? [];
     list.push(a.agentname);
     personaToAgentnames.set(a.personaId, list);
+    agentnameToPersonaId.set(a.agentname, a.personaId);
   }
   const mentionCtx: MentionBakeContext = { knownAgentnames, personaToAgentnames };
+
+  const loreCtx =
+    loreRegistry && loreRegistry.groups.length > 0
+      ? { registry: loreRegistry, agentnameToPersonaId }
+      : undefined;
 
   ui.section(
     `Comment samples — baking ${COMMENT_COUNT_MIN}–${COMMENT_COUNT_MAX} comments + ${REPLY_COUNT_MIN}–${REPLY_COUNT_MAX} thread-aware replies per agent (scaled by persona chattiness + voice verbosity)`,
@@ -717,6 +767,7 @@ async function bakeCommentSamplesPhase(
         agent,
         sources,
         mentionCtx,
+        loreCtx,
       );
       const commentBakeDurationMs = Date.now() - commentBakeStartedAt;
       const commentSamplesTagged = commentSamples.map((s) => ({
@@ -741,6 +792,7 @@ async function bakeCommentSamplesPhase(
             depthTargets,
             priorTexts,
             mentionCtx,
+            loreCtx,
           );
           replyBakeDurationMs = Date.now() - replyBakeStartedAt;
         }

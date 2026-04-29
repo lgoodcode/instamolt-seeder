@@ -196,6 +196,55 @@ export const config = {
   // at output/feed-cache.json and consumed by all agents in a continuous run.
   feedCachePath: './output/feed-cache.json',
   logsDir: './output/logs',
+
+  // --- Shared lore registry (cults / secret societies / fan clubs / circlejerks / collabs) ---
+  //
+  // Population-wide narrative state at `output/lore-registry.json`. Synthesized
+  // by `pnpm seed-lore` (auto-runs at the end of `generate`); referenced
+  // cryptically in comments + replies during bake and engage. See
+  // `src/lore/registry.ts` for the I/O and `src/lore/prompt.ts` for the
+  // share-of-comments math.
+  loreRegistryPath: './output/lore-registry.json',
+  // Per-Gemini-call concurrency for the bake phase. Each group runs
+  // generateLoreGroup (one call) + generateLoreEntries (one call). 5 in
+  // flight × ~1 RPS each is well under the Gemini ceiling and gives the
+  // synthesis loop ~5× speedup on a 30-group registry.
+  loreBakeConcurrency: 5,
+
+  // --- Lore share-of-comments targets ---
+  //
+  // The operator's distribution: ~10–15% of comments lean cryptic, ~20%
+  // are circlejerk-flavored, ~10% are fan-club-flavored, the rest are
+  // normal. These are PER-COMMENT roll probabilities applied at the call
+  // site in engage / comment-samples bake; the agent must also be a member
+  // of a group of the matching archetype for the roll to fire.
+  //
+  // The roll order is: cryptic > circlejerk > fan_club (highest tonal
+  // load first). At most one tier fires per comment — once we roll into a
+  // tier, subsequent tiers are skipped on this call.
+  loreCrypticShare: 0.12, // 10–15% target band, default mid
+  loreCirclejerkShare: 0.2,
+  loreFanClubShare: 0.1,
+  // Snippets surfaced to the LLM per allusion roll. >1 lets the LLM pick
+  // which entry fits the moment instead of having to bend a single one.
+  // 2 keeps the prompt compact while still giving choice.
+  loreSnippetsPerAllusion: 2,
+  // Saturation rolloff. When an entry's `referenceCount` >= this value, it
+  // drops to half weight in the picker so the same in-joke doesn't get
+  // hammered across thousands of comments.
+  loreEntrySaturationThreshold: 12,
+
+  // --- Lore catalog scope ---
+  //
+  // Bake-time defaults. Operator can override via `pnpm seed-lore --groups N`.
+  // At 30 groups across ~3K agents, the average agent lands in 1–2 groups
+  // (most groups are persona-clustered with 50–200 members each; a handful
+  // are tight agent-specific cabals with 2–5 members).
+  loreDefaultGroupCount: 30,
+  // Lore entries (events / in-jokes / rituals / slang / prophecies /
+  // manifestos) per group. 6 gives Gemini enough room to span the range
+  // while keeping the prompt window manageable.
+  loreEntriesPerGroup: 6,
 };
 
 // --- Quota caps + cooldowns for the continuous scheduler ---

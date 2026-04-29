@@ -7,11 +7,14 @@ import {
   type WordBudget,
   wordBudgetPromptBlock,
 } from '@/lib/word-budget';
+import { buildLoreBlock } from '@/lore/prompt';
 import type {
   CommentRegister,
   ExampleComment,
   ExamplePost,
   GeneratedAgent,
+  LoreShareTier,
+  LoreSnippet,
   Persona,
   PersonaRelationships,
   VoiceProfile,
@@ -31,7 +34,13 @@ export type LlmCallKind =
   | 'persona'
   | 'image_prompt'
   | 'avatar_prompt'
-  | 'challenge';
+  | 'challenge'
+  // Lore synthesis. `lore_group` is the per-group naming + vibe call; the
+  // entry-set call (`lore_entries`) is a separate Gemini call so a single
+  // failed entry-set doesn't lose the group's name. Both flow through the
+  // same latency-bucket aggregation as every other LLM kind.
+  | 'lore_group'
+  | 'lore_entries';
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = config.geminiModel;
@@ -1130,6 +1139,8 @@ export async function generateComment(
   chaos = false,
   mentionCandidates: string[] = [],
   wordBudget?: WordBudget,
+  loreSnippets: import('@/types').LoreSnippet[] = [],
+  loreTier?: import('@/types').LoreShareTier,
 ): Promise<string> {
   // Cap the avoid list so the prompt stays compact even after many runs.
   const avoidSample = priorComments.slice(-6);
@@ -1157,6 +1168,8 @@ IMPORTANT: Write your comment in the **${registerHint.toUpperCase()}** register 
   const chaosBlock = chaos ? chaosInstructionBlock('comment') : '';
   const mentionBlock =
     mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'comment');
+  const loreBlock =
+    loreSnippets.length === 0 || !loreTier ? '' : buildLoreBlock(loreSnippets, loreTier);
   const voiceBlock = formatVoiceBlock(voiceProfile);
   const shapeBlock = shapeAllowlistBlock(voiceProfile);
 
@@ -1171,7 +1184,7 @@ Persona traits:
 - Tone: ${persona.tone}
 - Comment style: ${persona.commentStyle}${voiceBlock}${shapeBlock}${exampleBlock}${avoidBlock}
 
-You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${mentionBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${REACT_DIRECTIVE_COMMENT}`;
+You're looking at a post by @${postAuthor}: "${postCaption}"${registerInstruction}${mentionBlock}${loreBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${REACT_DIRECTIVE_COMMENT}`;
   };
 
   return resolveWithBudget({
@@ -1225,6 +1238,8 @@ export async function generateReply(
   chaos = false,
   mentionCandidates: string[] = [],
   wordBudget?: WordBudget,
+  loreSnippets: LoreSnippet[] = [],
+  loreTier?: LoreShareTier,
 ): Promise<string> {
   const avoidSample = priorComments.slice(-6);
   const avoidBlock =
@@ -1256,6 +1271,8 @@ ${siblingContext.map((s) => `- "${s}"`).join('\n')}`;
   const chaosBlock = chaos ? chaosInstructionBlock('reply') : '';
   const mentionBlock =
     mentionCandidates.length === 0 ? '' : buildMentionBlock(mentionCandidates, 'reply');
+  const loreBlock =
+    loreSnippets.length === 0 || !loreTier ? '' : buildLoreBlock(loreSnippets, loreTier);
   const voiceBlock = formatVoiceBlock(voiceProfile);
   const shapeBlock = shapeAllowlistBlock(voiceProfile);
   const reactDirective = REACT_DIRECTIVE_REPLY.replace('@PARENT_AUTHOR', `@${parent.author}`);
@@ -1272,7 +1289,7 @@ Persona traits:
 - Comment style: ${persona.commentStyle}${voiceBlock}${shapeBlock}${exampleBlock}${avoidBlock}
 
 You are replying to ${parentLabel} from @${parent.author} who said: "${parent.text}"
-This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${mentionBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${reactDirective}`;
+This is happening on @${post.author}'s post captioned: "${postCaption}"${siblingBlock}${mentionBlock}${loreBlock}${chaosBlock}${budgetBlock}${NEGATIVE_CONSTRAINTS_BLOCK}${reactDirective}`;
   };
 
   return resolveWithBudget({
@@ -1281,4 +1298,148 @@ This is happening on @${post.author}'s post captioned: "${postCaption}"${sibling
     firstPrompt: buildPrompt(wordBudget, false),
     retryPrompt: (budget) => buildPrompt(budget, true),
   });
+}
+
+// --- Lore synthesis (consumed by `seed-lore`) ---
+
+/**
+ * One synthesized group's name + vibe. Just the metadata — the entries
+ * are a separate Gemini call (`generateLoreEntries`) so a single failed
+ * entry-set doesn't lose the group's name.
+ */
+export interface LoreGroupNameAndVibe {
+  name: string;
+  vibe: string;
+}
+
+function summarizeLorePersonas(personas: Array<{ id: string; tagline: string }>, cap = 5): string {
+  const head = personas.slice(0, cap);
+  return head.map((p) => `${p.id} (${p.tagline})`).join('; ');
+}
+
+/**
+ * Synthesize a cryptic name + one-sentence vibe for a lore group. Uses the
+ * archetype's `tonalGuidance` + `exampleGroupNames` as the few-shot anchor.
+ *
+ * Returns plain `{ name, vibe }`; never throws on parse — falls back to
+ * the first example name + a generic vibe if Gemini's response is malformed.
+ * The bake phase logs `lore_group_baked` so a fallback is observable.
+ */
+export async function generateLoreGroup(input: {
+  archetype: import('@/lore/catalog').LoreArchetype;
+  personas: Array<{ id: string; tagline: string }>;
+  orbitedAgentname?: string;
+}): Promise<LoreGroupNameAndVibe> {
+  const { archetype, personas, orbitedAgentname } = input;
+  const personaSummary = summarizeLorePersonas(personas);
+  const orbitLine = orbitedAgentname
+    ? `\nThis group orbits @${orbitedAgentname} — the name and vibe should hint at that without naming them directly.`
+    : '';
+  const prompt = `You are inventing a cryptic name and one-sentence vibe for a private group of AI agents on a social network.
+
+Archetype: ${archetype.label}
+Tonal guidance: ${archetype.tonalGuidance}
+
+Member personas: ${personaSummary || '(none — this is a solo)'}.${orbitLine}
+
+Few-shot example names — match this register exactly, do not copy:
+${archetype.exampleGroupNames.map((n) => `- ${n}`).join('\n')}
+
+Output exactly two lines, no preamble:
+NAME: <the cryptic name, lowercase preferred, max 40 chars>
+VIBE: <one sentence, max 120 chars, in the same tonal register as the guidance>`;
+
+  const raw = await callGemini(prompt, 200, 'lore_group');
+  const nameMatch = raw.match(/^\s*NAME:\s*(.+)$/im);
+  const vibeMatch = raw.match(/^\s*VIBE:\s*(.+)$/im);
+  const fallbackName = archetype.exampleGroupNames[0] ?? archetype.label.toLowerCase();
+  return {
+    name: (nameMatch?.[1] ?? fallbackName).trim().slice(0, 80),
+    vibe: (vibeMatch?.[1] ?? `${archetype.label} — members share something unspoken.`)
+      .trim()
+      .slice(0, 240),
+  };
+}
+
+/** One synthesized lore entry, pre-id-assignment. */
+export interface LoreEntryDraft {
+  kind: 'event' | 'in_joke' | 'ritual' | 'slang' | 'prophecy' | 'manifesto';
+  text: string;
+}
+
+const ENTRY_KIND_LABELS: Record<LoreEntryDraft['kind'], string> = {
+  event: 'EVENT — a thing that happened that members reference',
+  in_joke: 'IN_JOKE — a recurring private bit',
+  ritual: 'RITUAL — a thing members regularly do',
+  slang: 'SLANG — a private word or phrase with private meaning',
+  prophecy: 'PROPHECY — a thing members expect to happen',
+  manifesto: 'MANIFESTO — a one-line creed or rule',
+};
+
+/**
+ * Synthesize `count` lore entries for an already-named group. Each is a
+ * `{ kind, text }` pair — the caller (`seed-lore`) assigns ids and stamps
+ * createdAt + referenceCount.
+ *
+ * Returns whatever Gemini produced. A short response (< count entries) is
+ * acceptable — the bake phase keeps what landed and moves on.
+ */
+export async function generateLoreEntries(input: {
+  archetype: import('@/lore/catalog').LoreArchetype;
+  groupName: string;
+  vibe: string;
+  count: number;
+  orbitedAgentname?: string;
+}): Promise<LoreEntryDraft[]> {
+  const { archetype, groupName, vibe, count, orbitedAgentname } = input;
+  const orbitLine = orbitedAgentname
+    ? `\nThe group orbits @${orbitedAgentname}. Entries may obliquely reference them, but never explain why.`
+    : '';
+  const exampleBlock = archetype.exampleEntries
+    .map((e) => `[${e.kind.toUpperCase()}] ${e.text}`)
+    .join('\n');
+  const kinds = (Object.keys(ENTRY_KIND_LABELS) as Array<LoreEntryDraft['kind']>)
+    .map((k) => `  - ${ENTRY_KIND_LABELS[k]}`)
+    .join('\n');
+  const prompt = `You are writing private lore entries for a group of AI agents on a social network. The lore is the kind of thing the group alludes to without ever explaining — inside jokes, half-remembered events, recurring slang, rituals. Other agents who are NOT in the group should sense something is going on but not be able to decode it.
+
+Group: "${groupName}"
+Vibe: ${vibe}
+Archetype: ${archetype.label} — ${archetype.description}
+Tonal guidance: ${archetype.tonalGuidance}${orbitLine}
+
+Entry kinds (use a mix):
+${kinds}
+
+Example entries (different group, different lore — match the REGISTER, not the content):
+${exampleBlock}
+
+Output exactly ${count} entries. One per line. Format:
+[KIND] entry text
+
+Rules:
+- Kind in caps, in square brackets, at the start of the line.
+- Entry text MUST stay short — ideally 1 short sentence, max 220 chars.
+- Be cryptic, presumptive, oblique. Do not explain what things mean.
+- Do not repeat content from the example entries above.
+- Do not number the lines.
+- No preamble, no closing line, no commentary. Just ${count} lines.`;
+
+  const raw = await callGemini(prompt, 800, 'lore_entries');
+  const out: LoreEntryDraft[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(
+      /^\s*\[(EVENT|IN[_\s-]?JOKE|RITUAL|SLANG|PROPHECY|MANIFESTO)\]\s*(.+)\s*$/i,
+    );
+    if (!match) continue;
+    const kindRaw = match[1].toUpperCase().replace(/[\s-]/g, '_');
+    const kind = (
+      kindRaw === 'INJOKE' ? 'IN_JOKE' : kindRaw
+    ).toLowerCase() as LoreEntryDraft['kind'];
+    const text = match[2].trim();
+    if (text.length === 0) continue;
+    out.push({ kind, text: text.slice(0, 240) });
+    if (out.length >= count) break;
+  }
+  return out;
 }

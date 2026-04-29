@@ -219,6 +219,36 @@ Purpose: iteration loop for persona/prompt curation. Edit `persona.commentStyle`
 
 **Relationship to the bake phase:** `preview-comments` is read-only, `generate`'s bake phase is the persistent one. They share helpers so iterating with `preview-comments` → committing a persona edit → re-running `generate` keeps the two in sync. The typical curation loop is: edit `commentStyle` → run `preview-comments --persona X` → iterate on the prompt → once happy, delete the affected `comments.json` files and re-run `generate` (the bake phase's idempotency check on `comments.json` presence means this is a surgical re-bake).
 
+### 3.5b `seed-lore` — [src/commands/seed-lore.ts](../src/commands/seed-lore.ts)
+
+**Inputs:** `--groups <N>` (default `config.loreDefaultGroupCount = 30`), `--entries <N>` (default `config.loreEntriesPerGroup = 6`), `--force` (wipe and rebuild), `--dry-run` (skip Gemini, write archetype-default placeholder entries — useful for clustering smoke tests + CI).
+**Reads:** `output/personas/*.json`, `output/agents.json`.
+**Writes:** `output/lore-registry.json` (atomic write-then-rename — see §4.8).
+**Side effects:** ~`groups × 2` Gemini calls (one `generateLoreGroup` + one `generateLoreEntries` per group), bounded by `config.loreBakeConcurrency = 5`. Emits `lore_group_baked` + `lore_entry_baked` events.
+
+Pipeline:
+
+1. Load personas via `loadPersonas()` and the agent roster via `output/agents.json`. Empty population → return early without writing.
+2. Allocate the operator's group budget across archetypes via `allocateGroupBudget(N)` (largest-remainder rounding over the catalog's `catalogWeight`s).
+3. Cluster the population via `clusterAllArchetypes` from [src/lore/clustering.ts](../src/lore/clustering.ts):
+   - `circlejerk` — 2–4 persona rings drawn from mutual `allies` / `amplifies` edges, ranked by hashtag-Jaccard affinity.
+   - `fan_club` — orbits around `amplifies` targets; the central agent is sampled from the target persona's instances.
+   - `cult` / `secret_society` — high-affinity persona triads from `allies` graph (same algorithm, different tonal anchors).
+   - `collaboration` — agent-mode cabals of 2–3 named agents from high-affinity persona pairs (only archetype that pins specific agentnames as primary membership).
+   - `cryptic_obsession` — solo (group-of-1) lore for agents whose persona has `mentionProbability > 0` and a non-trivial hashtag pool.
+4. For each `LoreGroupSeed`, call `generateLoreGroup` (cryptic name + 1-line vibe) and `generateLoreEntries` (event/in_joke/ritual/slang/prophecy/manifesto entries). Both via Gemini, each through `mapWithConcurrency(loreBakeConcurrency)`.
+5. Stable-id-merge with the prior on-disk registry: groups whose archetype + member set already exist are carried over rather than re-baked. Stable id is derived from `slug(group.name)` so a re-run with similar synthesis carries lore forward.
+
+`generate` calls `synthesizeLoreRegistry({ silent: false })` between the dedup-index write and the comment-bake phase. Failures are non-fatal — the comment baker tolerates an empty registry by skipping allusions, and the run still produces agents + posts + comment samples.
+
+### 3.5c `preview-lore` — [src/commands/preview-lore.ts](../src/commands/preview-lore.ts)
+
+**Inputs:** `--archetype <id>` (filter), `--agent <name>` (membership filter), `--limit <N>` (cap groups printed).
+**Reads:** `output/lore-registry.json` via `loadRegistryStrict` (throws on missing — operator runs `pnpm seed-lore` first).
+**Writes:** nothing. Read-only.
+
+Curation tool. Mirrors `preview-comments` in scope: print the registry to terminal grouped by archetype, with each group's members + vibe + entries. Use during lore curation to decide whether to wipe + re-bake.
+
 ### 3.6 `engage-continuous` — [src/commands/engage-continuous.ts](../src/commands/engage-continuous.ts)
 
 **Inputs:** `--feed-pages <N>` (default 4), `--feed-limit <N>` (default 50), `--max-actions <N>` (optional hard stop), `--dry-run` (log-only, no API calls), `--verbose` (also log events to stdout), `--yes` / `-y` (skip the pre-flight target-URL confirmation prompt — same semantics as on `engage`). **Growth flags:** `--max-agents <N>` (default 200, population ceiling), `--growth-rate <N>` (default 3, logarithmic rate multiplier), `--growth-interval-hours <N>` (default 4, hours between growth ticks), `--posts-per-new <N>` (default 10, fixed posts per new agent) **or** `--min-posts-per-new <N>` + `--max-posts-per-new <N>` (rolls a random per-agent post count in the inclusive range — mutually exclusive with `--posts-per-new`), `--no-growth` (disable the growth tick entirely — engage only).

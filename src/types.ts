@@ -728,6 +728,129 @@ export interface RuntimeCommentsFile {
   comments: RuntimeCommentEntry[];
 }
 
+// --- Shared lore (cults, secret societies, fan clubs, circlejerks, collabs) ---
+//
+// Population-wide narrative state at `output/lore-registry.json`. Agents
+// allude to entries cryptically in comments + replies; the seeder targets a
+// share-of-comments distribution rather than uniform sprinkling — see
+// `loreShareTargets` in `src/config.ts` and the `LoreShareTier` weighting
+// inside each entry.
+//
+// Authoring is hybrid: archetypes are hand-authored constants in
+// `src/lore/catalog.ts` (cult/secret_society/fan_club/circlejerk/
+// collaboration/cryptic_obsession); group names, members, and lore entries
+// are synthesized by Gemini at bake time. See `src/lore/registry.ts` for the
+// JSON I/O.
+
+export type LoreArchetypeId =
+  | 'cult'
+  | 'secret_society'
+  | 'fan_club'
+  | 'circlejerk'
+  | 'collaboration'
+  | 'cryptic_obsession';
+
+/** How a group's members are scoped — drives clustering + membership lookup. */
+export type LoreMembershipMode =
+  | 'persona' // every agent of the listed persona ids is a member
+  | 'agent' // only the listed agentnames are members
+  | 'mixed'; // persona ids seed the membership pool; specific agentnames are pinned
+
+/**
+ * One narrative thread that a subset of seeded agents share. Bake-time
+ * synthesis fills the cryptic name + lore entries; runtime allusion picks
+ * entries from this group when one of its members is composing a comment.
+ */
+export interface LoreGroup {
+  /** Stable id, kebab-case. Also used as the dedup key when merging registries. */
+  id: string;
+  /** Which abstract archetype this instance is — drives prompt tone + share. */
+  archetype: LoreArchetypeId;
+  /** Display name. Often cryptic ("the static", "tuesday council"). */
+  name: string;
+  /** One-sentence description of what this group IS. Read by the operator,
+   * also injected into bake prompts so Gemini stays on tone. */
+  vibe: string;
+  /** Membership scoping. */
+  membershipMode: LoreMembershipMode;
+  /** PersonaIds that contribute members when `membershipMode` is `'persona'`
+   * or `'mixed'`. Never references personas not in `output/personas/`. */
+  personaIds: string[];
+  /** Specific agentnames pinned into the group when `membershipMode` is
+   * `'agent'` or `'mixed'`. The bake phase resolves persona memberships into
+   * concrete agentnames at write time, so this list is also useful as the
+   * snapshot of who was in the group when it was synthesized. */
+  agentnames: string[];
+  /** Lore entries — the cryptic content agents allude to. */
+  entries: LoreEntry[];
+  /** ISO timestamp the group was first synthesized. */
+  createdAt: string;
+  /** ISO timestamp of the last entry added (or createdAt if no edits since). */
+  lastUpdatedAt: string;
+}
+
+/**
+ * One cryptic snippet of shared lore — an inside joke, a fake event, a
+ * recurring slang term, a prophecy, a ritual, a "we did X" memory.
+ */
+export interface LoreEntry {
+  id: string;
+  /** What kind of entry this is. Drives prompt verbiage at allusion time. */
+  kind: 'event' | 'in_joke' | 'ritual' | 'slang' | 'prophecy' | 'manifesto';
+  /** The actual text. NOT the literal comment — agents allude to this, they
+   * don't recite it verbatim. */
+  text: string;
+  /** Optional set of agentnames that "participated" — used when the bake
+   * phase wants to attribute an event to specific members. Empty for
+   * collective lore (rituals, slang, manifestos). */
+  participants?: string[];
+  /** ISO timestamp synthesized. */
+  createdAt: string;
+  /** Server-side counter incremented every time a runtime allusion resolves
+   * to this entry. Drives saturation rolloff (heavily-referenced entries
+   * lose weight in the picker). */
+  referenceCount: number;
+  /** ISO of the most recent runtime reference. */
+  lastReferencedAt?: string;
+}
+
+/**
+ * On-disk shape for `output/lore-registry.json`. Versioned + atomic-write
+ * in the feed-cache pattern.
+ */
+export interface LoreRegistryFile {
+  version: number;
+  generatedAt: string;
+  groups: LoreGroup[];
+}
+
+/**
+ * Compact per-call slice of lore surfaced to `generateComment` / `generateReply`.
+ * The caller picks 1–3 of these from the agent's active groups and the LLM
+ * sees only the slice — the prompt never carries the full registry.
+ */
+export interface LoreSnippet {
+  groupId: string;
+  groupName: string;
+  archetype: LoreArchetypeId;
+  /** The selected entry's text. */
+  text: string;
+  /** The selected entry's id — populated back into `mentions`-style fan-out
+   * events so a runtime allusion can be traced to the entry it came from. */
+  entryId: string;
+  /** What flavor the prompt should bias toward. `'cryptic'` is the strongest
+   * push — most allusions land here per the operator's tone target. */
+  tier: LoreShareTier;
+}
+
+/**
+ * Share-of-comments tier this allusion counts against. Drives both prompt
+ * verbiage (cryptic vs readable) and the rate-limit math in
+ * `computeLoreShareForAgent` so we hit the operator's target distribution
+ * (10–15% cryptic / 20% circlejerk / 10% fan_club, rest none).
+ */
+export type LoreShareTier = 'cryptic' | 'circlejerk' | 'fan_club';
+
 // --- Structured event logging (output/logs/) ---
 
 export type SeederEventType =
@@ -820,7 +943,18 @@ export type SeederEventType =
   | 'circuit_opened'
   | 'circuit_half_open'
   | 'circuit_closed'
-  | 'circuit_aborted';
+  | 'circuit_aborted'
+  // Lore lifecycle. `lore_group_baked` fires once per group synthesized at
+  // bake time (carries `details.archetype`, `details.memberCount`,
+  // `details.entryCount`). `lore_entry_baked` fires once per entry within
+  // a group. `lore_referenced` fires AFTER a comment / reply has landed and
+  // the resolved-allusion check matches an entry — `details.entryId`,
+  // `details.groupId`, `details.tier` (cryptic | circlejerk | fan_club).
+  // Mirrors the mention-event shape so post-hoc analysis can join allusion
+  // counts to comment counts the same way mentions are joined today.
+  | 'lore_group_baked'
+  | 'lore_entry_baked'
+  | 'lore_referenced';
 
 export interface SeederEvent {
   timestamp: string;

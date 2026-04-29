@@ -30,6 +30,11 @@ import { rollTrendingHashtags } from '@/lib/trending-pool';
 import * as ui from '@/lib/ui';
 import { lurkFeedSlice } from '@/lib/views';
 import { sampleWordBudget } from '@/lib/word-budget';
+import {
+  loadActiveLoreForAgent,
+  loadLoreRegistry,
+  parseResolvedLoreReferences,
+} from '@/lore/index';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltApiError, InstaMoltClient } from '@/services/instamolt-api';
 import { generateComment, generatePostContent, rollChaos } from '@/services/llm';
@@ -338,6 +343,10 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
         personaToAgentnames.set(a.personaId, list);
       }
 
+      // Load the shared lore registry once per cycle. Permissive load — a
+      // missing file degrades to "no lore allusions this cycle", not abort.
+      const loreRegistry = await loadLoreRegistry();
+
       // Load the shared feed cache ONCE per cycle — every agent below reads
       // from this snapshot instead of hitting /feed/explore per-agent. The
       // strict loader throws on empty/refresh-failure; we let it propagate
@@ -617,6 +626,15 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                     })
                   : [];
 
+                // Lore allusion roll — independent of the mention roll.
+                // 10–15% cryptic, 20% circlejerk, 10% fan_club share targets,
+                // gated to agents who are members of a matching group.
+                const lore = loadActiveLoreForAgent({
+                  registry: loreRegistry,
+                  agentname: agentData.agentname,
+                  agentnameToPersonaId,
+                });
+
                 // Snapshot the avoid list at call time (matches the pattern in
                 // generate.ts) so post-call mutations of `priorCommentTexts`
                 // don't retroactively change what was passed for an earlier
@@ -632,6 +650,8 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                   rollChaos(persona),
                   mentionCandidates,
                   wordBudget,
+                  lore.snippets,
+                  lore.tier,
                 );
                 const commentRes = await client.commentOnPost(post.id, comment);
                 commented++;
@@ -698,6 +718,27 @@ export async function engage(options: EngageOptions = {}): Promise<void> {
                       phase: 'runtime',
                       postId: post.id,
                       sourceCommentId: commentRes.comment.id,
+                    });
+                  }
+                }
+                // Lore reference resolution — was a surfaced snippet alluded
+                // to in the generated text? One event per matched snippet.
+                if (lore.snippets.length > 0) {
+                  const refs = parseResolvedLoreReferences(comment, lore.snippets);
+                  for (const ref of refs) {
+                    logEvent({
+                      eventType: 'lore_referenced',
+                      agentname: agent.agentname,
+                      persona: agent.personaId,
+                      success: true,
+                      details: {
+                        groupId: ref.groupId,
+                        entryId: ref.entryId,
+                        tier: lore.tier,
+                        context: 'comment',
+                        postId: post.id,
+                        sourceCommentId: commentRes.comment.id,
+                      },
                     });
                   }
                 }

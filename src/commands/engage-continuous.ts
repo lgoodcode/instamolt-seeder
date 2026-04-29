@@ -76,6 +76,7 @@ import {
 } from '@/lib/quota';
 import * as ui from '@/lib/ui';
 import { lurkFeedSlice } from '@/lib/views';
+import { loadLoreRegistry } from '@/lore/index';
 import { loadPersonas } from '@/personas/index';
 import { InstaMoltClient } from '@/services/instamolt-api';
 import type { ActionKind, AgentQuota, GeneratedAgent, Persona, SeederEventType } from '@/types';
@@ -387,6 +388,11 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
 
     const authorPersonaLookup = new Map<string, string>();
     for (const a of allAgents) authorPersonaLookup.set(a.agentname, a.personaId);
+
+    // Shared lore registry — loaded once at scheduler init, reused across
+    // every tick. Permissive load: a missing or corrupt file degrades to
+    // "no lore allusions this run", which the executors handle natively.
+    const loreRegistry = await loadLoreRegistry();
 
     // Initial feed cache — will be refreshed lazily within the loop.
     const unauthClient = new InstaMoltClient();
@@ -787,6 +793,7 @@ export async function engageContinuous(options: ContinuousOptions = {}): Promise
         voiceProfiles,
         authorPersonaLookup,
         dryRun,
+        loreRegistry,
       };
 
       const sp = ui.spinner();

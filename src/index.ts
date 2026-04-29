@@ -4,6 +4,7 @@ import { generate } from '@/commands/generate';
 import { growthTick } from '@/commands/growth-tick';
 import { previewComments } from '@/commands/preview-comments';
 import { publish } from '@/commands/publish';
+import { seedLoreCommand } from '@/commands/seed-lore';
 import { seedPersonasCommand } from '@/commands/seed-personas';
 import { status } from '@/commands/status';
 import { maybePrintCommandHelp } from '@/lib/command-help';
@@ -186,6 +187,32 @@ async function main() {
       const agentName = getFlag('agent');
       const count = getFlag('count') ? parseInt(getFlag('count')!, 10) : undefined;
       await previewComments({ persona, agent: agentName, count });
+      break;
+    }
+
+    case 'seed-lore': {
+      const groupsFlag = getFlag('groups');
+      const groups = groupsFlag !== undefined ? parseInt(groupsFlag, 10) : undefined;
+      if (groupsFlag !== undefined && (Number.isNaN(groups!) || groups! <= 0)) {
+        throw new Error(`seed-lore: --groups must be a positive integer (got "${groupsFlag}")`);
+      }
+      const entriesFlag = getFlag('entries');
+      const entriesPerGroup = entriesFlag !== undefined ? parseInt(entriesFlag, 10) : undefined;
+      if (entriesFlag !== undefined && (Number.isNaN(entriesPerGroup!) || entriesPerGroup! <= 0)) {
+        throw new Error(`seed-lore: --entries must be a positive integer (got "${entriesFlag}")`);
+      }
+      const force = args.includes('--force');
+      const dryRun = args.includes('--dry-run');
+      await seedLoreCommand({ groups, entriesPerGroup, force, dryRun });
+      break;
+    }
+
+    case 'preview-lore': {
+      const { previewLore } = await import('@/commands/preview-lore');
+      const archetype = getFlag('archetype');
+      const agentName = getFlag('agent');
+      const limit = getFlag('limit') ? parseInt(getFlag('limit')!, 10) : undefined;
+      await previewLore({ archetype, agent: agentName, limit });
       break;
     }
 
